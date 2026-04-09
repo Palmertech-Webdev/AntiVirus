@@ -5,15 +5,16 @@ import { useMemo, useState } from "react";
 
 import ConsoleShell from "./ConsoleShell";
 import { useConsoleData } from "./useConsoleData";
-import { apiBaseUrl } from "../../lib/api";
+import { apiBaseUrl, createScript, updateScript } from "../../lib/api";
 import { buildConsoleViewModel } from "../../lib/console-model";
 
-type AdminTabKey = "connectors" | "access" | "deployment" | "retention" | "api" | "audit";
+type AdminTabKey = "connectors" | "access" | "deployment" | "scripts" | "retention" | "api" | "audit";
 
 const adminTabs: Array<{ key: AdminTabKey; label: string; description: string }> = [
   { key: "connectors", label: "Connectors", description: "Identity, mail, and external signal sources." },
   { key: "access", label: "Access", description: "SSO, MFA, RBAC, and operator sessions." },
   { key: "deployment", label: "Deployment", description: "Packages, rollout channels, and onboarding." },
+  { key: "scripts", label: "Scripts", description: "Stored endpoint scripts for remote response and maintenance." },
   { key: "retention", label: "Retention", description: "Telemetry, evidence, quarantine, and audit windows." },
   { key: "api", label: "API Keys", description: "Programmatic access and scope control." },
   { key: "audit", label: "Audit", description: "Recent platform and operator activity." }
@@ -51,6 +52,11 @@ export default function AdministrationView() {
   const [sessionMinutes, setSessionMinutes] = useState(480);
   const [rolloutChannel, setRolloutChannel] = useState("stable");
   const [packageLabel, setPackageLabel] = useState("windows-x64-enterprise");
+  const [selectedScriptId, setSelectedScriptId] = useState("");
+  const [scriptName, setScriptName] = useState("");
+  const [scriptDescription, setScriptDescription] = useState("");
+  const [scriptLanguage, setScriptLanguage] = useState<"powershell" | "cmd">("powershell");
+  const [scriptContent, setScriptContent] = useState("");
   const [telemetryDays, setTelemetryDays] = useState(30);
   const [evidenceDays, setEvidenceDays] = useState(90);
   const [newApiKeyName, setNewApiKeyName] = useState("");
@@ -66,6 +72,7 @@ export default function AdministrationView() {
   ]);
 
   const model = buildConsoleViewModel(snapshot);
+  const selectedScript = snapshot.scripts.find((item) => item.id === selectedScriptId) ?? snapshot.scripts[0] ?? null;
   const versionCoverage = useMemo(() => {
     const counts = new Map<string, number>();
     for (const device of snapshot.devices) {
@@ -97,6 +104,15 @@ export default function AdministrationView() {
   const visibleTabs = adminTabs.filter((tab) => matchesQuery(query, [tab.label, tab.description]));
   const currentTab = visibleTabs.some((tab) => tab.key === activeTab) ? activeTab : (visibleTabs[0]?.key ?? "connectors");
 
+  function loadScriptIntoEditor(scriptId: string) {
+    const script = snapshot.scripts.find((item) => item.id === scriptId);
+    setSelectedScriptId(scriptId);
+    setScriptName(script?.name ?? "");
+    setScriptDescription(script?.description ?? "");
+    setScriptLanguage(script?.language ?? "powershell");
+    setScriptContent(script?.content ?? "");
+  }
+
   function saveDraft(message: string) {
     setLastAction(`${message} Backend persistence for administration settings is the next implementation step.`);
   }
@@ -118,6 +134,39 @@ export default function AdministrationView() {
     setApiKeys((current) => [next, ...current]);
     setNewApiKeyName("");
     setLastAction(`Generated local API key draft for ${next.name}.`);
+  }
+
+  async function saveScript() {
+    try {
+      if (!scriptName.trim() || !scriptContent.trim()) {
+        setLastAction("Enter a script name and content before saving.");
+        return;
+      }
+
+      if (selectedScriptId) {
+        await updateScript(selectedScriptId, {
+          name: scriptName.trim(),
+          description: scriptDescription.trim() || undefined,
+          language: scriptLanguage,
+          content: scriptContent
+        });
+        setLastAction(`Updated stored script ${scriptName.trim()}.`);
+      } else {
+        const created = await createScript({
+          name: scriptName.trim(),
+          description: scriptDescription.trim() || undefined,
+          language: scriptLanguage,
+          content: scriptContent
+        });
+        setSelectedScriptId(created.id);
+        setLastAction(`Created stored script ${created.name}.`);
+      }
+
+      await refreshSnapshot("manual");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setLastAction(`Script save failed: ${message}`);
+    }
   }
 
   return (
@@ -315,6 +364,91 @@ export default function AdministrationView() {
                     <p>Devices currently reporting this agent/platform combination.</p>
                   </article>
                 ))}
+              </div>
+            </article>
+          </div>
+        ) : null}
+
+        {currentTab === "scripts" ? (
+          <div className="admin-panel-grid">
+            <article className="surface-card inset-card">
+              <p className="section-kicker">Stored scripts</p>
+              <h4>Reusable endpoint automation</h4>
+              <div className="list-stack">
+                {snapshot.scripts.filter((item) => matchesQuery(query, [item.name, item.description, item.language, item.content])).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`tab-button ${selectedScript?.id === item.id ? "is-active" : ""}`}
+                    onClick={() => loadScriptIntoEditor(item.id)}
+                  >
+                    <span>{item.name}</span>
+                    <small>
+                      {item.language} · last executed {item.lastExecutedAt ? formatDateTime(item.lastExecutedAt) : "never"}
+                    </small>
+                  </button>
+                ))}
+                {snapshot.scripts.length === 0 ? <p className="empty-state">No stored scripts yet.</p> : null}
+              </div>
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="secondary-link"
+                  onClick={() => {
+                    setSelectedScriptId("");
+                    setScriptName("");
+                    setScriptDescription("");
+                    setScriptLanguage("powershell");
+                    setScriptContent("");
+                  }}
+                >
+                  New script
+                </button>
+              </div>
+            </article>
+
+            <article className="surface-card inset-card">
+              <p className="section-kicker">Script editor</p>
+              <h4>{selectedScriptId ? "Update stored script" : "Create stored script"}</h4>
+              <div className="field-grid">
+                <label className="field-group">
+                  <span>Name</span>
+                  <input className="admin-input" value={scriptName} onChange={(event) => setScriptName(event.target.value)} />
+                </label>
+                <label className="field-group">
+                  <span>Language</span>
+                  <select
+                    className="admin-input"
+                    value={scriptLanguage}
+                    onChange={(event) => setScriptLanguage(event.target.value === "cmd" ? "cmd" : "powershell")}
+                  >
+                    <option value="powershell">PowerShell</option>
+                    <option value="cmd">CMD</option>
+                  </select>
+                </label>
+                <label className="field-group field-span-2">
+                  <span>Description</span>
+                  <input
+                    className="admin-input"
+                    value={scriptDescription}
+                    onChange={(event) => setScriptDescription(event.target.value)}
+                  />
+                </label>
+                <label className="field-group field-span-2">
+                  <span>Content</span>
+                  <textarea
+                    className="admin-input"
+                    rows={10}
+                    value={scriptContent}
+                    onChange={(event) => setScriptContent(event.target.value)}
+                    placeholder="Write the remote script content here."
+                  />
+                </label>
+              </div>
+              <div className="form-actions">
+                <button type="button" className="primary-link" onClick={() => void saveScript()}>
+                  {selectedScriptId ? "Save script" : "Create script"}
+                </button>
               </div>
             </article>
           </div>

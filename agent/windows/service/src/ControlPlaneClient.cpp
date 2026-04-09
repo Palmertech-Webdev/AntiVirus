@@ -472,7 +472,8 @@ RemoteCommand ParseRemoteCommand(const std::string& json) {
       .createdAt = RequireString(ExtractJsonString(json, "createdAt"), "createdAt"),
       .updatedAt = RequireString(ExtractJsonString(json, "updatedAt"), "updatedAt"),
       .targetPath = Utf8ToWide(ExtractJsonString(json, "targetPath").value_or("")),
-      .recordId = Utf8ToWide(ExtractJsonString(json, "recordId").value_or(""))};
+      .recordId = Utf8ToWide(ExtractJsonString(json, "recordId").value_or("")),
+      .payloadJson = Utf8ToWide(ExtractJsonString(json, "payloadJson").value_or(""))};
 }
 
 }  // namespace

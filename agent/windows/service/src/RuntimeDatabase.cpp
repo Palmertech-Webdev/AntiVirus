@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 
 #include "StringUtils.h"
 
@@ -100,12 +101,17 @@ ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
        " staged_root TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT,"
        " status TEXT NOT NULL, result_json TEXT, requires_restart INTEGER NOT NULL DEFAULT 0"
        ");"
+       "CREATE TABLE IF NOT EXISTS blocked_software ("
+       " software_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, install_location TEXT,"
+       " executable_names TEXT NOT NULL, blocked_at TEXT NOT NULL"
+       ");"
        "CREATE INDEX IF NOT EXISTS idx_telemetry_queue_queue_id ON telemetry_queue(queue_id);"
        "CREATE INDEX IF NOT EXISTS idx_command_journal_status ON command_journal(status, updated_at);"
        "CREATE INDEX IF NOT EXISTS idx_quarantine_index_status ON quarantine_index(local_status);"
        "CREATE INDEX IF NOT EXISTS idx_evidence_index_source ON evidence_index(source, recorded_at);"
        "CREATE INDEX IF NOT EXISTS idx_scan_history_recorded_at ON scan_history(recorded_at DESC);"
-       "CREATE INDEX IF NOT EXISTS idx_update_journal_status ON update_journal(status, started_at DESC);");
+       "CREATE INDEX IF NOT EXISTS idx_update_journal_status ON update_journal(status, started_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_blocked_software_name ON blocked_software(display_name);");
   return connection;
 }
 
@@ -139,6 +145,29 @@ void BindPath(sqlite3_stmt* statement, const int index, const std::filesystem::p
 std::wstring ColumnText(sqlite3_stmt* statement, const int column) {
   const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(statement, column));
   return text == nullptr ? std::wstring{} : Utf8ToWide(reinterpret_cast<const char*>(text));
+}
+
+std::wstring JoinStrings(const std::vector<std::wstring>& values) {
+  std::wstringstream stream;
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (index > 0) {
+      stream << L";";
+    }
+    stream << values[index];
+  }
+  return stream.str();
+}
+
+std::vector<std::wstring> SplitStrings(const std::wstring& value) {
+  std::vector<std::wstring> results;
+  std::wstringstream stream(value);
+  std::wstring item;
+  while (std::getline(stream, item, L';')) {
+    if (!item.empty()) {
+      results.push_back(item);
+    }
+  }
+  return results;
 }
 
 }  // namespace
@@ -649,6 +678,51 @@ std::vector<UpdateJournalRecord> RuntimeDatabase::ListUpdateJournal(const std::s
         .status = ColumnText(statement.get(), 9),
         .resultJson = ColumnText(statement.get(), 10),
         .requiresRestart = sqlite3_column_int(statement.get(), 11) != 0});
+  }
+
+  return records;
+}
+
+void RuntimeDatabase::UpsertBlockedSoftwareRule(const BlockedSoftwareRule& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "INSERT INTO blocked_software("
+                           " software_id, display_name, install_location, executable_names, blocked_at)"
+                           " VALUES(?, ?, ?, ?, ?)"
+                           " ON CONFLICT(software_id) DO UPDATE SET"
+                           " display_name=excluded.display_name, install_location=excluded.install_location,"
+                           " executable_names=excluded.executable_names, blocked_at=excluded.blocked_at;");
+  BindText(statement.get(), 1, record.softwareId);
+  BindText(statement.get(), 2, record.displayName);
+  BindText(statement.get(), 3, record.installLocation);
+  BindText(statement.get(), 4, JoinStrings(record.executableNames));
+  BindText(statement.get(), 5, record.blockedAt);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<BlockedSoftwareRule> RuntimeDatabase::ListBlockedSoftwareRules(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT software_id, display_name, install_location, executable_names, blocked_at"
+                           " FROM blocked_software ORDER BY blocked_at DESC, software_id DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<BlockedSoftwareRule> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing blocked software rules failed");
+    }
+
+    records.push_back(BlockedSoftwareRule{
+        .softwareId = ColumnText(statement.get(), 0),
+        .displayName = ColumnText(statement.get(), 1),
+        .installLocation = ColumnText(statement.get(), 2),
+        .executableNames = SplitStrings(ColumnText(statement.get(), 3)),
+        .blockedAt = ColumnText(statement.get(), 4)});
   }
 
   return records;

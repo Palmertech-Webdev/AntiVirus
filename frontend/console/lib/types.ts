@@ -15,7 +15,12 @@ export type CommandType =
   | "process.terminate"
   | "process.tree.terminate"
   | "persistence.cleanup"
-  | "remediate.path";
+  | "remediate.path"
+  | "script.run"
+  | "software.uninstall"
+  | "software.update"
+  | "software.update.search"
+  | "software.block";
 export type CommandStatus = "pending" | "in_progress" | "completed" | "failed";
 export type QuarantineStatus = "quarantined" | "restored" | "deleted";
 export type MailDirection = "inbound" | "outbound";
@@ -36,6 +41,45 @@ export interface PolicySummary {
   cloudLookup: boolean;
   scriptInspection: boolean;
   networkContainment: boolean;
+  quarantineOnMalicious: boolean;
+}
+
+export interface PolicyProfile extends PolicySummary {
+  description: string;
+  isDefault: boolean;
+  assignedDeviceIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScriptSummary {
+  id: string;
+  name: string;
+  description: string;
+  language: "powershell" | "cmd";
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+  lastExecutedAt?: string;
+}
+
+export type SoftwareUpdateState = "unknown" | "checking" | "available" | "current" | "error";
+
+export interface InstalledSoftwareSummary {
+  id: string;
+  displayName: string;
+  displayVersion: string;
+  publisher: string;
+  installLocation?: string;
+  uninstallCommand?: string;
+  quietUninstallCommand?: string;
+  installDate?: string;
+  displayIconPath?: string;
+  executableNames: string[];
+  blocked: boolean;
+  updateState: SoftwareUpdateState;
+  lastUpdateCheckAt?: string;
+  updateSummary?: string;
 }
 
 export interface DeviceSummary {
@@ -51,10 +95,14 @@ export interface DeviceSummary {
   lastTelemetryAt: string | null;
   healthState: DeviceHealthState;
   isolated: boolean;
+  policyId: string;
   policyName: string;
   openAlertCount: number;
   quarantinedItemCount: number;
   postureState: PostureState;
+  privateIpAddresses: string[];
+  publicIpAddress: string | null;
+  lastLoggedOnUser: string | null;
 }
 
 export interface AlertSummary {
@@ -81,6 +129,7 @@ export interface DeviceCommandSummary {
   issuedBy: string;
   targetPath?: string;
   recordId?: string;
+  payloadJson?: string;
   resultJson?: string;
 }
 
@@ -189,6 +238,8 @@ export interface DashboardSnapshot {
   recentScanHistory: ScanHistorySummary[];
   postureOverview: DevicePostureSummary[];
   defaultPolicy: PolicySummary;
+  policies: PolicyProfile[];
+  scripts: ScriptSummary[];
 }
 
 export interface DeviceDetail {
@@ -200,7 +251,33 @@ export interface DeviceDetail {
   quarantineItems: QuarantineItemSummary[];
   evidence: EvidenceSummary[];
   scanHistory: ScanHistorySummary[];
+  installedSoftware: InstalledSoftwareSummary[];
 }
+
+export interface CreatePolicyRequest {
+  name: string;
+  description?: string;
+  realtimeProtection: boolean;
+  cloudLookup: boolean;
+  scriptInspection: boolean;
+  networkContainment: boolean;
+  quarantineOnMalicious: boolean;
+}
+
+export interface UpdatePolicyRequest extends Partial<CreatePolicyRequest> {}
+
+export interface PolicyAssignmentRequest {
+  deviceIds: string[];
+}
+
+export interface CreateScriptRequest {
+  name: string;
+  description?: string;
+  language: "powershell" | "cmd";
+  content: string;
+}
+
+export interface UpdateScriptRequest extends Partial<CreateScriptRequest> {}
 
 export interface MailPolicySummary {
   id: string;

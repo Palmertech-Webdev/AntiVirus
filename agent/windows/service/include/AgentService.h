@@ -11,6 +11,7 @@
 #include "AgentState.h"
 #include "ControlPlaneClient.h"
 #include "CommandJournalStore.h"
+#include "DeviceInventoryCollector.h"
 #include "EventEnvelope.h"
 #include "FileDeltaTracker.h"
 #include "HardeningManager.h"
@@ -67,6 +68,7 @@ class AgentService {
   std::wstring ExecuteProcessTerminationCommand(const RemoteCommand& command, bool includeChildren);
   std::wstring ExecutePersistenceCleanupCommand(const RemoteCommand& command);
   std::wstring ExecutePathRemediationCommand(const RemoteCommand& command);
+  std::wstring ExecuteScriptCommand(const RemoteCommand& command);
   void PublishHeartbeat(int cycle);
   void PersistState();
   void LoadLocalPolicyCache();
@@ -74,6 +76,7 @@ class AgentService {
   void StartCommandLoop() const;
   void PrintStatus() const;
   void QueueEndpointStatusTelemetry();
+  void QueueDeviceInventoryTelemetry(int cycle);
   void DrainProcessTelemetry();
   void DrainRealtimeProtectionTelemetry();
   void DrainNetworkTelemetry();
@@ -83,6 +86,9 @@ class AgentService {
   void QueueTelemetryRecords(const std::vector<TelemetryRecord>& records);
   void FlushTelemetryQueue();
   ScanVerdict EvaluateEvent(const EventEnvelope& event) const;
+  std::wstring ExecuteSoftwareCommand(const RemoteCommand& command, bool uninstall, bool searchOnly);
+  std::wstring ExecuteSoftwareBlockCommand(const RemoteCommand& command);
+  void EnforceBlockedSoftware();
 
   AgentConfig config_{};
   AgentState state_{};

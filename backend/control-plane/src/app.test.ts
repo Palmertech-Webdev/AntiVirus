@@ -80,6 +80,10 @@ async function createTestAppWithState(rawState: object) {
   };
 }
 
+function deviceAuthHeaders(enrollment: { deviceApiKey?: string }) {
+  return enrollment.deviceApiKey ? { "x-device-api-key": enrollment.deviceApiKey } : {};
+}
+
 test("dashboard loads seed state from persistent storage", async (t) => {
   const harness = await createTestApp();
   t.after(async () => {
@@ -269,13 +273,17 @@ test("enrollment, heartbeat, and policy check-in persist device state", async (t
 
   assert.equal(enrollResponse.statusCode, 201);
 
-  const enrollment = enrollResponse.json() as { deviceId: string; commandChannelUrl: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; commandChannelUrl: string; deviceApiKey?: string };
   assert.match(enrollment.deviceId, /^[0-9a-f-]{36}$/);
-  assert.equal(enrollment.commandChannelUrl, "wss://test.local/api/v1/commands");
+  assert.match(enrollment.commandChannelUrl, /^wss:\/\/test\.local\/api\/v1\/commands\?/);
+  assert.match(enrollment.commandChannelUrl, new RegExp(`deviceId=${enrollment.deviceId}`));
+  assert.ok(enrollment.deviceApiKey);
+  assert.match(enrollment.commandChannelUrl, new RegExp(`deviceApiKey=${enrollment.deviceApiKey}`));
 
   const heartbeatResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/heartbeat`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       agentVersion: "0.1.1-alpha",
       platformVersion: "platform-0.1.1",
@@ -290,6 +298,7 @@ test("enrollment, heartbeat, and policy check-in persist device state", async (t
   const policyCheckInResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/policy-check-in`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       currentPolicyRevision: "2026.04.07.9",
       agentVersion: "0.1.1-alpha",
@@ -361,11 +370,13 @@ test("telemetry batches persist and can be queried back", async (t) => {
   });
 
   assert.equal(enrollResponse.statusCode, 201);
-  const { deviceId } = enrollResponse.json() as { deviceId: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
 
   const ingestResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -435,11 +446,13 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
   });
 
   assert.equal(enrollResponse.statusCode, 201);
-  const { deviceId } = enrollResponse.json() as { deviceId: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
 
   const firstIngestResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -504,6 +517,7 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
   const secondIngestResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -572,12 +586,14 @@ test("scan findings generate alerts with quarantine context", async (t) => {
   });
 
   assert.equal(enrollResponse.statusCode, 201);
-  const { deviceId } = enrollResponse.json() as { deviceId: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
 
   const sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const ingestResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -643,7 +659,8 @@ test("device commands can be queued, polled, completed, and quarantine inventory
   });
 
   assert.equal(enrollResponse.statusCode, 201);
-  const { deviceId } = enrollResponse.json() as { deviceId: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
 
   const queueResponse = await harness.app.inject({
     method: "POST",
@@ -663,6 +680,7 @@ test("device commands can be queued, polled, completed, and quarantine inventory
   const heartbeatResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/heartbeat`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       agentVersion: "0.1.1-alpha",
       platformVersion: "platform-0.1.1",
@@ -676,7 +694,8 @@ test("device commands can be queued, polled, completed, and quarantine inventory
 
   const pollResponse = await harness.app.inject({
     method: "GET",
-    url: `/api/v1/devices/${deviceId}/commands/pending?limit=10`
+    url: `/api/v1/devices/${deviceId}/commands/pending?limit=10`,
+    headers: deviceAuthHeaders(enrollment)
   });
 
   assert.equal(pollResponse.statusCode, 200);
@@ -691,6 +710,7 @@ test("device commands can be queued, polled, completed, and quarantine inventory
   const completeResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/commands/${queuedCommand.id}/complete`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       status: "completed",
       resultJson: "{\"findingCount\":2}"
@@ -711,6 +731,7 @@ test("device commands can be queued, polled, completed, and quarantine inventory
   const quarantineIngest = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -740,6 +761,7 @@ test("device commands can be queued, polled, completed, and quarantine inventory
   const restoreIngest = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -848,11 +870,13 @@ test("device detail, evidence, scan history, and posture are derived from agent 
   });
 
   assert.equal(enrollResponse.statusCode, 201);
-  const { deviceId } = enrollResponse.json() as { deviceId: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
 
   const telemetryResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -975,11 +999,13 @@ test("ransomware-oriented scan findings generate critical recovery and encryptio
   });
 
   assert.equal(enrollResponse.statusCode, 201);
-  const { deviceId } = enrollResponse.json() as { deviceId: string };
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
 
   const telemetryResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
     payload: {
       events: [
         {
@@ -1026,4 +1052,117 @@ test("ransomware-oriented scan findings generate critical recovery and encryptio
   assert.equal(encryptionAlert.severity, "critical");
   assert.match(encryptionAlert.title, /ransomware/i);
   assert.match(encryptionAlert.summary, /T1486/i);
+});
+
+test("policies and stored scripts can be managed and dispatched to endpoints", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const createPolicyResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/policies",
+    payload: {
+      name: "High Containment",
+      description: "Aggressive response profile for high-risk devices.",
+      realtimeProtection: true,
+      cloudLookup: true,
+      scriptInspection: true,
+      networkContainment: true,
+      quarantineOnMalicious: true
+    }
+  });
+
+  assert.equal(createPolicyResponse.statusCode, 201);
+  const createdPolicy = createPolicyResponse.json() as { id: string; name: string; networkContainment: boolean };
+  assert.equal(createdPolicy.name, "High Containment");
+  assert.equal(createdPolicy.networkContainment, true);
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-POLICY",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-POLICY-01"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const enrollment = enrollResponse.json() as { deviceId: string };
+
+  const assignPolicyResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/policies/${createdPolicy.id}/assign`,
+    payload: {
+      deviceIds: [enrollment.deviceId]
+    }
+  });
+
+  assert.equal(assignPolicyResponse.statusCode, 200);
+  assert.equal(assignPolicyResponse.json().assignedDeviceIds[0], enrollment.deviceId);
+
+  const createScriptResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/scripts",
+    payload: {
+      name: "Collect triage package",
+      description: "Collect a quick triage bundle from the endpoint.",
+      language: "powershell",
+      content: "Write-Output 'collecting triage package'"
+    }
+  });
+
+  assert.equal(createScriptResponse.statusCode, 201);
+  const createdScript = createScriptResponse.json() as { id: string; name: string };
+  assert.equal(createdScript.name, "Collect triage package");
+
+  const updateScriptResponse = await harness.app.inject({
+    method: "PATCH",
+    url: `/api/v1/scripts/${createdScript.id}`,
+    payload: {
+      description: "Collect a quick triage bundle and stage it for upload."
+    }
+  });
+
+  assert.equal(updateScriptResponse.statusCode, 200);
+  assert.match(updateScriptResponse.json().description, /stage it for upload/i);
+
+  const runScriptResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/actions/run-script`,
+    payload: {
+      scriptId: createdScript.id,
+      issuedBy: "soc-tier3"
+    }
+  });
+
+  assert.equal(runScriptResponse.statusCode, 201);
+  const queuedCommand = runScriptResponse.json() as { type: string; payloadJson: string; issuedBy: string };
+  assert.equal(queuedCommand.type, "script.run");
+  assert.equal(queuedCommand.issuedBy, "soc-tier3");
+  assert.match(queuedCommand.payloadJson, /Collect triage package/);
+
+  const dashboardResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(dashboardResponse.statusCode, 200);
+  const dashboardPayload = dashboardResponse.json() as {
+    devices: Array<{ id: string; policyId: string; policyName: string }>;
+    policies: Array<{ id: string; assignedDeviceIds: string[] }>;
+    scripts: Array<{ id: string }>;
+  };
+
+  const assignedDevice = dashboardPayload.devices.find((item) => item.id === enrollment.deviceId);
+  assert.ok(assignedDevice);
+  assert.equal(assignedDevice.policyId, createdPolicy.id);
+  assert.equal(assignedDevice.policyName, "High Containment");
+
+  const storedPolicy = dashboardPayload.policies.find((item) => item.id === createdPolicy.id);
+  assert.ok(storedPolicy);
+  assert.equal(storedPolicy.assignedDeviceIds[0], enrollment.deviceId);
+  assert.ok(dashboardPayload.scripts.some((item) => item.id === createdScript.id));
 });

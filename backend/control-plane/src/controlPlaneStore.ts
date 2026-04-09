@@ -9,6 +9,8 @@ import type {
   CommandStatus,
   CompleteCommandRequest,
   ControlPlaneState,
+  CreatePolicyRequest,
+  CreateScriptRequest,
   DashboardSnapshot,
   DeviceCommandSummary,
   DeviceDetail,
@@ -20,9 +22,12 @@ import type {
   EvidenceSummary,
   HeartbeatRequest,
   HeartbeatResponse,
+  InstalledSoftwareSummary,
   IsolationState,
   PolicyCheckInRequest,
   PolicyCheckInResponse,
+  PolicyProfile,
+  PolicyAssignmentRequest,
   PolicySummary,
   PollCommandsResponse,
   PostureState,
@@ -30,9 +35,13 @@ import type {
   QuarantineItemSummary,
   QuarantineStatus,
   ScanHistorySummary,
+  ScriptSummary,
+  SoftwareUpdateState,
   TelemetryBatchRequest,
   TelemetryBatchResponse,
-  TelemetryRecord
+  TelemetryRecord,
+  UpdatePolicyRequest,
+  UpdateScriptRequest
 } from "./types.ts";
 
 const DEFAULT_STATE_FILE_PATH = join(process.cwd(), ".data", "control-plane-state.json");
@@ -65,10 +74,17 @@ export interface ControlPlaneStore {
   listCommands(deviceId?: string, status?: CommandStatus, limit?: number): Promise<DeviceCommandSummary[]>;
   listQuarantineItems(deviceId?: string, status?: QuarantineStatus, limit?: number): Promise<QuarantineItemSummary[]>;
   getDefaultPolicy(): Promise<PolicySummary>;
-  enrollDevice(request: EnrollmentRequest): Promise<EnrollmentResponse>;
-  recordHeartbeat(deviceId: string, request: HeartbeatRequest): Promise<HeartbeatResponse>;
-  policyCheckIn(deviceId: string, request: PolicyCheckInRequest): Promise<PolicyCheckInResponse>;
-  ingestTelemetry(deviceId: string, request: TelemetryBatchRequest): Promise<TelemetryBatchResponse>;
+  listPolicies(): Promise<PolicyProfile[]>;
+  createPolicy(request: CreatePolicyRequest): Promise<PolicyProfile>;
+  updatePolicy(policyId: string, request: UpdatePolicyRequest): Promise<PolicyProfile>;
+  assignPolicy(policyId: string, request: PolicyAssignmentRequest): Promise<PolicyProfile>;
+  listScripts(): Promise<ScriptSummary[]>;
+  createScript(request: CreateScriptRequest): Promise<ScriptSummary>;
+  updateScript(scriptId: string, request: UpdateScriptRequest): Promise<ScriptSummary>;
+  enrollDevice(request: EnrollmentRequest, observedRemoteAddress?: string): Promise<EnrollmentResponse>;
+  recordHeartbeat(deviceId: string, request: HeartbeatRequest, observedRemoteAddress?: string): Promise<HeartbeatResponse>;
+  policyCheckIn(deviceId: string, request: PolicyCheckInRequest, observedRemoteAddress?: string): Promise<PolicyCheckInResponse>;
+  ingestTelemetry(deviceId: string, request: TelemetryBatchRequest, observedRemoteAddress?: string): Promise<TelemetryBatchResponse>;
   queueCommand(deviceId: string, request: QueueCommandRequest): Promise<DeviceCommandSummary>;
   pollPendingCommands(deviceId: string, limit?: number): Promise<PollCommandsResponse>;
   completeCommand(
@@ -89,6 +105,20 @@ export class CommandNotFoundError extends Error {
   constructor(commandId: string) {
     super(`Command not found: ${commandId}`);
     this.name = "CommandNotFoundError";
+  }
+}
+
+export class PolicyNotFoundError extends Error {
+  constructor(policyId: string) {
+    super(`Policy not found: ${policyId}`);
+    this.name = "PolicyNotFoundError";
+  }
+}
+
+export class ScriptNotFoundError extends Error {
+  constructor(scriptId: string) {
+    super(`Script not found: ${scriptId}`);
+    this.name = "ScriptNotFoundError";
   }
 }
 
@@ -120,12 +150,122 @@ function readBoolean(payload: ParsedPayload | null, key: string) {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function readStringArray(payload: ParsedPayload | null, key: string) {
+  const value = payload?.[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function readObjectArray(payload: ParsedPayload | null, key: string) {
+  const value = payload?.[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is ParsedPayload => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
 function readOptionalString(value: unknown, fallback = "") {
   return typeof value === "string" ? value : fallback;
 }
 
 function readOptionalNullableString(value: unknown) {
   return typeof value === "string" ? value : null;
+}
+
+function readOptionalStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function normalizeSoftwareUpdateState(value: unknown): SoftwareUpdateState {
+  return value === "checking" || value === "available" || value === "current" || value === "error" ? value : "unknown";
+}
+
+function normalizeInstalledSoftware(raw: unknown): InstalledSoftwareSummary {
+  const item = (raw ?? {}) as Partial<InstalledSoftwareSummary>;
+  return {
+    id: readOptionalString(item.id, randomUUID()),
+    displayName: readOptionalString(item.displayName, "Unknown software"),
+    displayVersion: readOptionalString(item.displayVersion, "unknown"),
+    publisher: readOptionalString(item.publisher, "unknown"),
+    installLocation: typeof item.installLocation === "string" && item.installLocation.length > 0 ? item.installLocation : undefined,
+    uninstallCommand:
+      typeof item.uninstallCommand === "string" && item.uninstallCommand.length > 0 ? item.uninstallCommand : undefined,
+    quietUninstallCommand:
+      typeof item.quietUninstallCommand === "string" && item.quietUninstallCommand.length > 0
+        ? item.quietUninstallCommand
+        : undefined,
+    installDate: typeof item.installDate === "string" && item.installDate.length > 0 ? item.installDate : undefined,
+    displayIconPath:
+      typeof item.displayIconPath === "string" && item.displayIconPath.length > 0 ? item.displayIconPath : undefined,
+    executableNames: readOptionalStringArray(item.executableNames),
+    blocked: item.blocked === true,
+    updateState: normalizeSoftwareUpdateState(item.updateState),
+    lastUpdateCheckAt:
+      typeof item.lastUpdateCheckAt === "string" && item.lastUpdateCheckAt.length > 0 ? item.lastUpdateCheckAt : undefined,
+    updateSummary:
+      typeof item.updateSummary === "string" && item.updateSummary.length > 0 ? item.updateSummary : undefined
+  };
+}
+
+function sortInstalledSoftware(items: InstalledSoftwareSummary[]) {
+  return [...items].sort((left, right) => {
+    const nameDelta = left.displayName.localeCompare(right.displayName);
+    if (nameDelta !== 0) {
+      return nameDelta;
+    }
+
+    return left.publisher.localeCompare(right.publisher);
+  });
+}
+
+function isLoopbackAddress(value: string) {
+  const normalized = value.toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "localhost" ||
+    normalized.startsWith("127.") ||
+    normalized === "::ffff:127.0.0.1"
+  );
+}
+
+function isPrivateAddress(value: string) {
+  const normalized = value.toLowerCase();
+  if (normalized.startsWith("10.") || normalized.startsWith("192.168.") || normalized.startsWith("169.254.")) {
+    return true;
+  }
+
+  if (normalized.startsWith("172.")) {
+    const secondOctet = Number(normalized.split(".")[1]);
+    return secondOctet >= 16 && secondOctet <= 31;
+  }
+
+  return normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:") || normalized === "::ffff";
+}
+
+function mergeUniqueStrings(values: string[]) {
+  return [...new Set(values.filter((value) => value.length > 0 && !isLoopbackAddress(value)))];
+}
+
+function applyObservedRemoteAddress(device: DeviceRecord, observedRemoteAddress?: string) {
+  if (!observedRemoteAddress || isLoopbackAddress(observedRemoteAddress)) {
+    return;
+  }
+
+  if (isPrivateAddress(observedRemoteAddress)) {
+    device.privateIpAddresses = mergeUniqueStrings([...device.privateIpAddresses, observedRemoteAddress]);
+    return;
+  }
+
+  device.publicIpAddress = observedRemoteAddress;
 }
 
 function clampPostureState(value: unknown): PostureState {
@@ -186,8 +326,86 @@ function sortDevicePosture(items: DevicePostureSummary[]) {
   return sortByIsoDescending(items, (item) => item.updatedAt);
 }
 
-function normalizeDeviceRecord(raw: unknown, defaultPolicyName: string, nowIso: string): DeviceRecord {
+function sortPolicies(items: PolicyProfile[]) {
+  return [...items].sort((left, right) => {
+    if (left.isDefault !== right.isDefault) {
+      return left.isDefault ? -1 : 1;
+    }
+
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function sortScripts(items: ScriptSummary[]) {
+  return sortByIsoDescending(items, (item) => item.updatedAt);
+}
+
+function toPolicySummary(policy: PolicyProfile): PolicySummary {
+  return {
+    id: policy.id,
+    name: policy.name,
+    revision: policy.revision,
+    realtimeProtection: policy.realtimeProtection,
+    cloudLookup: policy.cloudLookup,
+    scriptInspection: policy.scriptInspection,
+    networkContainment: policy.networkContainment,
+    quarantineOnMalicious: policy.quarantineOnMalicious
+  };
+}
+
+function normalizePolicyProfile(raw: unknown, fallback: PolicySummary, nowIso: string): PolicyProfile {
+  const policy = (raw ?? {}) as Partial<PolicyProfile>;
+  return {
+    id: readOptionalString(policy.id, fallback.id),
+    name: readOptionalString(policy.name, fallback.name),
+    revision: readOptionalString(policy.revision, fallback.revision),
+    realtimeProtection: typeof policy.realtimeProtection === "boolean" ? policy.realtimeProtection : fallback.realtimeProtection,
+    cloudLookup: typeof policy.cloudLookup === "boolean" ? policy.cloudLookup : fallback.cloudLookup,
+    scriptInspection: typeof policy.scriptInspection === "boolean" ? policy.scriptInspection : fallback.scriptInspection,
+    networkContainment:
+      typeof policy.networkContainment === "boolean" ? policy.networkContainment : fallback.networkContainment,
+    quarantineOnMalicious:
+      typeof policy.quarantineOnMalicious === "boolean" ? policy.quarantineOnMalicious : fallback.quarantineOnMalicious,
+    description: readOptionalString(policy.description, `${fallback.name} protection profile`),
+    isDefault: policy.isDefault === true,
+    assignedDeviceIds: readOptionalStringArray(policy.assignedDeviceIds),
+    createdAt: readOptionalString(policy.createdAt, nowIso),
+    updatedAt: readOptionalString(policy.updatedAt, nowIso)
+  };
+}
+
+function normalizeScript(raw: unknown, nowIso: string): ScriptSummary {
+  const script = (raw ?? {}) as Partial<ScriptSummary>;
+  return {
+    id: readOptionalString(script.id, randomUUID()),
+    name: readOptionalString(script.name, "Untitled script"),
+    description: readOptionalString(script.description, "No description provided."),
+    language: script.language === "cmd" ? "cmd" : "powershell",
+    content: readOptionalString(script.content),
+    createdAt: readOptionalString(script.createdAt, nowIso),
+    updatedAt: readOptionalString(script.updatedAt, nowIso),
+    lastExecutedAt: typeof script.lastExecutedAt === "string" ? script.lastExecutedAt : undefined
+  };
+}
+
+function buildPolicyRevision(nowIso: string) {
+  const stamp = nowIso.replace(/[-:TZ]/g, "").replace(/\..+$/, "");
+  return `${stamp.slice(0, 4)}.${stamp.slice(4, 6)}.${stamp.slice(6, 8)}.${stamp.slice(8)}`;
+}
+
+function normalizeDeviceRecord(
+  raw: unknown,
+  defaultPolicyId: string,
+  defaultPolicyName: string,
+  nowIso: string,
+  policies: PolicyProfile[]
+): DeviceRecord {
   const record = (raw ?? {}) as Partial<DeviceRecord>;
+  const recordedPolicyName = readOptionalString(record.policyName, defaultPolicyName);
+  const matchedPolicy =
+    (typeof record.policyId === "string" ? policies.find((item) => item.id === record.policyId) : undefined) ??
+    policies.find((item) => item.name === recordedPolicyName);
+
   return {
     id: readOptionalString(record.id, randomUUID()),
     hostname: readOptionalString(record.hostname, "UNKNOWN-HOST"),
@@ -202,7 +420,14 @@ function normalizeDeviceRecord(raw: unknown, defaultPolicyName: string, nowIso: 
     healthState:
       record.healthState === "degraded" || record.healthState === "isolated" ? record.healthState : "healthy",
     isolated: record.isolated === true,
-    policyName: readOptionalString(record.policyName, defaultPolicyName)
+    policyId: matchedPolicy?.id ?? readOptionalString(record.policyId, defaultPolicyId),
+    policyName: matchedPolicy?.name ?? recordedPolicyName,
+    privateIpAddresses: mergeUniqueStrings(readOptionalStringArray(record.privateIpAddresses)),
+    publicIpAddress: readOptionalNullableString(record.publicIpAddress),
+    lastLoggedOnUser: readOptionalNullableString(record.lastLoggedOnUser),
+    installedSoftware: sortInstalledSoftware(
+      Array.isArray(record.installedSoftware) ? record.installedSoftware.map((item) => normalizeInstalledSoftware(item)) : []
+    )
   };
 }
 
@@ -257,6 +482,7 @@ function normalizeCommand(raw: unknown, hostnameByDeviceId: Map<string, string>,
     issuedBy: readOptionalString(command.issuedBy, "system"),
     targetPath: typeof command.targetPath === "string" ? command.targetPath : undefined,
     recordId: typeof command.recordId === "string" ? command.recordId : undefined,
+    payloadJson: typeof command.payloadJson === "string" ? command.payloadJson : undefined,
     resultJson: typeof command.resultJson === "string" ? command.resultJson : undefined
   };
 }
@@ -379,13 +605,31 @@ function normalizeDevicePosture(
 function normalizeState(rawState: unknown, nowIso: string): ControlPlaneState {
   const defaults = createEmptyState(nowIso);
   const raw = (rawState ?? {}) as Partial<ControlPlaneState>;
+  const defaultPolicy = {
+    ...defaults.defaultPolicy,
+    ...(raw.defaultPolicy ?? {})
+  };
+  const policies = Array.isArray(raw.policies) && raw.policies.length > 0
+    ? raw.policies.map((item) => normalizePolicyProfile(item, defaultPolicy, nowIso))
+    : [normalizePolicyProfile(raw.defaultPolicy, defaultPolicy, nowIso)];
+
+  if (!policies.some((item) => item.isDefault)) {
+    policies[0] = { ...policies[0], isDefault: true };
+  }
+
+  const defaultPolicyProfile = policies.find((item) => item.isDefault) ?? policies[0];
   const devices = Array.isArray(raw.devices)
-    ? raw.devices.map((item) => normalizeDeviceRecord(item, defaults.defaultPolicy.name, nowIso))
+    ? raw.devices.map((item) =>
+        normalizeDeviceRecord(item, defaultPolicyProfile.id, defaultPolicyProfile.name, nowIso, policies)
+      )
     : [];
   const hostnameByDeviceId = new Map(devices.map((item) => [item.id, item.hostname]));
+  const scripts = Array.isArray(raw.scripts) ? raw.scripts.map((item) => normalizeScript(item, nowIso)) : [];
 
-  return {
-    defaultPolicy: raw.defaultPolicy ?? defaults.defaultPolicy,
+  const state: ControlPlaneState = {
+    defaultPolicy: toPolicySummary(defaultPolicyProfile),
+    policies,
+    scripts,
     devices,
     alerts: Array.isArray(raw.alerts) ? raw.alerts.map((item) => normalizeAlert(item)) : [],
     telemetry: Array.isArray(raw.telemetry)
@@ -407,6 +651,9 @@ function normalizeState(rawState: unknown, nowIso: string): ControlPlaneState {
       ? raw.devicePosture.map((item) => normalizeDevicePosture(item, hostnameByDeviceId, nowIso))
       : []
   };
+
+  syncPolicyAssignments(state);
+  return state;
 }
 
 function stripDemoRecords(state: ControlPlaneState) {
@@ -437,6 +684,26 @@ function stripDemoRecords(state: ControlPlaneState) {
   );
 }
 
+function syncPolicyAssignments(state: ControlPlaneState) {
+  for (const policy of state.policies) {
+    policy.assignedDeviceIds = [];
+  }
+
+  const defaultPolicy = state.policies.find((item) => item.isDefault) ?? state.policies[0];
+  if (!defaultPolicy) {
+    return;
+  }
+
+  for (const device of state.devices) {
+    const assignedPolicy = state.policies.find((item) => item.id === device.policyId) ?? defaultPolicy;
+    device.policyId = assignedPolicy.id;
+    device.policyName = assignedPolicy.name;
+    assignedPolicy.assignedDeviceIds.push(device.id);
+  }
+
+  state.defaultPolicy = toPolicySummary(defaultPolicy);
+}
+
 function recomputePosture(posture: DevicePostureSummary) {
   const postureStates = [
     posture.tamperProtectionState,
@@ -464,6 +731,12 @@ function recomputePosture(posture: DevicePostureSummary) {
 }
 
 function trimState(state: ControlPlaneState) {
+  syncPolicyAssignments(state);
+  state.policies = sortPolicies(state.policies).map((policy) => ({
+    ...policy,
+    assignedDeviceIds: [...policy.assignedDeviceIds].sort((left, right) => left.localeCompare(right))
+  }));
+  state.scripts = sortScripts(state.scripts);
   state.alerts = sortAlerts(state.alerts).slice(0, MAX_ALERTS);
   state.telemetry = sortTelemetry(state.telemetry).slice(0, MAX_TELEMETRY);
   state.commands = sortCommands(state.commands).slice(0, MAX_COMMANDS);
@@ -489,6 +762,24 @@ function findCommandOrThrow(state: ControlPlaneState, deviceId: string, commandI
   }
 
   return command;
+}
+
+function findPolicyOrThrow(state: ControlPlaneState, policyId: string) {
+  const policy = state.policies.find((item) => item.id === policyId);
+  if (!policy) {
+    throw new PolicyNotFoundError(policyId);
+  }
+
+  return policy;
+}
+
+function findScriptOrThrow(state: ControlPlaneState, scriptId: string) {
+  const script = state.scripts.find((item) => item.id === scriptId);
+  if (!script) {
+    throw new ScriptNotFoundError(scriptId);
+  }
+
+  return script;
 }
 
 function getOrCreateDevicePosture(state: ControlPlaneState, device: DeviceRecord, nowIso: string) {
@@ -538,11 +829,82 @@ function toDeviceSummary(state: ControlPlaneState, device: DeviceRecord): Device
     lastTelemetryAt: device.lastTelemetryAt,
     healthState: device.healthState,
     isolated: device.isolated,
+    policyId: device.policyId,
     policyName: device.policyName,
     openAlertCount,
     quarantinedItemCount,
-    postureState: posture?.overallState ?? "unknown"
+    postureState: posture?.overallState ?? "unknown",
+    privateIpAddresses: device.privateIpAddresses,
+    publicIpAddress: device.publicIpAddress,
+    lastLoggedOnUser: device.lastLoggedOnUser
   };
+}
+
+function findInstalledSoftware(device: DeviceRecord, payload: ParsedPayload | null) {
+  const softwareId = readString(payload, "softwareId");
+  if (softwareId) {
+    const byId = device.installedSoftware.find((item) => item.id === softwareId);
+    if (byId) {
+      return byId;
+    }
+  }
+
+  const displayName = readString(payload, "displayName");
+  if (displayName) {
+    return device.installedSoftware.find((item) => item.displayName === displayName);
+  }
+
+  return undefined;
+}
+
+function updateDeviceInventory(state: ControlPlaneState, device: DeviceRecord, record: TelemetryRecord) {
+  const payload = parsePayload(record.payloadJson);
+
+  if (record.eventType === "device.inventory.snapshot") {
+    device.privateIpAddresses = mergeUniqueStrings(readStringArray(payload, "privateIpAddresses"));
+    device.lastLoggedOnUser = readString(payload, "lastLoggedOnUser") ?? null;
+    device.installedSoftware = sortInstalledSoftware(
+      readObjectArray(payload, "installedSoftware").map((item) => normalizeInstalledSoftware(item))
+    );
+    return;
+  }
+
+  const software = findInstalledSoftware(device, payload);
+  if (!software) {
+    return;
+  }
+
+  switch (record.eventType) {
+    case "software.update.search.completed":
+      software.updateState = readBoolean(payload, "updateAvailable") ? "available" : "current";
+      software.lastUpdateCheckAt = record.occurredAt;
+      software.updateSummary = readString(payload, "summary") ?? record.summary;
+      break;
+    case "software.update.search.failed":
+      software.updateState = "error";
+      software.lastUpdateCheckAt = record.occurredAt;
+      software.updateSummary = readString(payload, "error") ?? record.summary;
+      break;
+    case "software.updated":
+      software.updateState = "current";
+      software.lastUpdateCheckAt = record.occurredAt;
+      software.updateSummary = record.summary;
+      break;
+    case "software.update.failed":
+      software.updateState = "error";
+      software.lastUpdateCheckAt = record.occurredAt;
+      software.updateSummary = record.summary;
+      break;
+    case "software.uninstalled":
+      device.installedSoftware = device.installedSoftware.filter((item) => item.id !== software.id);
+      break;
+    case "software.blocked":
+      software.blocked = true;
+      software.updateSummary = readString(payload, "summary") ?? "Software execution is blocked on this endpoint.";
+      break;
+    default:
+      break;
+  }
 }
 
 function updateQuarantineInventory(state: ControlPlaneState, record: TelemetryRecord) {
@@ -814,6 +1176,19 @@ function applyCommandCompletionEffects(
     return;
   }
 
+  if (command.type === "script.run") {
+    const payload = command.payloadJson ? parsePayload(command.payloadJson) : null;
+    const scriptId = readString(payload, "scriptId");
+    if (scriptId) {
+      const script = state.scripts.find((item) => item.id === scriptId);
+      if (script) {
+        script.lastExecutedAt = completedAt;
+        script.updatedAt = completedAt;
+      }
+    }
+    return;
+  }
+
   if ((command.type === "quarantine.restore" || command.type === "quarantine.delete") && command.recordId) {
     const item = state.quarantineItems.find((entry) => entry.recordId === command.recordId);
     if (item) {
@@ -885,7 +1260,9 @@ export function createFileBackedControlPlaneStore(
         recentEvidence: sortEvidence(state.evidence).slice(0, 20),
         recentScanHistory: sortScanHistory(state.scanHistory).slice(0, 20),
         postureOverview: sortDevicePosture(state.devicePosture).slice(0, 20),
-        defaultPolicy: state.defaultPolicy
+        defaultPolicy: state.defaultPolicy,
+        policies: sortPolicies(state.policies),
+        scripts: sortScripts(state.scripts)
       };
     },
 
@@ -900,7 +1277,8 @@ export function createFileBackedControlPlaneStore(
         commands: sortCommands(state.commands.filter((item) => item.deviceId === deviceId)).slice(0, 200),
         quarantineItems: sortQuarantineItems(state.quarantineItems.filter((item) => item.deviceId === deviceId)).slice(0, 200),
         evidence: sortEvidence(state.evidence.filter((item) => item.deviceId === deviceId)).slice(0, 200),
-        scanHistory: sortScanHistory(state.scanHistory.filter((item) => item.deviceId === deviceId)).slice(0, 200)
+        scanHistory: sortScanHistory(state.scanHistory.filter((item) => item.deviceId === deviceId)).slice(0, 200),
+        installedSoftware: sortInstalledSoftware(device.installedSoftware)
       };
     },
 
@@ -969,11 +1347,122 @@ export function createFileBackedControlPlaneStore(
       return state.defaultPolicy;
     },
 
-    async enrollDevice(request) {
+    async listPolicies() {
+      const state = await loadState();
+      return sortPolicies(state.policies);
+    },
+
+    async createPolicy(request) {
+      return mutateState(async (state) => {
+        const timestamp = now();
+        const created: PolicyProfile = {
+          id: randomUUID(),
+          name: request.name,
+          description: request.description?.trim() || `${request.name} protection profile`,
+          revision: buildPolicyRevision(timestamp),
+          realtimeProtection: request.realtimeProtection,
+          cloudLookup: request.cloudLookup,
+          scriptInspection: request.scriptInspection,
+          networkContainment: request.networkContainment,
+          quarantineOnMalicious: request.quarantineOnMalicious,
+          isDefault: false,
+          assignedDeviceIds: [],
+          createdAt: timestamp,
+          updatedAt: timestamp
+        };
+        state.policies.push(created);
+        return created;
+      });
+    },
+
+    async updatePolicy(policyId, request) {
+      return mutateState(async (state) => {
+        const policy = findPolicyOrThrow(state, policyId);
+        const timestamp = now();
+        Object.assign(policy, {
+          name: request.name?.trim() || policy.name,
+          description: request.description?.trim() || policy.description,
+          realtimeProtection: request.realtimeProtection ?? policy.realtimeProtection,
+          cloudLookup: request.cloudLookup ?? policy.cloudLookup,
+          scriptInspection: request.scriptInspection ?? policy.scriptInspection,
+          networkContainment: request.networkContainment ?? policy.networkContainment,
+          quarantineOnMalicious: request.quarantineOnMalicious ?? policy.quarantineOnMalicious,
+          revision: buildPolicyRevision(timestamp),
+          updatedAt: timestamp
+        });
+
+        for (const device of state.devices) {
+          if (device.policyId === policy.id) {
+            device.policyName = policy.name;
+          }
+        }
+
+        if (policy.isDefault) {
+          state.defaultPolicy = toPolicySummary(policy);
+        }
+
+        return policy;
+      });
+    },
+
+    async assignPolicy(policyId, request) {
+      return mutateState(async (state) => {
+        const policy = findPolicyOrThrow(state, policyId);
+        const timestamp = now();
+
+        for (const deviceId of request.deviceIds) {
+          const device = findDeviceOrThrow(state, deviceId);
+          device.policyId = policy.id;
+          device.policyName = policy.name;
+          device.lastPolicySyncAt = timestamp;
+        }
+
+        policy.updatedAt = timestamp;
+        syncPolicyAssignments(state);
+        return policy;
+      });
+    },
+
+    async listScripts() {
+      const state = await loadState();
+      return sortScripts(state.scripts);
+    },
+
+    async createScript(request) {
+      return mutateState(async (state) => {
+        const timestamp = now();
+        const created: ScriptSummary = {
+          id: randomUUID(),
+          name: request.name,
+          description: request.description?.trim() || `${request.name} automation`,
+          language: request.language,
+          content: request.content,
+          createdAt: timestamp,
+          updatedAt: timestamp
+        };
+        state.scripts.push(created);
+        return created;
+      });
+    },
+
+    async updateScript(scriptId, request) {
+      return mutateState(async (state) => {
+        const script = findScriptOrThrow(state, scriptId);
+        script.name = request.name?.trim() || script.name;
+        script.description = request.description?.trim() || script.description;
+        script.language = request.language ?? script.language;
+        script.content = request.content ?? script.content;
+        script.updatedAt = now();
+        return script;
+      });
+    },
+
+    async enrollDevice(request, observedRemoteAddress) {
       return mutateState(async (state) => {
         const issuedAt = now();
         const deviceId = randomUUID();
-        state.devices.push({
+        const defaultPolicy = state.policies.find((item) => item.isDefault) ?? state.policies[0];
+        const device: DeviceRecord = {
           id: deviceId,
           hostname: request.hostname,
           osVersion: request.osVersion,
@@ -986,19 +1475,26 @@ export function createFileBackedControlPlaneStore(
           lastTelemetryAt: null,
           healthState: "healthy",
           isolated: false,
-          policyName: state.defaultPolicy.name
-        });
+          policyId: defaultPolicy.id,
+          policyName: defaultPolicy.name,
+          privateIpAddresses: [],
+          publicIpAddress: null,
+          lastLoggedOnUser: null,
+          installedSoftware: []
+        };
+        applyObservedRemoteAddress(device, observedRemoteAddress);
+        state.devices.push(device);
 
         return {
           deviceId,
           issuedAt,
-          policy: state.defaultPolicy,
+          policy: toPolicySummary(defaultPolicy),
           commandChannelUrl
         };
       });
     },
 
-    async recordHeartbeat(deviceId, request) {
+    async recordHeartbeat(deviceId, request, observedRemoteAddress) {
       return mutateState(async (state) => {
         const device = findDeviceOrThrow(state, deviceId);
         const receivedAt = now();
@@ -1007,6 +1503,7 @@ export function createFileBackedControlPlaneStore(
         device.healthState = request.healthState;
         device.isolated = request.isolated;
         device.lastSeenAt = receivedAt;
+        applyObservedRemoteAddress(device, observedRemoteAddress);
 
         const posture = getOrCreateDevicePosture(state, device, receivedAt);
         posture.hostname = device.hostname;
@@ -1017,21 +1514,23 @@ export function createFileBackedControlPlaneStore(
           : "Heartbeat reported that host isolation is inactive.";
         recomputePosture(posture);
 
+        const effectivePolicy = state.policies.find((item) => item.id === device.policyId) ?? (state.policies[0] as PolicyProfile);
         return {
           deviceId,
           receivedAt,
-          effectivePolicyRevision: state.defaultPolicy.revision,
+          effectivePolicyRevision: effectivePolicy.revision,
           commandsPending: state.commands.filter((item) => item.deviceId === deviceId && item.status === "pending").length
         };
       });
     },
 
-    async policyCheckIn(deviceId, request) {
+    async policyCheckIn(deviceId, request, observedRemoteAddress) {
       return mutateState(async (state) => {
         const device = findDeviceOrThrow(state, deviceId);
         const retrievedAt = now();
         device.lastSeenAt = retrievedAt;
         device.lastPolicySyncAt = retrievedAt;
+        applyObservedRemoteAddress(device, observedRemoteAddress);
         if (request.agentVersion) {
           device.agentVersion = request.agentVersion;
         }
@@ -1039,19 +1538,21 @@ export function createFileBackedControlPlaneStore(
           device.platformVersion = request.platformVersion;
         }
 
+        const effectivePolicy = state.policies.find((item) => item.id === device.policyId) ?? (state.policies[0] as PolicyProfile);
         return {
           deviceId,
           retrievedAt,
-          changed: request.currentPolicyRevision !== state.defaultPolicy.revision,
-          policy: state.defaultPolicy
+          changed: request.currentPolicyRevision !== effectivePolicy.revision,
+          policy: toPolicySummary(effectivePolicy)
         };
       });
     },
 
-    async ingestTelemetry(deviceId, request) {
+    async ingestTelemetry(deviceId, request, observedRemoteAddress) {
       return mutateState(async (state) => {
         const device = findDeviceOrThrow(state, deviceId);
         const receivedAt = now();
+        applyObservedRemoteAddress(device, observedRemoteAddress);
         const existingIds = new Set(
           state.telemetry.filter((item) => item.deviceId === deviceId).map((item) => item.eventId)
         );
@@ -1074,6 +1575,7 @@ export function createFileBackedControlPlaneStore(
           updateEvidenceInventory(state, record);
           updateScanHistory(state, record);
           updateDevicePosture(state, device, record);
+          updateDeviceInventory(state, device, record);
         }
 
         if (acceptedRecords.length > 0) {
@@ -1109,7 +1611,8 @@ export function createFileBackedControlPlaneStore(
           updatedAt: createdAt,
           issuedBy: request.issuedBy ?? "console",
           targetPath: request.targetPath,
-          recordId: request.recordId
+          recordId: request.recordId,
+          payloadJson: request.payloadJson
         };
         state.commands.push(command);
         return command;

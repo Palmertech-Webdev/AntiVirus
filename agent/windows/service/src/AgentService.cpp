@@ -1,14 +1,21 @@
 #include "AgentService.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <optional>
+#include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
 
 #include "EvidenceRecorder.h"
+#include "DeviceInventoryCollector.h"
 #include "FileInventory.h"
 #include "FileSnapshotCollector.h"
 #include "HardeningManager.h"
@@ -16,12 +23,276 @@
 #include "ProcessSnapshotCollector.h"
 #include "QuarantineStore.h"
 #include "RemediationEngine.h"
+#include "RuntimeDatabase.h"
 #include "ScanEngine.h"
 #include "StringUtils.h"
 #include "UpdaterService.h"
 #include "WscCoexistenceManager.h"
 
 namespace antivirus::agent {
+
+namespace {
+
+struct ProcessExecutionResult {
+  DWORD exitCode{0};
+  std::wstring output;
+};
+
+std::string EscapeRegex(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size() * 2);
+
+  for (const auto ch : value) {
+    switch (ch) {
+      case '\\':
+      case '^':
+      case '$':
+      case '.':
+      case '|':
+      case '?':
+      case '*':
+      case '+':
+      case '(':
+      case ')':
+      case '[':
+      case ']':
+      case '{':
+      case '}':
+        escaped.push_back('\\');
+        break;
+      default:
+        break;
+    }
+
+    escaped.push_back(ch);
+  }
+
+  return escaped;
+}
+
+std::string UnescapeJsonString(const std::string& value) {
+  std::string result;
+  result.reserve(value.size());
+
+  bool escaping = false;
+  for (const auto ch : value) {
+    if (!escaping) {
+      if (ch == '\\') {
+        escaping = true;
+      } else {
+        result.push_back(ch);
+      }
+      continue;
+    }
+
+    switch (ch) {
+      case '\\':
+        result.push_back('\\');
+        break;
+      case '"':
+        result.push_back('"');
+        break;
+      case 'n':
+        result.push_back('\n');
+        break;
+      case 'r':
+        result.push_back('\r');
+        break;
+      case 't':
+        result.push_back('\t');
+        break;
+      default:
+        result.push_back(ch);
+        break;
+    }
+
+    escaping = false;
+  }
+
+  if (escaping) {
+    result.push_back('\\');
+  }
+
+  return result;
+}
+
+std::optional<std::wstring> ExtractPayloadString(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"");
+  std::smatch match;
+  if (std::regex_search(utf8Json, match, pattern)) {
+    return Utf8ToWide(UnescapeJsonString(match[1].str()));
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::uint32_t> ExtractPayloadUInt32(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(\\d+)");
+  std::smatch match;
+  if (std::regex_search(utf8Json, match, pattern)) {
+    return static_cast<std::uint32_t>(std::stoul(match[1].str()));
+  }
+
+  return std::nullopt;
+}
+
+std::vector<std::wstring> ExtractPayloadStringArray(const std::wstring& json, const std::string& key) {
+  std::vector<std::wstring> values;
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex arrayPattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*\\[(.*?)\\]");
+  std::smatch arrayMatch;
+  if (!std::regex_search(utf8Json, arrayMatch, arrayPattern)) {
+    return values;
+  }
+
+  const std::regex itemPattern("\"((?:\\\\.|[^\"])*)\"");
+  auto begin = std::sregex_iterator(arrayMatch[1].first, arrayMatch[1].second, itemPattern);
+  const auto end = std::sregex_iterator();
+  for (auto iterator = begin; iterator != end; ++iterator) {
+    values.push_back(Utf8ToWide(UnescapeJsonString((*iterator)[1].str())));
+  }
+
+  return values;
+}
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool PathStartsWith(std::wstring path, std::wstring prefix) {
+  if (path.empty() || prefix.empty()) {
+    return false;
+  }
+
+  path = ToLowerCopy(path);
+  prefix = ToLowerCopy(prefix);
+  if (!prefix.empty() && prefix.back() != L'\\') {
+    prefix += L'\\';
+  }
+
+  return path == prefix.substr(0, prefix.size() - 1) || path.starts_with(prefix);
+}
+
+bool TerminateProcessById(const DWORD pid) {
+  if (pid == 0 || pid == GetCurrentProcessId()) {
+    return false;
+  }
+
+  const HANDLE processHandle = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+  if (processHandle == nullptr) {
+    return false;
+  }
+
+  const auto terminated = TerminateProcess(processHandle, 1) != FALSE;
+  CloseHandle(processHandle);
+  return terminated;
+}
+
+DWORD ExecuteHiddenProcess(const std::wstring& commandLine, const std::wstring& workingDirectory = {}) {
+  std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+  mutableCommandLine.push_back(L'\0');
+
+  STARTUPINFOW startupInfo{};
+  startupInfo.cb = sizeof(startupInfo);
+  startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+  startupInfo.wShowWindow = SW_HIDE;
+
+  PROCESS_INFORMATION processInfo{};
+  const auto created =
+      CreateProcessW(nullptr, mutableCommandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                     workingDirectory.empty() ? nullptr : workingDirectory.c_str(), &startupInfo, &processInfo);
+  if (!created) {
+    throw std::runtime_error("CreateProcessW failed");
+  }
+
+  WaitForSingleObject(processInfo.hProcess, INFINITE);
+
+  DWORD exitCode = 0;
+  GetExitCodeProcess(processInfo.hProcess, &exitCode);
+  CloseHandle(processInfo.hThread);
+  CloseHandle(processInfo.hProcess);
+  return exitCode;
+}
+
+ProcessExecutionResult ExecuteHiddenProcessCapture(const std::wstring& commandLine,
+                                                   const std::wstring& workingDirectory = {}) {
+  SECURITY_ATTRIBUTES securityAttributes{};
+  securityAttributes.nLength = sizeof(securityAttributes);
+  securityAttributes.bInheritHandle = TRUE;
+
+  HANDLE readHandle = nullptr;
+  HANDLE writeHandle = nullptr;
+  if (CreatePipe(&readHandle, &writeHandle, &securityAttributes, 0) == FALSE) {
+    throw std::runtime_error("CreatePipe failed");
+  }
+
+  SetHandleInformation(readHandle, HANDLE_FLAG_INHERIT, 0);
+
+  std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+  mutableCommandLine.push_back(L'\0');
+
+  STARTUPINFOW startupInfo{};
+  startupInfo.cb = sizeof(startupInfo);
+  startupInfo.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+  startupInfo.wShowWindow = SW_HIDE;
+  startupInfo.hStdOutput = writeHandle;
+  startupInfo.hStdError = writeHandle;
+  startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+  PROCESS_INFORMATION processInfo{};
+  const auto created =
+      CreateProcessW(nullptr, mutableCommandLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                     workingDirectory.empty() ? nullptr : workingDirectory.c_str(), &startupInfo, &processInfo);
+  CloseHandle(writeHandle);
+  if (!created) {
+    CloseHandle(readHandle);
+    throw std::runtime_error("CreateProcessW failed");
+  }
+
+  std::string output;
+  std::array<char, 4096> buffer{};
+  DWORD bytesRead = 0;
+  while (ReadFile(readHandle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) != FALSE &&
+         bytesRead > 0) {
+    output.append(buffer.data(), bytesRead);
+  }
+
+  WaitForSingleObject(processInfo.hProcess, INFINITE);
+
+  DWORD exitCode = 0;
+  GetExitCodeProcess(processInfo.hProcess, &exitCode);
+  CloseHandle(readHandle);
+  CloseHandle(processInfo.hThread);
+  CloseHandle(processInfo.hProcess);
+
+  return ProcessExecutionResult{
+      .exitCode = exitCode,
+      .output = Utf8ToWide(output)};
+}
+
+std::filesystem::path WriteRuntimeScriptFile(const std::filesystem::path& jobsRoot, const std::wstring& extension,
+                                             const std::wstring& content) {
+  std::error_code error;
+  std::filesystem::create_directories(jobsRoot, error);
+  const auto scriptPath = jobsRoot / (GenerateGuidString() + extension);
+
+  std::ofstream output(scriptPath, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    throw std::runtime_error("Unable to create the runtime script file");
+  }
+
+  const auto utf8Content = WideToUtf8(content);
+  output.write(utf8Content.data(), static_cast<std::streamsize>(utf8Content.size()));
+  output.close();
+
+  return scriptPath;
+}
+
+}  // namespace
 
 AgentService::AgentService() = default;
 
@@ -131,6 +402,8 @@ void AgentService::RunSyncLoop(const AgentRunMode mode) {
 
   while (!ShouldStop()) {
     QueueCycleTelemetry(cycle);
+    QueueDeviceInventoryTelemetry(cycle);
+    EnforceBlockedSoftware();
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
@@ -399,6 +672,26 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecutePathRemediationCommand(command);
   }
 
+  if (command.type == L"script.run") {
+    return ExecuteScriptCommand(command);
+  }
+
+  if (command.type == L"software.uninstall") {
+    return ExecuteSoftwareCommand(command, true, false);
+  }
+
+  if (command.type == L"software.update") {
+    return ExecuteSoftwareCommand(command, false, false);
+  }
+
+  if (command.type == L"software.update.search") {
+    return ExecuteSoftwareCommand(command, false, true);
+  }
+
+  if (command.type == L"software.block") {
+    return ExecuteSoftwareBlockCommand(command);
+  }
+
   throw std::runtime_error("Unsupported remote command type");
 }
 
@@ -610,6 +903,135 @@ std::wstring AgentService::ExecutePathRemediationCommand(const RemoteCommand& co
          result.quarantineRecordId + L"\",\"evidenceRecordId\":\"" + result.evidenceRecordId + L"\"}";
 }
 
+std::wstring AgentService::ExecuteScriptCommand(const RemoteCommand& command) {
+  const auto scriptId = ExtractPayloadString(command.payloadJson, "scriptId").value_or(L"");
+  const auto scriptName = ExtractPayloadString(command.payloadJson, "scriptName").value_or(L"remote-script");
+  const auto language = ExtractPayloadString(command.payloadJson, "language").value_or(L"powershell");
+  const auto content = ExtractPayloadString(command.payloadJson, "content").value_or(L"");
+
+  if (content.empty()) {
+    throw std::runtime_error("script.run command is missing content");
+  }
+
+  const auto jobsRoot = config_.evidenceRootPath.parent_path() / L"jobs";
+  const auto scriptPath = WriteRuntimeScriptFile(jobsRoot, language == L"cmd" ? L".cmd" : L".ps1", content);
+  const auto commandLine = language == L"cmd"
+                               ? std::wstring(L"cmd.exe /c \"") + scriptPath.wstring() + L"\""
+                               : std::wstring(L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"") +
+                                     scriptPath.wstring() + L"\"";
+  const auto exitCode = ExecuteHiddenProcess(commandLine, jobsRoot.wstring());
+
+  QueueTelemetryEvent(exitCode == 0 ? L"script.executed" : L"script.failed", L"command-executor",
+                      exitCode == 0 ? L"The endpoint executed a remote script successfully."
+                                    : L"The endpoint executed a remote script but it returned a non-zero exit code.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"scriptId\":\"" + scriptId +
+                          L"\",\"scriptName\":\"" + Utf8ToWide(EscapeJsonString(scriptName)) + L"\",\"language\":\"" +
+                          language + L"\",\"path\":\"" + Utf8ToWide(EscapeJsonString(scriptPath.wstring())) +
+                          L"\",\"exitCode\":" + std::to_wstring(exitCode) + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"scriptId\":\"" + scriptId +
+         L"\",\"scriptName\":\"" + Utf8ToWide(EscapeJsonString(scriptName)) + L"\",\"language\":\"" + language +
+         L"\",\"path\":\"" + Utf8ToWide(EscapeJsonString(scriptPath.wstring())) + L"\",\"exitCode\":" +
+         std::to_wstring(exitCode) + L"}";
+}
+
+std::wstring AgentService::ExecuteSoftwareCommand(const RemoteCommand& command, const bool uninstall,
+                                                  const bool searchOnly) {
+  const auto softwareId = ExtractPayloadString(command.payloadJson, "softwareId").value_or(L"");
+  const auto displayName = ExtractPayloadString(command.payloadJson, "displayName").value_or(L"software-package");
+  const auto installLocation = ExtractPayloadString(command.payloadJson, "installLocation").value_or(L"");
+  const auto uninstallCommand = ExtractPayloadString(command.payloadJson, "uninstallCommand").value_or(L"");
+  const auto quietUninstallCommand = ExtractPayloadString(command.payloadJson, "quietUninstallCommand").value_or(L"");
+  const auto commandLineOverride = ExtractPayloadString(command.payloadJson, "commandLine").value_or(L"");
+  const auto workingDirectory = ExtractPayloadString(command.payloadJson, "workingDirectory").value_or(installLocation);
+
+  if (searchOnly) {
+    const auto searchCommand = std::wstring(L"cmd.exe /c winget upgrade --name \"") + displayName +
+                               L"\" --accept-source-agreements --disable-interactivity";
+    const auto result = ExecuteHiddenProcessCapture(searchCommand, workingDirectory);
+    const auto normalizedOutput = ToLowerCopy(result.output);
+    const auto updateAvailable =
+        result.exitCode == 0 && normalizedOutput.find(L"no available upgrade found") == std::wstring::npos &&
+        normalizedOutput.find(L"no installed package found") == std::wstring::npos;
+    const auto summary = updateAvailable ? L"Fenrir found a newer software package version for this application."
+                                         : L"Fenrir did not find a newer software package version for this application.";
+
+    QueueTelemetryEvent(result.exitCode == 0 ? L"software.update.search.completed" : L"software.update.search.failed",
+                        L"command-executor", summary,
+                        std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+                            L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) +
+                            L"\",\"updateAvailable\":" + (updateAvailable ? std::wstring(L"true") : std::wstring(L"false")) +
+                            L",\"exitCode\":" + std::to_wstring(result.exitCode) + L",\"summary\":\"" +
+                            Utf8ToWide(EscapeJsonString(summary)) + L"\",\"output\":\"" +
+                            Utf8ToWide(EscapeJsonString(result.output)) + L"\"}");
+
+    return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+           L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) + L"\",\"updateAvailable\":" +
+           (updateAvailable ? std::wstring(L"true") : std::wstring(L"false")) + L",\"exitCode\":" +
+           std::to_wstring(result.exitCode) + L",\"output\":\"" + Utf8ToWide(EscapeJsonString(result.output)) + L"\"}";
+  }
+
+  std::wstring commandLine = commandLineOverride;
+  if (commandLine.empty()) {
+    if (uninstall) {
+      commandLine = !quietUninstallCommand.empty() ? quietUninstallCommand : uninstallCommand;
+    } else {
+      commandLine = std::wstring(L"cmd.exe /c winget upgrade --name \"") + displayName +
+                    L"\" --accept-package-agreements --accept-source-agreements --silent --disable-interactivity";
+    }
+  }
+
+  if (commandLine.empty()) {
+    throw std::runtime_error("Software command is missing commandLine");
+  }
+
+  const auto result = ExecuteHiddenProcessCapture(commandLine, workingDirectory);
+  const auto eventType = uninstall ? (result.exitCode == 0 ? L"software.uninstalled" : L"software.uninstall.failed")
+                                   : (result.exitCode == 0 ? L"software.updated" : L"software.update.failed");
+  const auto summary = uninstall ? (result.exitCode == 0 ? L"The endpoint completed a remote software uninstall."
+                                                          : L"The endpoint attempted a remote software uninstall but it failed.")
+                                 : (result.exitCode == 0 ? L"The endpoint completed a remote software update."
+                                                         : L"The endpoint attempted a remote software update but it failed.");
+
+  QueueTelemetryEvent(eventType, L"command-executor", summary,
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+                          L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) +
+                          L"\",\"installLocation\":\"" + Utf8ToWide(EscapeJsonString(installLocation)) +
+                          L"\",\"exitCode\":" + std::to_wstring(result.exitCode) + L",\"output\":\"" +
+                          Utf8ToWide(EscapeJsonString(result.output)) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+         L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) + L"\",\"exitCode\":" +
+         std::to_wstring(result.exitCode) + L",\"output\":\"" + Utf8ToWide(EscapeJsonString(result.output)) + L"\"}";
+}
+
+std::wstring AgentService::ExecuteSoftwareBlockCommand(const RemoteCommand& command) {
+  RuntimeDatabase database(config_.runtimeDatabasePath);
+  const auto softwareId = ExtractPayloadString(command.payloadJson, "softwareId").value_or(GenerateGuidString());
+  const auto displayName = ExtractPayloadString(command.payloadJson, "displayName").value_or(L"blocked-software");
+  const auto installLocation = ExtractPayloadString(command.payloadJson, "installLocation").value_or(L"");
+  auto executableNames = ExtractPayloadStringArray(command.payloadJson, "executableNames");
+  std::transform(executableNames.begin(), executableNames.end(), executableNames.begin(), ToLowerCopy);
+
+  database.UpsertBlockedSoftwareRule(BlockedSoftwareRule{
+      .softwareId = softwareId,
+      .displayName = displayName,
+      .installLocation = installLocation,
+      .executableNames = executableNames,
+      .blockedAt = CurrentUtcTimestamp()});
+
+  EnforceBlockedSoftware();
+
+  QueueTelemetryEvent(L"software.blocked", L"command-executor",
+                      L"Fenrir blocked the selected software on this endpoint.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+                          L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) +
+                          L"\",\"installLocation\":\"" + Utf8ToWide(EscapeJsonString(installLocation)) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+         L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) + L"\"}";
+}
+
 void AgentService::PublishHeartbeat(const int cycle) {
   if (state_.deviceId.empty()) {
     return;
@@ -759,14 +1181,102 @@ void AgentService::QueueEndpointStatusTelemetry() {
                       WscCoexistenceManager::ToJson(wscSnapshot));
 }
 
+void AgentService::QueueDeviceInventoryTelemetry(const int cycle) {
+  if (cycle != 1 && (cycle % 10) != 0) {
+    return;
+  }
+
+  RuntimeDatabase database(config_.runtimeDatabasePath);
+  auto snapshot = CollectDeviceInventorySnapshot();
+  const auto blockedRules = database.ListBlockedSoftwareRules();
+
+  for (auto& software : snapshot.installedSoftware) {
+    const auto blockedRule =
+        std::find_if(blockedRules.begin(), blockedRules.end(), [&](const BlockedSoftwareRule& rule) {
+          return (!rule.softwareId.empty() && rule.softwareId == software.softwareId) ||
+                 (!rule.displayName.empty() && _wcsicmp(rule.displayName.c_str(), software.displayName.c_str()) == 0);
+        });
+    if (blockedRule != blockedRules.end()) {
+      software.blocked = true;
+      if (software.updateSummary.empty()) {
+        software.updateSummary = L"Execution is blocked on this endpoint.";
+      }
+    }
+  }
+
+  QueueTelemetryEvent(L"device.inventory.snapshot", L"device-inventory",
+                      L"The endpoint refreshed its local user, network, and installed software inventory.",
+                      BuildDeviceInventoryPayload(snapshot));
+}
+
 void AgentService::DrainProcessTelemetry() {
   if (!processEtwSensor_) {
     return;
   }
 
   const auto telemetry = processEtwSensor_->DrainTelemetry();
-  if (!telemetry.empty()) {
-    QueueTelemetryRecords(telemetry);
+  if (telemetry.empty()) {
+    return;
+  }
+
+  for (const auto& record : telemetry) {
+    if (record.eventType == L"process.started") {
+      const auto pid = ExtractPayloadUInt32(record.payloadJson, "pid");
+      const auto imageName = ExtractPayloadString(record.payloadJson, "imageName").value_or(L"");
+      const auto imagePath = ExtractPayloadString(record.payloadJson, "imagePath").value_or(L"");
+
+      RuntimeDatabase database(config_.runtimeDatabasePath);
+      for (const auto& rule : database.ListBlockedSoftwareRules()) {
+        const auto matchedName = std::any_of(rule.executableNames.begin(), rule.executableNames.end(),
+                                             [&](const std::wstring& executableName) {
+                                               return !imageName.empty() &&
+                                                      _wcsicmp(executableName.c_str(), imageName.c_str()) == 0;
+                                             });
+        const auto matchedPath = !rule.installLocation.empty() && !imagePath.empty() &&
+                                 PathStartsWith(imagePath, rule.installLocation);
+
+        if ((matchedName || matchedPath) && pid && TerminateProcessById(*pid)) {
+          QueueTelemetryEvent(L"software.block.enforced", L"command-executor",
+                              L"Fenrir terminated a blocked software process after it launched.",
+                              std::wstring(L"{\"softwareId\":\"") + rule.softwareId + L"\",\"displayName\":\"" +
+                                  Utf8ToWide(EscapeJsonString(rule.displayName)) + L"\",\"pid\":" +
+                                  std::to_wstring(*pid) + L",\"imageName\":\"" +
+                                  Utf8ToWide(EscapeJsonString(imageName)) + L"\"}");
+        }
+      }
+    }
+  }
+
+  QueueTelemetryRecords(telemetry);
+}
+
+void AgentService::EnforceBlockedSoftware() {
+  RuntimeDatabase database(config_.runtimeDatabasePath);
+  const auto rules = database.ListBlockedSoftwareRules();
+  if (rules.empty()) {
+    return;
+  }
+
+  const auto processes = CollectProcessInventory();
+  for (const auto& process : processes) {
+    for (const auto& rule : rules) {
+      const auto matchedName = std::any_of(rule.executableNames.begin(), rule.executableNames.end(),
+                                           [&](const std::wstring& executableName) {
+                                             return !process.imageName.empty() &&
+                                                    _wcsicmp(executableName.c_str(), process.imageName.c_str()) == 0;
+                                           });
+      const auto matchedPath = !rule.installLocation.empty() && !process.imagePath.empty() &&
+                               PathStartsWith(process.imagePath, rule.installLocation);
+
+      if ((matchedName || matchedPath) && TerminateProcessById(process.pid)) {
+        QueueTelemetryEvent(L"software.block.enforced", L"command-executor",
+                            L"Fenrir terminated a blocked software process during policy enforcement.",
+                            std::wstring(L"{\"softwareId\":\"") + rule.softwareId + L"\",\"displayName\":\"" +
+                                Utf8ToWide(EscapeJsonString(rule.displayName)) + L"\",\"pid\":" +
+                                std::to_wstring(process.pid) + L",\"imageName\":\"" +
+                                Utf8ToWide(EscapeJsonString(process.imageName)) + L"\"}");
+      }
+    }
   }
 }
 

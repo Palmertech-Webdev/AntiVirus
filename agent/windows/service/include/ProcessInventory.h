@@ -13,6 +13,7 @@ struct ProcessObservation {
   DWORD pid{0};
   DWORD parentPid{0};
   std::wstring imageName;
+  std::wstring imagePath;
   bool prioritized{false};
 };
 

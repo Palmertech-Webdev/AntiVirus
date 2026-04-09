@@ -14,6 +14,8 @@ import {
   CommandNotFoundError,
   createFileBackedControlPlaneStore,
   DeviceNotFoundError,
+  PolicyNotFoundError,
+  ScriptNotFoundError,
   type ControlPlaneStore
 } from "./controlPlaneStore.ts";
 
@@ -83,11 +85,88 @@ const queueCommandRequestSchema = z.object({
     "process.terminate",
     "process.tree.terminate",
     "persistence.cleanup",
-    "remediate.path"
+    "remediate.path",
+    "script.run",
+    "software.uninstall",
+    "software.update",
+    "software.update.search",
+    "software.block"
   ]),
   issuedBy: z.string().min(1).optional(),
   targetPath: z.string().min(1).optional(),
-  recordId: z.string().min(1).optional()
+  recordId: z.string().min(1).optional(),
+  payloadJson: z.string().min(2).optional()
+});
+
+const policyParamsSchema = z.object({
+  policyId: z.string().min(1)
+});
+
+const scriptParamsSchema = z.object({
+  scriptId: z.string().min(1)
+});
+
+const createPolicyRequestSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  realtimeProtection: z.boolean(),
+  cloudLookup: z.boolean(),
+  scriptInspection: z.boolean(),
+  networkContainment: z.boolean(),
+  quarantineOnMalicious: z.boolean()
+});
+
+const updatePolicyRequestSchema = createPolicyRequestSchema.partial();
+
+const policyAssignmentRequestSchema = z.object({
+  deviceIds: z.array(z.string().min(1)).min(1)
+});
+
+const createScriptRequestSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  language: z.enum(["powershell", "cmd"]),
+  content: z.string().min(1)
+});
+
+const updateScriptRequestSchema = createScriptRequestSchema.partial();
+
+const deviceRecordParamsSchema = z.object({
+  deviceId: z.string().min(1),
+  recordId: z.string().min(1)
+});
+
+const issuedByRequestSchema = z.object({
+  issuedBy: z.string().min(1).optional()
+});
+
+const targetPathActionRequestSchema = z.object({
+  targetPath: z.string().min(1),
+  issuedBy: z.string().min(1).optional()
+});
+
+const updateApplyRequestSchema = z.object({
+  targetPath: z.string().min(1),
+  issuedBy: z.string().min(1).optional()
+});
+
+const runScriptRequestSchema = z.object({
+  scriptId: z.string().min(1),
+  issuedBy: z.string().min(1).optional()
+});
+
+const softwareCommandRequestSchema = z.object({
+  softwareId: z.string().min(1).optional(),
+  displayName: z.string().min(1),
+  displayVersion: z.string().min(1).optional(),
+  publisher: z.string().min(1).optional(),
+  installLocation: z.string().min(1).optional(),
+  uninstallCommand: z.string().min(1).optional(),
+  quietUninstallCommand: z.string().min(1).optional(),
+  executableNames: z.array(z.string().min(1)).optional(),
+  commandLine: z.string().min(1).optional(),
+  workingDirectory: z.string().min(1).optional(),
+  issuedBy: z.string().min(1).optional()
 });
 
 const pollCommandsQuerySchema = z.object({
@@ -193,6 +272,20 @@ function sendCommandNotFound(reply: { code: (statusCode: number) => { send: (pay
   });
 }
 
+function sendPolicyNotFound(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, policyId: string) {
+  return reply.code(404).send({
+    error: "policy_not_found",
+    policyId
+  });
+}
+
+function sendScriptNotFound(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, scriptId: string) {
+  return reply.code(404).send({
+    error: "script_not_found",
+    scriptId
+  });
+}
+
 function sendMailMessageNotFound(
   reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } },
   mailMessageId: string
@@ -261,6 +354,20 @@ function validateQueuedCommand(
     };
   }
 
+  if (
+    (body.type === "script.run" ||
+      body.type === "software.uninstall" ||
+      body.type === "software.update" ||
+      body.type === "software.update.search" ||
+      body.type === "software.block") &&
+    !body.payloadJson
+  ) {
+    return {
+      valid: false,
+      details: `${body.type} requires payloadJson`
+    };
+  }
+
   return { valid: true };
 }
 
@@ -306,6 +413,10 @@ export function buildServer(options: BuildServerOptions = {}) {
     }
 
     return undefined;
+  }
+
+  function extractObservedRemoteAddress(request: { ip: string }) {
+    return request.ip;
   }
 
   function requireDeviceAuthentication(
@@ -554,6 +665,107 @@ export function buildServer(options: BuildServerOptions = {}) {
 
   app.get("/api/v1/policies/default", async () => store.getDefaultPolicy());
 
+  app.get("/api/v1/policies", async () => ({
+    items: await store.listPolicies()
+  }));
+
+  app.post("/api/v1/policies", async (request, reply) => {
+    const body = createPolicyRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    return reply.code(201).send(await store.createPolicy(body.data));
+  });
+
+  app.patch("/api/v1/policies/:policyId", async (request, reply) => {
+    const params = policyParamsSchema.safeParse(request.params);
+    const body = updatePolicyRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return await store.updatePolicy(params.data.policyId, body.data);
+    } catch (error) {
+      if (error instanceof PolicyNotFoundError) {
+        return sendPolicyNotFound(reply, params.data.policyId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/policies/:policyId/assign", async (request, reply) => {
+    const params = policyParamsSchema.safeParse(request.params);
+    const body = policyAssignmentRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return await store.assignPolicy(params.data.policyId, body.data);
+    } catch (error) {
+      if (error instanceof PolicyNotFoundError) {
+        return sendPolicyNotFound(reply, params.data.policyId);
+      }
+
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, error.message.replace("Device not found: ", ""));
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/scripts", async () => ({
+    items: await store.listScripts()
+  }));
+
+  app.post("/api/v1/scripts", async (request, reply) => {
+    const body = createScriptRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    return reply.code(201).send(await store.createScript(body.data));
+  });
+
+  app.patch("/api/v1/scripts/:scriptId", async (request, reply) => {
+    const params = scriptParamsSchema.safeParse(request.params);
+    const body = updateScriptRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return await store.updateScript(params.data.scriptId, body.data);
+    } catch (error) {
+      if (error instanceof ScriptNotFoundError) {
+        return sendScriptNotFound(reply, params.data.scriptId);
+      }
+
+      throw error;
+    }
+  });
+
   app.post("/api/v1/enroll", async (request, reply) => {
     const finalizeEnrollment = (enrollment: { deviceId: string; commandChannelUrl: string }) => {
       const deviceApiKey = issueDeviceApiKey();
@@ -571,7 +783,9 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, parsed.error.flatten());
     }
 
-    return reply.code(201).send(finalizeEnrollment(await store.enrollDevice(parsed.data)));
+    return reply.code(201).send(
+      finalizeEnrollment(await store.enrollDevice(parsed.data, extractObservedRemoteAddress(request)))
+    );
   });
 
   app.post("/api/v1/devices/:deviceId/heartbeat", async (request, reply) => {
@@ -591,7 +805,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     }
 
     try {
-      return await store.recordHeartbeat(params.data.deviceId, body.data);
+      return await store.recordHeartbeat(params.data.deviceId, body.data, extractObservedRemoteAddress(request));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
@@ -618,7 +832,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     }
 
     try {
-      return await store.policyCheckIn(params.data.deviceId, body.data);
+      return await store.policyCheckIn(params.data.deviceId, body.data, extractObservedRemoteAddress(request));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
@@ -647,6 +861,397 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     try {
       return reply.code(201).send(await store.queueCommand(params.data.deviceId, body.data));
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/isolate", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = issuedByRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "device.isolate",
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/release", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = issuedByRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "device.release",
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/quarantine/:recordId/restore", async (request, reply) => {
+    const params = deviceRecordParamsSchema.safeParse(request.params);
+    const body = issuedByRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "quarantine.restore",
+          recordId: params.data.recordId,
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/quarantine/:recordId/delete", async (request, reply) => {
+    const params = deviceRecordParamsSchema.safeParse(request.params);
+    const body = issuedByRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "quarantine.delete",
+          recordId: params.data.recordId,
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/remediate-path", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = targetPathActionRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "remediate.path",
+          targetPath: body.data.targetPath,
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/process-tree-terminate", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = targetPathActionRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "process.tree.terminate",
+          targetPath: body.data.targetPath,
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/update-agent", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = updateApplyRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "update.apply",
+          targetPath: body.data.targetPath,
+          issuedBy: body.data.issuedBy ?? "console"
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/run-script", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = runScriptRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      const scripts = await store.listScripts();
+      const script = scripts.find((item) => item.id === body.data.scriptId);
+      if (!script) {
+        return sendScriptNotFound(reply, body.data.scriptId);
+      }
+
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "script.run",
+          issuedBy: body.data.issuedBy ?? "console",
+          payloadJson: JSON.stringify({
+            scriptId: script.id,
+            scriptName: script.name,
+            language: script.language,
+            content: script.content
+          })
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/software-uninstall", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = softwareCommandRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "software.uninstall",
+          issuedBy: body.data.issuedBy ?? "console",
+          payloadJson: JSON.stringify({
+            softwareId: body.data.softwareId,
+            displayName: body.data.displayName,
+            displayVersion: body.data.displayVersion,
+            publisher: body.data.publisher,
+            installLocation: body.data.installLocation,
+            uninstallCommand: body.data.uninstallCommand,
+            quietUninstallCommand: body.data.quietUninstallCommand,
+            executableNames: body.data.executableNames,
+            commandLine: body.data.commandLine,
+            workingDirectory: body.data.workingDirectory ?? body.data.installLocation
+          })
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/software-update", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = softwareCommandRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "software.update",
+          issuedBy: body.data.issuedBy ?? "console",
+          payloadJson: JSON.stringify({
+            softwareId: body.data.softwareId,
+            displayName: body.data.displayName,
+            displayVersion: body.data.displayVersion,
+            publisher: body.data.publisher,
+            installLocation: body.data.installLocation,
+            executableNames: body.data.executableNames,
+            commandLine: body.data.commandLine,
+            workingDirectory: body.data.workingDirectory ?? body.data.installLocation
+          })
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/software-search-updates", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = softwareCommandRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "software.update.search",
+          issuedBy: body.data.issuedBy ?? "console",
+          payloadJson: JSON.stringify({
+            softwareId: body.data.softwareId,
+            displayName: body.data.displayName,
+            displayVersion: body.data.displayVersion,
+            publisher: body.data.publisher,
+            installLocation: body.data.installLocation,
+            executableNames: body.data.executableNames
+          })
+        })
+      );
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/actions/software-block", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = softwareCommandRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.queueCommand(params.data.deviceId, {
+          type: "software.block",
+          issuedBy: body.data.issuedBy ?? "console",
+          payloadJson: JSON.stringify({
+            softwareId: body.data.softwareId,
+            displayName: body.data.displayName,
+            displayVersion: body.data.displayVersion,
+            publisher: body.data.publisher,
+            installLocation: body.data.installLocation,
+            executableNames: body.data.executableNames
+          })
+        })
+      );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
@@ -731,7 +1336,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     }
 
     try {
-      return await store.ingestTelemetry(params.data.deviceId, body.data);
+      return await store.ingestTelemetry(params.data.deviceId, body.data, extractObservedRemoteAddress(request));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);

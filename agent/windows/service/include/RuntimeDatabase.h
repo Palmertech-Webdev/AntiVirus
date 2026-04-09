@@ -66,6 +66,14 @@ struct UpdateJournalRecord {
   bool requiresRestart{false};
 };
 
+struct BlockedSoftwareRule {
+  std::wstring softwareId;
+  std::wstring displayName;
+  std::wstring installLocation;
+  std::vector<std::wstring> executableNames;
+  std::wstring blockedAt;
+};
+
 class RuntimeDatabase {
  public:
   explicit RuntimeDatabase(std::filesystem::path databasePath);
@@ -94,6 +102,8 @@ class RuntimeDatabase {
   void UpsertUpdateJournal(const UpdateJournalRecord& record) const;
   bool LoadUpdateJournal(const std::wstring& transactionId, UpdateJournalRecord& record) const;
   std::vector<UpdateJournalRecord> ListUpdateJournal(std::size_t limit = 20) const;
+  void UpsertBlockedSoftwareRule(const BlockedSoftwareRule& record) const;
+  std::vector<BlockedSoftwareRule> ListBlockedSoftwareRules(std::size_t limit = 200) const;
 
  private:
   std::filesystem::path databasePath_;

@@ -15,13 +15,27 @@ function createDefaultPolicy() {
     realtimeProtection: true,
     cloudLookup: true,
     scriptInspection: true,
-    networkContainment: false
+    networkContainment: false,
+    quarantineOnMalicious: true
+  };
+}
+
+function createDefaultPolicyProfile(baseIso: string) {
+  return {
+    ...createDefaultPolicy(),
+    description: "Balanced endpoint baseline for always-on protection, script inspection, and analyst-led containment.",
+    isDefault: true,
+    assignedDeviceIds: [],
+    createdAt: baseIso,
+    updatedAt: baseIso
   };
 }
 
 export function createEmptyState(baseIso: string = new Date().toISOString()): ControlPlaneState {
   return {
     defaultPolicy: createDefaultPolicy(),
+    policies: [createDefaultPolicyProfile(baseIso)],
+    scripts: [],
     devices: [],
     alerts: [],
     telemetry: [],
@@ -34,8 +48,77 @@ export function createEmptyState(baseIso: string = new Date().toISOString()): Co
 }
 
 export function createSeedState(baseIso: string = new Date().toISOString()): ControlPlaneState {
+  const defaultPolicy = createDefaultPolicy();
+  const financeSoftware = [
+    {
+      id: "sw-fin-vpn",
+      displayName: "Contoso VPN",
+      displayVersion: "5.4.2",
+      publisher: "Contoso",
+      installLocation: "C:\\Program Files\\Contoso\\VPN",
+      uninstallCommand: "MsiExec.exe /x {CONTOSO-VPN-001} /qn",
+      quietUninstallCommand: "MsiExec.exe /x {CONTOSO-VPN-001} /qn",
+      installDate: "2026-03-12",
+      displayIconPath: "C:\\Program Files\\Contoso\\VPN\\vpn.exe",
+      executableNames: ["vpn.exe"],
+      blocked: false,
+      updateState: "available" as const,
+      lastUpdateCheckAt: minusMinutes(baseIso, 11),
+      updateSummary: "Version 5.5.0 is available from the configured software catalog."
+    },
+    {
+      id: "sw-fin-reader",
+      displayName: "Adobe Acrobat Reader",
+      displayVersion: "24.001.1000",
+      publisher: "Adobe",
+      installLocation: "C:\\Program Files\\Adobe\\Acrobat Reader",
+      uninstallCommand: "\"C:\\Program Files\\Adobe\\Acrobat Reader\\Setup.exe\" /remove /quiet",
+      executableNames: ["acrord32.exe"],
+      blocked: false,
+      updateState: "current" as const,
+      lastUpdateCheckAt: minusMinutes(baseIso, 32),
+      updateSummary: "No newer package was reported during the last update check."
+    }
+  ];
+
   return {
-    defaultPolicy: createDefaultPolicy(),
+    defaultPolicy,
+    policies: [
+      {
+        ...defaultPolicy,
+        description: "Balanced endpoint baseline for everyday protected workstations.",
+        isDefault: true,
+        assignedDeviceIds: [...DEMO_DEVICE_IDS],
+        createdAt: minusMinutes(baseIso, 120),
+        updatedAt: minusMinutes(baseIso, 15)
+      },
+      {
+        id: "policy-containment",
+        name: "High Containment",
+        revision: "2026.04.08.2",
+        realtimeProtection: true,
+        cloudLookup: true,
+        scriptInspection: true,
+        networkContainment: true,
+        quarantineOnMalicious: true,
+        description: "Tighter network containment and aggressive quarantine for high-risk devices.",
+        isDefault: false,
+        assignedDeviceIds: ["dev-lon-003"],
+        createdAt: minusMinutes(baseIso, 75),
+        updatedAt: minusMinutes(baseIso, 20)
+      }
+    ],
+    scripts: [
+      {
+        id: "script-001",
+        name: "Collect triage bundle",
+        description: "Collect a quick triage package from common staging locations.",
+        language: "powershell",
+        content: "Get-ChildItem $env:TEMP -Force | Select-Object -First 25 | Out-String",
+        createdAt: minusMinutes(baseIso, 65),
+        updatedAt: minusMinutes(baseIso, 65)
+      }
+    ],
     devices: [
       {
         id: "dev-lon-001",
@@ -50,7 +133,12 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         lastTelemetryAt: null,
         healthState: "healthy",
         isolated: false,
-        policyName: "Business Baseline"
+        policyId: "policy-default",
+        policyName: "Business Baseline",
+        privateIpAddresses: ["10.44.7.23"],
+        publicIpAddress: "203.0.113.19",
+        lastLoggedOnUser: "CORP\\finance.user",
+        installedSoftware: financeSoftware
       },
       {
         id: "dev-lon-002",
@@ -65,7 +153,25 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         lastTelemetryAt: null,
         healthState: "degraded",
         isolated: false,
-        policyName: "Business Baseline"
+        policyId: "policy-default",
+        policyName: "Business Baseline",
+        privateIpAddresses: ["10.44.7.38", "192.168.56.1"],
+        publicIpAddress: "203.0.113.44",
+        lastLoggedOnUser: "CORP\\ops.user",
+        installedSoftware: [
+          {
+            id: "sw-ops-remote",
+            displayName: "RustDesk",
+            displayVersion: "1.3.8",
+            publisher: "RustDesk",
+            installLocation: "C:\\Program Files\\RustDesk",
+            uninstallCommand: "\"C:\\Program Files\\RustDesk\\uninstall.exe\" /S",
+            executableNames: ["rustdesk.exe"],
+            blocked: false,
+            updateState: "unknown",
+            updateSummary: "No update check has been issued yet."
+          }
+        ]
       },
       {
         id: "dev-lon-003",
@@ -80,7 +186,26 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         lastTelemetryAt: null,
         healthState: "isolated",
         isolated: true,
-        policyName: "Business Baseline"
+        policyId: "policy-containment",
+        policyName: "High Containment",
+        privateIpAddresses: ["10.44.8.16"],
+        publicIpAddress: "198.51.100.17",
+        lastLoggedOnUser: "CORP\\hr.user",
+        installedSoftware: [
+          {
+            id: "sw-hr-chat",
+            displayName: "Northwind Chat",
+            displayVersion: "2.1.0",
+            publisher: "Northwind",
+            installLocation: "C:\\Program Files\\Northwind\\Chat",
+            uninstallCommand: "\"C:\\Program Files\\Northwind\\Chat\\uninstall.exe\" /quiet",
+            executableNames: ["northwind-chat.exe"],
+            blocked: true,
+            updateState: "error",
+            lastUpdateCheckAt: minusMinutes(baseIso, 5),
+            updateSummary: "Software is blocked pending review."
+          }
+        ]
       }
     ],
     alerts: [
@@ -139,7 +264,8 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         createdAt: minusMinutes(baseIso, 5),
         updatedAt: minusMinutes(baseIso, 5),
         issuedBy: "automated-triage",
-        targetPath: "C:\\Users\\ops\\Downloads"
+        targetPath: "C:\\Users\\ops\\Downloads",
+        payloadJson: "{\"reason\":\"triage\"}"
       }
     ],
     quarantineItems: [

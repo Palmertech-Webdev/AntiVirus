@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import ConsoleShell from "./ConsoleShell";
+import { assignPolicy, createPolicy, updatePolicy } from "../../lib/api";
 import { useConsoleData } from "./useConsoleData";
 import { filterDevices } from "../../lib/console-model";
 
@@ -14,17 +14,80 @@ function formatBoolean(value: boolean) {
 export default function PoliciesView() {
   const { snapshot, source, refreshing, refreshSnapshot } = useConsoleData();
   const [query, setQuery] = useState("");
+  const [selectedPolicyId, setSelectedPolicyId] = useState("");
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState<string[]>([]);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  const [newPolicyName, setNewPolicyName] = useState("");
+  const [newPolicyDescription, setNewPolicyDescription] = useState("");
+  const [newRealtimeProtection, setNewRealtimeProtection] = useState(true);
+  const [newCloudLookup, setNewCloudLookup] = useState(true);
+  const [newScriptInspection, setNewScriptInspection] = useState(true);
+  const [newNetworkContainment, setNewNetworkContainment] = useState(true);
+  const [newQuarantineOnMalicious, setNewQuarantineOnMalicious] = useState(true);
+
+  const policies = snapshot.policies;
+  const currentPolicy = policies.find((item) => item.id === selectedPolicyId) ?? policies[0] ?? null;
   const assignedDevices = filterDevices(snapshot.devices, query);
-  const protectedDevices = assignedDevices.filter((device) => device.policyName === snapshot.defaultPolicy.name).length;
+
+  const [policyName, setPolicyName] = useState("");
+  const [policyDescription, setPolicyDescription] = useState("");
+  const [policyRealtimeProtection, setPolicyRealtimeProtection] = useState(true);
+  const [policyCloudLookup, setPolicyCloudLookup] = useState(true);
+  const [policyScriptInspection, setPolicyScriptInspection] = useState(true);
+  const [policyNetworkContainment, setPolicyNetworkContainment] = useState(true);
+  const [policyQuarantineOnMalicious, setPolicyQuarantineOnMalicious] = useState(true);
+
+  useEffect(() => {
+    if (!selectedPolicyId && policies[0]) {
+      setSelectedPolicyId(policies[0].id);
+    }
+  }, [policies, selectedPolicyId]);
+
+  useEffect(() => {
+    if (!currentPolicy) {
+      return;
+    }
+
+    setPolicyName(currentPolicy.name);
+    setPolicyDescription(currentPolicy.description);
+    setPolicyRealtimeProtection(currentPolicy.realtimeProtection);
+    setPolicyCloudLookup(currentPolicy.cloudLookup);
+    setPolicyScriptInspection(currentPolicy.scriptInspection);
+    setPolicyNetworkContainment(currentPolicy.networkContainment);
+    setPolicyQuarantineOnMalicious(currentPolicy.quarantineOnMalicious);
+    setSelectedDeviceIds(currentPolicy.assignedDeviceIds);
+  }, [currentPolicy]);
+
+  const protectedDevices = useMemo(
+    () => assignedDevices.filter((device) => device.policyName === snapshot.defaultPolicy.name).length,
+    [assignedDevices, snapshot.defaultPolicy.name]
+  );
+
+  async function runPolicyAction(label: string, action: () => Promise<void>) {
+    setActionBusy(label);
+    setActionMessage(null);
+
+    try {
+      await action();
+      setActionMessage(`${label} completed.`);
+      await refreshSnapshot("manual");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setActionMessage(`${label} failed: ${message}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }
 
   return (
     <ConsoleShell
       activeNav="policies"
       title="Policies"
-      subtitle="Protection profiles, exclusions, automation, and device assignments."
+      subtitle="Create, amend, and assign protection profiles to devices."
       searchValue={query}
-      searchPlaceholder="Search policies, device assignments, protections, or exclusions..."
+      searchPlaceholder="Search policies, revisions, device assignments, protections, or exclusions..."
       onSearchChange={setQuery}
       onRefresh={() => {
         void refreshSnapshot("manual");
@@ -35,26 +98,26 @@ export default function PoliciesView() {
       policyRevision={snapshot.defaultPolicy.revision}
       statusItems={[
         { label: snapshot.defaultPolicy.name },
-        { label: `${protectedDevices} assigned devices`, tone: "default" }
+        { label: `${protectedDevices} default-policy devices`, tone: "default" }
       ]}
       drawer={
         <div className="drawer-stack">
           <section className="drawer-panel">
             <p className="section-kicker">Active policy</p>
-            <h3>{snapshot.defaultPolicy.name}</h3>
-            <p className="muted-copy">Revision {snapshot.defaultPolicy.revision}</p>
+            <h3>{currentPolicy?.name ?? "No policy selected"}</h3>
+            <p className="muted-copy">Revision {currentPolicy?.revision ?? "pending"}</p>
           </section>
           <section className="drawer-panel">
-            <p className="section-kicker">Policy actions</p>
-            <div className="action-stack">
-              <Link href="/devices" className="primary-link">
-                Review assignments
-              </Link>
-              <Link href="/reports" className="secondary-link">
-                View protection outcomes
-              </Link>
-            </div>
+            <p className="section-kicker">Assignment summary</p>
+            <h3>{currentPolicy?.assignedDeviceIds.length ?? 0} devices</h3>
+            <p className="muted-copy">Policy assignments are now live and written back to the backend.</p>
           </section>
+          {actionMessage ? (
+            <section className="drawer-panel">
+              <p className="section-kicker">Last action</p>
+              <p className="muted-copy">{actionMessage}</p>
+            </section>
+          ) : null}
         </div>
       }
     >
@@ -67,116 +130,194 @@ export default function PoliciesView() {
         <article className="metric-surface">
           <span className="metric-label">Script inspection</span>
           <strong className="metric-number">{formatBoolean(snapshot.defaultPolicy.scriptInspection)}</strong>
-          <p className="muted-copy">AMSI-backed script inspection is part of the current protection posture.</p>
+          <p className="muted-copy">AMSI-backed script inspection in the current default policy.</p>
         </article>
         <article className="metric-surface">
-          <span className="metric-label">Assigned devices</span>
-          <strong className="metric-number">{protectedDevices}</strong>
-          <p className="muted-copy">Endpoints currently reporting this policy name from the live backend.</p>
+          <span className="metric-label">Policy count</span>
+          <strong className="metric-number">{policies.length}</strong>
+          <p className="muted-copy">Profiles now persisted in the backend instead of being a single static baseline.</p>
         </article>
       </section>
 
-      <section className="surface-card">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Policy profile</p>
-            <h3>{snapshot.defaultPolicy.name}</h3>
-          </div>
-        </div>
+      {actionMessage ? (
+        <section className="surface-card">
+          <p className="section-kicker">Policy action status</p>
+          <h3>{actionMessage}</h3>
+        </section>
+      ) : null}
 
-        <div className="row-card-list">
-          <article className="row-card">
-            <div className="row-card-copy">
-              <p className="section-kicker">Protection profile</p>
-              <h4>Current baseline controls</h4>
-              <div className="tag-row">
-                <span className={`state-chip tone-${snapshot.defaultPolicy.realtimeProtection ? "default" : "low"}`}>
-                  realtime {formatBoolean(snapshot.defaultPolicy.realtimeProtection).toLowerCase()}
-                </span>
-                <span className={`state-chip tone-${snapshot.defaultPolicy.cloudLookup ? "default" : "low"}`}>
-                  cloud lookup {formatBoolean(snapshot.defaultPolicy.cloudLookup).toLowerCase()}
-                </span>
-                <span className={`state-chip tone-${snapshot.defaultPolicy.scriptInspection ? "default" : "low"}`}>
-                  script inspection {formatBoolean(snapshot.defaultPolicy.scriptInspection).toLowerCase()}
-                </span>
-                <span className={`state-chip tone-${snapshot.defaultPolicy.networkContainment ? "default" : "warning"}`}>
-                  network containment {formatBoolean(snapshot.defaultPolicy.networkContainment).toLowerCase()}
-                </span>
+      <section className="grid grid-2">
+        <article className="surface-card">
+          <div className="section-heading">
+            <div>
+              <p className="section-kicker">Create policy</p>
+              <h3>Add a new protection profile</h3>
+            </div>
+          </div>
+          <div className="field-grid">
+            <label className="field-group">
+              <span>Name</span>
+              <input className="admin-input" value={newPolicyName} onChange={(event) => setNewPolicyName(event.target.value)} />
+            </label>
+            <label className="field-group field-span-2">
+              <span>Description</span>
+              <input
+                className="admin-input"
+                value={newPolicyDescription}
+                onChange={(event) => setNewPolicyDescription(event.target.value)}
+              />
+            </label>
+            <label className="field-group inline-toggle"><span>Realtime protection</span><input type="checkbox" checked={newRealtimeProtection} onChange={(event) => setNewRealtimeProtection(event.target.checked)} /></label>
+            <label className="field-group inline-toggle"><span>Cloud lookup</span><input type="checkbox" checked={newCloudLookup} onChange={(event) => setNewCloudLookup(event.target.checked)} /></label>
+            <label className="field-group inline-toggle"><span>Script inspection</span><input type="checkbox" checked={newScriptInspection} onChange={(event) => setNewScriptInspection(event.target.checked)} /></label>
+            <label className="field-group inline-toggle"><span>Network containment</span><input type="checkbox" checked={newNetworkContainment} onChange={(event) => setNewNetworkContainment(event.target.checked)} /></label>
+            <label className="field-group inline-toggle"><span>Quarantine on malicious</span><input type="checkbox" checked={newQuarantineOnMalicious} onChange={(event) => setNewQuarantineOnMalicious(event.target.checked)} /></label>
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="primary-link"
+              disabled={Boolean(actionBusy) || !newPolicyName.trim()}
+              onClick={() => {
+                void runPolicyAction("Create policy", async () => {
+                  await createPolicy({
+                    name: newPolicyName.trim(),
+                    description: newPolicyDescription.trim() || undefined,
+                    realtimeProtection: newRealtimeProtection,
+                    cloudLookup: newCloudLookup,
+                    scriptInspection: newScriptInspection,
+                    networkContainment: newNetworkContainment,
+                    quarantineOnMalicious: newQuarantineOnMalicious
+                  });
+                  setNewPolicyName("");
+                  setNewPolicyDescription("");
+                });
+              }}
+            >
+              Create policy
+            </button>
+          </div>
+        </article>
+
+        <article className="surface-card">
+          <div className="section-heading">
+            <div>
+              <p className="section-kicker">Policy library</p>
+              <h3>Select a profile to amend</h3>
+            </div>
+          </div>
+          <div className="tab-strip" role="tablist" aria-label="Policies">
+            {policies.map((policy) => (
+              <button
+                key={policy.id}
+                type="button"
+                className={`tab-button ${currentPolicy?.id === policy.id ? "is-active" : ""}`}
+                onClick={() => setSelectedPolicyId(policy.id)}
+              >
+                <span>{policy.name}</span>
+                <small>{policy.revision}</small>
+              </button>
+            ))}
+          </div>
+        </article>
+      </section>
+
+      {currentPolicy ? (
+        <section className="grid grid-2">
+          <article className="surface-card">
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Edit policy</p>
+                <h3>{currentPolicy.name}</h3>
               </div>
             </div>
-            <div className="row-card-actions">
-              <Link href="/reports" className="primary-link">
-                View outcomes
-              </Link>
-              <Link href="/incidents" className="secondary-link">
-                Open incidents
-              </Link>
+            <div className="field-grid">
+              <label className="field-group">
+                <span>Name</span>
+                <input className="admin-input" value={policyName} onChange={(event) => setPolicyName(event.target.value)} />
+              </label>
+              <label className="field-group field-span-2">
+                <span>Description</span>
+                <input className="admin-input" value={policyDescription} onChange={(event) => setPolicyDescription(event.target.value)} />
+              </label>
+              <label className="field-group inline-toggle"><span>Realtime protection</span><input type="checkbox" checked={policyRealtimeProtection} onChange={(event) => setPolicyRealtimeProtection(event.target.checked)} /></label>
+              <label className="field-group inline-toggle"><span>Cloud lookup</span><input type="checkbox" checked={policyCloudLookup} onChange={(event) => setPolicyCloudLookup(event.target.checked)} /></label>
+              <label className="field-group inline-toggle"><span>Script inspection</span><input type="checkbox" checked={policyScriptInspection} onChange={(event) => setPolicyScriptInspection(event.target.checked)} /></label>
+              <label className="field-group inline-toggle"><span>Network containment</span><input type="checkbox" checked={policyNetworkContainment} onChange={(event) => setPolicyNetworkContainment(event.target.checked)} /></label>
+              <label className="field-group inline-toggle"><span>Quarantine on malicious</span><input type="checkbox" checked={policyQuarantineOnMalicious} onChange={(event) => setPolicyQuarantineOnMalicious(event.target.checked)} /></label>
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="primary-link"
+                disabled={Boolean(actionBusy) || !policyName.trim()}
+                onClick={() => {
+                  void runPolicyAction("Save policy", async () => {
+                    await updatePolicy(currentPolicy.id, {
+                      name: policyName.trim(),
+                      description: policyDescription.trim() || undefined,
+                      realtimeProtection: policyRealtimeProtection,
+                      cloudLookup: policyCloudLookup,
+                      scriptInspection: policyScriptInspection,
+                      networkContainment: policyNetworkContainment,
+                      quarantineOnMalicious: policyQuarantineOnMalicious
+                    });
+                  });
+                }}
+              >
+                Save policy
+              </button>
             </div>
           </article>
 
-          <article className="row-card">
-            <div className="row-card-copy">
-              <p className="section-kicker">Assignment impact</p>
-              <h4>Devices reporting this policy</h4>
-              <p className="muted-copy">
-                Use the device table below to see where the current policy is deployed and which endpoints remain
-                degraded or isolated under it.
-              </p>
+          <article className="surface-card">
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Assignments</p>
+                <h3>Assign {currentPolicy.name} to devices</h3>
+              </div>
             </div>
-            <div className="row-card-actions">
-              <Link href="/devices" className="primary-link">
-                Open devices
-              </Link>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section className="surface-card">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Assignments</p>
-            <h3>Devices and their current protection state</h3>
-          </div>
-        </div>
-
-        <div className="table-shell">
-          <table className="ops-table">
-            <thead>
-              <tr>
-                <th>Device</th>
-                <th>Policy</th>
-                <th>Health</th>
-                <th>Risk</th>
-                <th>Open alerts</th>
-                <th>Isolation</th>
-              </tr>
-            </thead>
-            <tbody>
+            <div className="list-stack">
               {assignedDevices.map((device) => (
-                <tr key={device.id}>
-                  <td>
-                    <Link href={`/devices/${device.id}`} className="table-primary">
-                      <strong>{device.hostname}</strong>
-                      <span>{device.osVersion}</span>
-                    </Link>
-                  </td>
-                  <td>{device.policyName}</td>
-                  <td>
-                    <span className={`state-chip tone-${device.healthState}`}>{device.healthState}</span>
-                  </td>
-                  <td>
-                    <span className={`state-chip tone-${device.postureState}`}>{device.postureState}</span>
-                  </td>
-                  <td>{device.openAlertCount}</td>
-                  <td>{device.isolated ? "isolated" : "connected"}</td>
-                </tr>
+                <label key={device.id} className="mini-card">
+                  <div className="row-between">
+                    <strong>{device.hostname}</strong>
+                    <input
+                      type="checkbox"
+                      checked={selectedDeviceIds.includes(device.id)}
+                      onChange={(event) => {
+                        setSelectedDeviceIds((current) =>
+                          event.target.checked
+                            ? [...new Set([...current, device.id])]
+                            : current.filter((item) => item !== device.id)
+                        );
+                      }}
+                    />
+                  </div>
+                  <p>{device.policyName}</p>
+                  <span className="mini-meta">
+                    {device.healthState} · {device.postureState} · {device.osVersion}
+                  </span>
+                </label>
               ))}
-            </tbody>
-          </table>
-          {assignedDevices.length === 0 ? <p className="empty-state">No devices match the current search.</p> : null}
-        </div>
-      </section>
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="primary-link"
+                disabled={Boolean(actionBusy) || selectedDeviceIds.length === 0}
+                onClick={() => {
+                  void runPolicyAction("Assign policy", async () => {
+                    await assignPolicy(currentPolicy.id, { deviceIds: selectedDeviceIds });
+                  });
+                }}
+              >
+                Assign to selected devices
+              </button>
+            </div>
+          </article>
+        </section>
+      ) : null}
     </ConsoleShell>
   );
 }

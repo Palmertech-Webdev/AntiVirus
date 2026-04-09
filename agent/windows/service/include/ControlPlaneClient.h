@@ -43,6 +43,7 @@ struct RemoteCommand {
   std::wstring updatedAt;
   std::wstring targetPath;
   std::wstring recordId;
+  std::wstring payloadJson;
 };
 
 struct CommandPollResult {

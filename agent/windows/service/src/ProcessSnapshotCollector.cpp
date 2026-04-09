@@ -11,7 +11,8 @@ namespace {
 std::wstring BuildProcessPayload(const ProcessObservation& entry) {
   return std::wstring(L"{\"pid\":") + std::to_wstring(entry.pid) + L",\"parentPid\":" +
          std::to_wstring(entry.parentPid) + L",\"imageName\":\"" +
-         Utf8ToWide(EscapeJsonString(entry.imageName)) + L"\"}";
+         Utf8ToWide(EscapeJsonString(entry.imageName)) + L"\",\"imagePath\":\"" +
+         Utf8ToWide(EscapeJsonString(entry.imagePath)) + L"\"}";
 }
 
 }  // namespace

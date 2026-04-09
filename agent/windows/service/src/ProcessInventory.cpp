@@ -1,5 +1,6 @@
 #include "ProcessInventory.h"
 
+#include <Psapi.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -18,6 +19,28 @@ bool IsPrioritizedProcess(const std::wstring& imageName) {
   }
 
   return false;
+}
+
+std::wstring QueryProcessImagePath(const DWORD pid) {
+  if (pid == 0) {
+    return {};
+  }
+
+  const HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (processHandle == nullptr) {
+    return {};
+  }
+
+  std::wstring buffer(4096, L'\0');
+  DWORD length = static_cast<DWORD>(buffer.size());
+  if (QueryFullProcessImageNameW(processHandle, 0, buffer.data(), &length) == FALSE) {
+    CloseHandle(processHandle);
+    return {};
+  }
+
+  CloseHandle(processHandle);
+  buffer.resize(length);
+  return buffer;
 }
 
 }  // namespace
@@ -40,6 +63,7 @@ std::vector<ProcessObservation> CollectProcessInventory(std::size_t maxRecords) 
           .pid = entry.th32ProcessID,
           .parentPid = entry.th32ParentProcessID,
           .imageName = imageName,
+          .imagePath = QueryProcessImagePath(entry.th32ProcessID),
           .prioritized = IsPrioritizedProcess(imageName)});
     } while (Process32NextW(snapshot, &entry) != FALSE);
   }
