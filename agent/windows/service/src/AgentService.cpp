@@ -726,6 +726,7 @@ void AgentService::QueueEndpointStatusTelemetry() {
   const auto protectedServiceExpected = hardeningStatus.elamDriverPresent || !config_.elamDriverPath.empty();
   lastHardeningCheckFailed_ =
       !(hardeningStatus.registryConfigured && hardeningStatus.runtimePathsProtected &&
+        hardeningStatus.serviceControlProtected &&
         (!protectedServiceExpected || hardeningStatus.launchProtectedConfigured));
   QueueTelemetryEvent(lastHardeningCheckFailed_ ? L"tamper.protection.degraded" : L"tamper.protection.ready",
                       L"hardening-manager", hardeningStatus.statusMessage,
@@ -733,6 +734,9 @@ void AgentService::QueueEndpointStatusTelemetry() {
                           (hardeningStatus.registryConfigured ? std::wstring(L"true") : std::wstring(L"false")) +
                           L",\"runtimePathsProtected\":" +
                           (hardeningStatus.runtimePathsProtected ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"serviceControlProtected\":" +
+                          (hardeningStatus.serviceControlProtected ? std::wstring(L"true")
+                                                                   : std::wstring(L"false")) +
                           L",\"uninstallProtectionEnabled\":" +
                           (hardeningStatus.uninstallProtectionEnabled ? std::wstring(L"true")
                                                                       : std::wstring(L"false")) +

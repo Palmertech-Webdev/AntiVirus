@@ -21,25 +21,31 @@
 
 namespace {
 
-constexpr wchar_t kWindowClassName[] = L"AntiVirusSetupWindow";
-constexpr wchar_t kWindowTitle[] = L"AntiVirus Endpoint Setup";
-constexpr wchar_t kCompanyName[] = L"AntiVirus";
-constexpr wchar_t kProductName[] = L"AntiVirus Endpoint";
-constexpr wchar_t kServiceName[] = L"AntiVirusAgent";
-constexpr wchar_t kAgentRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
+constexpr wchar_t kWindowClassName[] = L"FenrirSetupWindow";
+constexpr wchar_t kWindowTitle[] = L"Fenrir Endpoint Setup";
+constexpr wchar_t kCompanyName[] = L"Fenrir";
+constexpr wchar_t kProductName[] = L"Fenrir Endpoint";
+constexpr wchar_t kServiceName[] = L"FenrirAgent";
+constexpr wchar_t kAgentRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
-constexpr wchar_t kArpRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AntiVirusEndpoint";
+constexpr wchar_t kArpRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\FenrirEndpoint";
 constexpr wchar_t kRunRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kRunValueName[] = L"AntiVirusEndpointClient";
-constexpr wchar_t kInstallFolderName[] = L"AntiVirus Endpoint";
-constexpr wchar_t kServiceExeName[] = L"antivirus-agent-service.exe";
-constexpr wchar_t kEndpointExeName[] = L"antivirus-endpoint-client.exe";
-constexpr wchar_t kAmsiDllName[] = L"antivirus-amsi-provider.dll";
-constexpr wchar_t kScannerCliName[] = L"antivirus-scannercli.exe";
+constexpr wchar_t kRunValueName[] = L"FenrirEndpointClient";
+constexpr wchar_t kInstallFolderName[] = L"Fenrir Endpoint";
+constexpr wchar_t kServiceExeName[] = L"fenrir-agent-service.exe";
+constexpr wchar_t kEndpointExeName[] = L"fenrir-endpoint-client.exe";
+constexpr wchar_t kAmsiDllName[] = L"fenrir-amsi-provider.dll";
+constexpr wchar_t kScannerCliName[] = L"fenrir-scannercli.exe";
+constexpr wchar_t kAmsiTestCliName[] = L"fenrir-amsitestcli.exe";
+constexpr wchar_t kEtwTestCliName[] = L"fenrir-etwtestcli.exe";
+constexpr wchar_t kWfpTestCliName[] = L"fenrir-wfptestcli.exe";
 constexpr wchar_t kWinpthreadDllName[] = L"libwinpthread-1.dll";
-constexpr wchar_t kSetupExeName[] = L"AntiVirusSetup.exe";
+constexpr wchar_t kSetupExeName[] = L"FenrirSetup.exe";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
-constexpr wchar_t kToolsRelativePath[] = L"tools\\antivirus-scannercli.exe";
+constexpr wchar_t kToolsRelativePath[] = L"tools\\fenrir-scannercli.exe";
+constexpr wchar_t kToolsAmsiTestCliRelativePath[] = L"tools\\fenrir-amsitestcli.exe";
+constexpr wchar_t kToolsEtwTestCliRelativePath[] = L"tools\\fenrir-etwtestcli.exe";
+constexpr wchar_t kToolsWfpTestCliRelativePath[] = L"tools\\fenrir-wfptestcli.exe";
 constexpr wchar_t kToolsWinpthreadRelativePath[] = L"tools\\libwinpthread-1.dll";
 
 constexpr UINT kInstallerLogMessage = WM_APP + 1;
@@ -186,7 +192,7 @@ void PostStatus(HWND hwnd, const std::wstring& text, int progress);
 void PostComplete(HWND hwnd, bool success, bool installed, bool closeAfter, const std::wstring& message);
 bool CopySelfToInstallRoot(const std::filesystem::path& currentPath, const std::filesystem::path& installRoot,
                            std::wstring* errorMessage);
-bool LaunchInstalledEndpointClient(const std::filesystem::path& installRoot);
+bool LaunchInstalledEndpointClient(const std::filesystem::path& installRoot, bool backgroundMode);
 bool InstallPayloadFiles(HWND hwnd, UiContext* context, bool repair, std::wstring* errorMessage);
 void RunInstallOrRepair(HWND hwnd, UiContext* context, bool repair);
 std::filesystem::path GetTemporaryHelperPath();
@@ -320,11 +326,6 @@ std::filesystem::path GetDefaultInstallRoot() {
 }
 
 std::filesystem::path QueryInstallRoot() {
-  const auto registered = ReadRegistryString(HKEY_LOCAL_MACHINE, kAgentRegistryRoot, L"InstallRoot");
-  if (!registered.empty()) {
-    return registered;
-  }
-
   return GetDefaultInstallRoot();
 }
 
@@ -711,11 +712,11 @@ bool CreateStartMenuShortcuts(const std::filesystem::path& installRoot) {
     }
 
     const auto shortcutRoot = *programsRoot / kProductName;
-    const auto endpointShortcut = shortcutRoot / L"AntiVirus Endpoint.lnk";
-    const auto uninstallShortcut = shortcutRoot / L"Uninstall AntiVirus Endpoint.lnk";
+    const auto endpointShortcut = shortcutRoot / L"Fenrir Endpoint.lnk";
+    const auto uninstallShortcut = shortcutRoot / L"Uninstall Fenrir Endpoint.lnk";
 
-    if (CreateShortcut(endpointShortcut, installRoot / kEndpointExeName, L"", L"Open AntiVirus Endpoint") &&
-        CreateShortcut(uninstallShortcut, installRoot / kSetupExeName, L"--uninstall", L"Remove AntiVirus Endpoint")) {
+    if (CreateShortcut(endpointShortcut, installRoot / kEndpointExeName, L"", L"Open Fenrir Endpoint") &&
+        CreateShortcut(uninstallShortcut, installRoot / kSetupExeName, L"--uninstall", L"Remove Fenrir Endpoint")) {
       return true;
     }
   }
@@ -746,7 +747,8 @@ bool RemoveStartMenuShortcuts() {
 }
 
 bool RegisterEndpointAutoStart(const std::filesystem::path& installRoot) {
-  return WriteRegistryString(HKEY_LOCAL_MACHINE, kRunRegistryRoot, kRunValueName, QuotePath(installRoot / kEndpointExeName));
+  return WriteRegistryString(HKEY_LOCAL_MACHINE, kRunRegistryRoot, kRunValueName,
+                             QuotePath(installRoot / kEndpointExeName) + L" --background");
 }
 
 bool RemoveEndpointAutoStart() {
@@ -847,10 +849,11 @@ bool CopySelfToInstallRoot(const std::filesystem::path& currentPath, const std::
   return true;
 }
 
-bool LaunchInstalledEndpointClient(const std::filesystem::path& installRoot) {
-  return reinterpret_cast<std::intptr_t>(
-             ShellExecuteW(nullptr, L"open", (installRoot / kEndpointExeName).c_str(), nullptr, installRoot.c_str(),
-                           SW_SHOWNORMAL)) > 32;
+bool LaunchInstalledEndpointClient(const std::filesystem::path& installRoot, const bool backgroundMode) {
+  const auto arguments = backgroundMode ? L"--background" : L"";
+  return reinterpret_cast<std::intptr_t>(ShellExecuteW(nullptr, L"open", (installRoot / kEndpointExeName).c_str(),
+                                                       arguments, installRoot.c_str(),
+                                                       backgroundMode ? SW_HIDE : SW_SHOWNORMAL)) > 32;
 }
 
 bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::wstring* errorMessage) {
@@ -890,9 +893,12 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
       {IDR_PAYLOAD_ENDPOINT_CLIENT, kEndpointExeName, 25, L"Installing endpoint client"},
       {IDR_PAYLOAD_AMSI_PROVIDER, kAmsiDllName, 35, L"Installing AMSI provider"},
       {IDR_PAYLOAD_SCANNERCLI, kToolsRelativePath, 45, L"Installing diagnostic scanner"},
-      {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 50, L"Installing runtime dependencies"},
-      {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 55, L"Installing tool runtime dependencies"},
-      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 60, L"Installing signature bundle"},
+      {IDR_PAYLOAD_AMSITESTCLI, kToolsAmsiTestCliRelativePath, 50, L"Installing AMSI diagnostic tool"},
+      {IDR_PAYLOAD_ETWTESTCLI, kToolsEtwTestCliRelativePath, 54, L"Installing ETW diagnostic tool"},
+      {IDR_PAYLOAD_WFPTESTCLI, kToolsWfpTestCliRelativePath, 58, L"Installing WFP diagnostic tool"},
+      {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 62, L"Installing runtime dependencies"},
+      {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 66, L"Installing tool runtime dependencies"},
+      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 70, L"Installing signature bundle"},
   };
 
   for (const auto& item : payloadItems) {
@@ -903,7 +909,7 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
     }
   }
 
-  PostStatus(hwnd, L"Registering maintenance assets...", 65);
+  PostStatus(hwnd, L"Registering maintenance assets...", 75);
   PostLog(hwnd, L"Copying setup executable into the install directory");
   if (!CopySelfToInstallRoot(context->setupPath, installRoot, errorMessage)) {
     return false;
@@ -927,21 +933,21 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
 
   const auto serviceExe = context->installRoot / kServiceExeName;
   DWORD exitCode = 0;
-  PostStatus(hwnd, repair ? L"Repairing service registration..." : L"Registering protection service...", 72);
+  PostStatus(hwnd, repair ? L"Repairing service registration..." : L"Registering protection service...", 80);
   PostLog(hwnd, repair ? L"Running service repair" : L"Installing the protection service");
   if (!RunProcessHidden(serviceExe, repair ? L"--repair" : L"--install", context->installRoot, &exitCode, &errorMessage)) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;
   }
 
-  PostStatus(hwnd, L"Starting protection service...", 80);
+  PostStatus(hwnd, L"Starting protection service...", 87);
   PostLog(hwnd, L"Starting the installed protection service");
   if (!StartInstalledService(&errorMessage)) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;
   }
 
-  PostStatus(hwnd, L"Configuring startup and shortcuts...", 88);
+  PostStatus(hwnd, L"Configuring startup and shortcuts...", 93);
   PostLog(hwnd, L"Registering endpoint client auto-start");
   if (!RegisterEndpointAutoStart(context->installRoot)) {
     PostComplete(hwnd, false, false, false, L"Could not register endpoint auto-start.");
@@ -954,24 +960,24 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
     return;
   }
 
-  PostStatus(hwnd, L"Writing Add/Remove Programs entry...", 94);
+  PostStatus(hwnd, L"Writing Add/Remove Programs entry...", 97);
   PostLog(hwnd, L"Registering the uninstall entry");
   if (!WriteArpEntry(context->installRoot)) {
     PostComplete(hwnd, false, false, false, L"Could not register the Add/Remove Programs entry.");
     return;
   }
 
-  PostStatus(hwnd, L"Launching endpoint client...", 100);
-  PostLog(hwnd, L"Opening the installed endpoint client");
-  LaunchInstalledEndpointClient(context->installRoot);
-  PostComplete(hwnd, true, true, false, repair ? L"AntiVirus Endpoint was repaired successfully."
-                                               : L"AntiVirus Endpoint was installed successfully.");
+  PostStatus(hwnd, L"Launching background companion...", 100);
+  PostLog(hwnd, L"Starting the installed endpoint client in silent tray mode");
+  LaunchInstalledEndpointClient(context->installRoot, true);
+  PostComplete(hwnd, true, true, false, repair ? L"Fenrir Endpoint was repaired successfully."
+                                               : L"Fenrir Endpoint was installed successfully.");
 }
 
 std::filesystem::path GetTemporaryHelperPath() {
   wchar_t tempPath[MAX_PATH]{};
   GetTempPathW(static_cast<DWORD>(std::size(tempPath)), tempPath);
-  return std::filesystem::path(tempPath) / L"AntiVirusSetup-Cleanup.exe";
+  return std::filesystem::path(tempPath) / L"FenrirSetup-Cleanup.exe";
 }
 
 void LaunchCleanupHelper(const std::filesystem::path& currentSetupPath, const std::filesystem::path& installRoot) {
@@ -1024,7 +1030,7 @@ void RunUninstall(HWND hwnd, UiContext* context) {
 
   PostStatus(hwnd, L"Finalizing removal...", 100);
   LaunchCleanupHelper(context->setupPath, installRoot);
-  PostComplete(hwnd, true, false, true, L"AntiVirus Endpoint was removed. The setup window will close to finish cleanup.");
+  PostComplete(hwnd, true, false, true, L"Fenrir Endpoint was removed. The setup window will close to finish cleanup.");
 }
 
 DWORD WINAPI InstallWorkerThread(LPVOID parameter) {
@@ -1114,7 +1120,7 @@ void RefreshUi(UiContext& context) {
   SetWindowTextW(context.pathValue, context.installRoot.c_str());
   SetWindowTextW(context.statusLabel,
                  context.installed ? L"Existing installation detected. You can repair or remove it."
-                                   : L"Ready to install AntiVirus Endpoint on this device.");
+                                  : L"Ready to install Fenrir Endpoint on this device.");
   SetWindowTextW(context.primaryButton, context.installed ? L"Repair" : L"Install");
   EnableWindow(context.uninstallButton, context.installed && !context.busy);
   EnableWindow(context.primaryButton, !context.busy);
@@ -1173,11 +1179,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       wcscpy_s(titleFont.lfFaceName, L"Segoe UI Variable Display Semibold");
       context->titleFont = CreateFontIndirectW(&titleFont);
 
-      context->titleLabel = CreateWindowW(L"STATIC", L"AntiVirus Endpoint Setup", WS_CHILD | WS_VISIBLE,
+      context->titleLabel = CreateWindowW(L"STATIC", L"Fenrir Endpoint Setup", WS_CHILD | WS_VISIBLE,
                                           0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_TITLE), nullptr, nullptr);
       context->subtitleLabel = CreateWindowW(
           L"STATIC",
-          L"Install, repair, or remove the AntiVirus Endpoint service, local protection client, and signature bundle.",
+          L"Install, repair, or remove the Fenrir Endpoint service, local protection client, and signature bundle.",
           WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_SUBTITLE), nullptr, nullptr);
       context->pathLabel = CreateWindowW(L"STATIC", L"Install path", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
                                          reinterpret_cast<HMENU>(IDC_PATH_LABEL), nullptr, nullptr);
@@ -1261,7 +1267,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
           return 0;
         case IDC_UNINSTALL_BUTTON:
           if (!context->busy &&
-              MessageBoxW(hwnd, L"Remove AntiVirus Endpoint from this device?", kWindowTitle,
+              MessageBoxW(hwnd, L"Remove Fenrir Endpoint from this device?", kWindowTitle,
                           MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
             context->busy = true;
             RefreshUi(*context);

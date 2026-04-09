@@ -62,11 +62,11 @@ export default function ConsoleShell({
           <div className="brand-header">
             <BrandMark className="brand-mark" />
             <div>
-              <p className="brand-kicker">Enterprise AV</p>
-              <h1>Operator Console</h1>
+              <p className="brand-kicker">Fenrir Security</p>
+              <h1>Fenrir Console</h1>
             </div>
           </div>
-          <p className="brand-copy">Incident-led endpoint protection, response, and evidence management.</p>
+          <p className="brand-copy">Incident-led endpoint protection, response, evidence, and operator workflows.</p>
         </div>
 
         <nav className="sidebar-nav">

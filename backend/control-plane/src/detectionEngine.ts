@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 
-import type { AlertSeverity, AlertSummary, ControlPlaneState, TelemetryRecord } from "./types.js";
+import type { AlertSeverity, AlertSummary, ControlPlaneState, TelemetryRecord } from "./types.ts";
 
 interface GeneratedAlertCandidate extends AlertSummary {
   fingerprint: string;

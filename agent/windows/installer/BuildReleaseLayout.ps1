@@ -1,5 +1,5 @@
 param(
-    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build'),
+    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build-fenrir'),
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\release'),
     [string]$DriverArtifactRoot = '',
     [switch]$Clean
@@ -102,13 +102,13 @@ Ensure-Directory -Path (Join-Path $outputRoot 'driver')
 Ensure-Directory -Path (Join-Path $outputRoot 'docs')
 
 $artifactMap = @(
-    @{ Source = (Join-Path $buildRoot 'antivirus-agent-service.exe'); Target = (Join-Path $outputRoot 'antivirus-agent-service.exe') },
-    @{ Source = (Join-Path $buildRoot 'antivirus-endpoint-client.exe'); Target = (Join-Path $outputRoot 'antivirus-endpoint-client.exe') },
-    @{ Source = (Join-Path $buildRoot 'antivirus-amsi-provider.dll'); Target = (Join-Path $outputRoot 'antivirus-amsi-provider.dll') },
-    @{ Source = (Join-Path $buildRoot 'antivirus-scannercli.exe'); Target = (Join-Path $outputRoot 'tools\antivirus-scannercli.exe') },
-    @{ Source = (Join-Path $buildRoot 'antivirus-amsitestcli.exe'); Target = (Join-Path $outputRoot 'tools\antivirus-amsitestcli.exe') },
-    @{ Source = (Join-Path $buildRoot 'antivirus-etwtestcli.exe'); Target = (Join-Path $outputRoot 'tools\antivirus-etwtestcli.exe') },
-    @{ Source = (Join-Path $buildRoot 'antivirus-wfptestcli.exe'); Target = (Join-Path $outputRoot 'tools\antivirus-wfptestcli.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-agent-service.exe'); Target = (Join-Path $outputRoot 'fenrir-agent-service.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-endpoint-client.exe'); Target = (Join-Path $outputRoot 'fenrir-endpoint-client.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-amsi-provider.dll'); Target = (Join-Path $outputRoot 'fenrir-amsi-provider.dll') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-scannercli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-scannercli.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-amsitestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-amsitestcli.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-etwtestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-etwtestcli.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-wfptestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-wfptestcli.exe') },
     @{ Source = (Join-Path $windowsRoot 'service\README.md'); Target = (Join-Path $outputRoot 'docs\service-README.md') },
     @{ Source = (Join-Path $windowsRoot 'tools\endpointui\README.md'); Target = (Join-Path $outputRoot 'docs\endpoint-client-README.md') },
     @{ Source = (Join-Path $windowsRoot 'installer\README.md'); Target = (Join-Path $outputRoot 'docs\installer-README.md') },

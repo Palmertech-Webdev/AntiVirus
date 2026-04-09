@@ -12,7 +12,8 @@
 namespace antivirus::agent {
 namespace {
 
-constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
+constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
+constexpr wchar_t kLegacyRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
 constexpr wchar_t kRuntimeRootValueName[] = L"RuntimeRoot";
 constexpr wchar_t kRuntimeDatabasePathValueName[] = L"RuntimeDatabasePath";
@@ -102,9 +103,9 @@ std::filesystem::path GetModuleDirectory(HMODULE moduleHandle) {
   return modulePath.has_parent_path() ? modulePath.parent_path() : std::filesystem::current_path();
 }
 
-std::wstring ReadRegistryString(HKEY hive, const wchar_t* valueName) {
+std::wstring ReadRegistryStringFromRoot(HKEY hive, const wchar_t* registryRoot, const wchar_t* valueName) {
   HKEY key = nullptr;
-  if (RegOpenKeyExW(hive, kRegistryRoot, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+  if (RegOpenKeyExW(hive, registryRoot, 0, KEY_READ, &key) != ERROR_SUCCESS) {
     return {};
   }
 
@@ -130,9 +131,19 @@ std::wstring ReadRegistryString(HKEY hive, const wchar_t* valueName) {
   return value;
 }
 
-bool WriteRegistryString(HKEY hive, const wchar_t* valueName, const std::wstring& value) {
+std::wstring ReadRegistryString(HKEY hive, const wchar_t* valueName) {
+  const auto fenrirValue = ReadRegistryStringFromRoot(hive, kRegistryRoot, valueName);
+  if (!fenrirValue.empty()) {
+    return fenrirValue;
+  }
+
+  return ReadRegistryStringFromRoot(hive, kLegacyRegistryRoot, valueName);
+}
+
+bool WriteRegistryStringToRoot(HKEY hive, const wchar_t* registryRoot, const wchar_t* valueName,
+                               const std::wstring& value) {
   HKEY key = nullptr;
-  if (RegCreateKeyExW(hive, kRegistryRoot, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, nullptr, &key,
+  if (RegCreateKeyExW(hive, registryRoot, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE, nullptr, &key,
                       nullptr) != ERROR_SUCCESS) {
     return false;
   }
@@ -141,6 +152,10 @@ bool WriteRegistryString(HKEY hive, const wchar_t* valueName, const std::wstring
                                      static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
   RegCloseKey(key);
   return result;
+}
+
+bool WriteRegistryString(HKEY hive, const wchar_t* valueName, const std::wstring& value) {
+  return WriteRegistryStringToRoot(hive, kRegistryRoot, valueName, value);
 }
 
 std::optional<std::filesystem::path> ReadRegisteredRuntimeRoot() {
@@ -165,15 +180,31 @@ std::optional<std::filesystem::path> ReadRegisteredRuntimeRoot() {
 std::filesystem::path BuildDefaultSharedRuntimeRoot() {
   const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
   if (!programData.empty()) {
-    return std::filesystem::path(programData) / L"AntiVirusAgent" / L"runtime";
+    return std::filesystem::path(programData) / L"FenrirAgent" / L"runtime";
   }
 
   const auto localAppData = ReadEnvironmentVariable(L"LOCALAPPDATA");
   if (!localAppData.empty()) {
-    return std::filesystem::path(localAppData) / L"AntiVirusAgent" / L"runtime";
+    return std::filesystem::path(localAppData) / L"FenrirAgent" / L"runtime";
   }
 
   return {};
+}
+
+std::vector<std::filesystem::path> BuildLegacySharedRuntimeRoots() {
+  std::vector<std::filesystem::path> results;
+
+  const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
+  if (!programData.empty()) {
+    results.push_back(std::filesystem::path(programData) / L"AntiVirusAgent" / L"runtime");
+  }
+
+  const auto localAppData = ReadEnvironmentVariable(L"LOCALAPPDATA");
+  if (!localAppData.empty()) {
+    results.push_back(std::filesystem::path(localAppData) / L"AntiVirusAgent" / L"runtime");
+  }
+
+  return results;
 }
 
 bool RuntimeRootHasState(const std::filesystem::path& runtimeRoot) {
@@ -219,6 +250,10 @@ std::optional<std::filesystem::path> DeterminePreferredRuntimeRoot(HMODULE modul
   const auto sharedRuntimeRoot = BuildDefaultSharedRuntimeRoot();
   if (sharedRuntimeRoot.empty()) {
     return std::nullopt;
+  }
+
+  for (const auto& legacySharedRuntimeRoot : BuildLegacySharedRuntimeRoots()) {
+    TryMigrateLegacyRuntimeRoot(legacySharedRuntimeRoot, sharedRuntimeRoot);
   }
 
   const auto legacyRuntimeRoot = GetModuleDirectory(moduleHandle) / L"runtime";

@@ -16,11 +16,12 @@
 
 namespace {
 
-constexpr wchar_t kServiceName[] = L"AntiVirusAgent";
-constexpr wchar_t kServiceDisplayName[] = L"AntiVirus Agent";
+constexpr wchar_t kServiceName[] = L"FenrirAgent";
+constexpr wchar_t kServiceDisplayName[] = L"Fenrir Agent";
 constexpr wchar_t kServiceDescription[] =
-    L"Windows endpoint protection agent for policy sync, telemetry, and on-demand scanning.";
+    L"Fenrir Windows endpoint protection agent for policy sync, telemetry, and on-demand scanning.";
 constexpr wchar_t kAmsiProviderDllName[] = L"antivirus-amsi-provider.dll";
+constexpr wchar_t kLocalSystemAccountName[] = L"LocalSystem";
 
 SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
 SERVICE_STATUS g_serviceStatus{};
@@ -153,21 +154,23 @@ bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToke
   }
 
   auto service = CreateServiceW(scManager, kServiceName, kServiceDisplayName,
-                                SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE | SERVICE_CHANGE_CONFIG,
+                                SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE | SERVICE_CHANGE_CONFIG |
+                                    SERVICE_QUERY_CONFIG | READ_CONTROL | WRITE_DAC,
                                 SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-                                serviceCommandLine.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
+                                serviceCommandLine.c_str(), nullptr, nullptr, nullptr, kLocalSystemAccountName, nullptr);
   if (service == nullptr) {
     const auto error = GetLastError();
     if (error == ERROR_SERVICE_EXISTS) {
-      service = OpenServiceW(scManager, kServiceName, SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE |
-                                                         SERVICE_CHANGE_CONFIG);
+      service = OpenServiceW(scManager, kServiceName,
+                             SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE | SERVICE_CHANGE_CONFIG |
+                                 SERVICE_QUERY_CONFIG | READ_CONTROL | WRITE_DAC);
       if (service == nullptr) {
         CloseServiceHandle(scManager);
         std::wcerr << L"OpenServiceW failed with error " << GetLastError() << std::endl;
         return false;
       }
       if (ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-                               serviceCommandLine.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr,
+                               serviceCommandLine.c_str(), nullptr, nullptr, nullptr, kLocalSystemAccountName, nullptr,
                                kServiceDisplayName) == FALSE) {
         std::wcerr << L"ChangeServiceConfigW failed with error " << GetLastError() << std::endl;
         CloseServiceHandle(service);
@@ -189,6 +192,14 @@ bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToke
   const auto hardeningApplied = hardeningManager.ApplyPostInstallHardening(uninstallToken, &hardeningError);
   if (!hardeningApplied) {
     std::wcerr << L"Post-install hardening failed: " << hardeningError << std::endl;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  std::wstring serviceControlHardeningError;
+  if (!hardeningManager.ApplyServiceControlProtection(kServiceName, service, &serviceControlHardeningError)) {
+    std::wcerr << L"Service stop-hardening failed: " << serviceControlHardeningError << std::endl;
     CloseServiceHandle(service);
     CloseServiceHandle(scManager);
     return false;

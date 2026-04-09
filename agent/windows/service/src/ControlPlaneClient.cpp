@@ -314,7 +314,38 @@ PolicySnapshot ParsePolicySnapshot(const std::string& json) {
   return policy;
 }
 
-HttpResponse RequestJson(const wchar_t* method, const std::wstring& url, const std::string& body = {}) {
+std::wstring ExtractQueryParameter(const std::wstring& url, const std::wstring& name) {
+  const auto queryStart = url.find(L'?');
+  if (queryStart == std::wstring::npos) {
+    return {};
+  }
+
+  const auto key = name + L"=";
+  auto searchOffset = queryStart + 1;
+  while (searchOffset < url.size()) {
+    const auto keyOffset = url.find(key, searchOffset);
+    if (keyOffset == std::wstring::npos) {
+      return {};
+    }
+
+    if (keyOffset == queryStart + 1 || url[keyOffset - 1] == L'&') {
+      const auto valueStart = keyOffset + key.size();
+      const auto valueEnd = url.find(L'&', valueStart);
+      return url.substr(valueStart, valueEnd == std::wstring::npos ? std::wstring::npos : valueEnd - valueStart);
+    }
+
+    searchOffset = keyOffset + key.size();
+  }
+
+  return {};
+}
+
+std::wstring ExtractDeviceApiKeyFromCommandChannelUrl(const std::wstring& commandChannelUrl) {
+  return ExtractQueryParameter(commandChannelUrl, L"deviceApiKey");
+}
+
+HttpResponse RequestJson(const wchar_t* method, const std::wstring& url, const std::string& body = {},
+                         const std::wstring& deviceApiKey = {}) {
   URL_COMPONENTS components{};
   components.dwStructSize = sizeof(components);
   components.dwSchemeLength = static_cast<DWORD>(-1);
@@ -333,7 +364,7 @@ HttpResponse RequestJson(const wchar_t* method, const std::wstring& url, const s
   }
 
   const auto secure = components.nScheme == INTERNET_SCHEME_HTTPS;
-  const auto* agentName = L"AntiVirusAgent/0.1";
+  const auto* agentName = L"FenrirAgent/0.1";
 
   auto session = WinHttpOpen(agentName, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
                              WINHTTP_NO_PROXY_BYPASS, 0);
@@ -356,10 +387,13 @@ HttpResponse RequestJson(const wchar_t* method, const std::wstring& url, const s
   }
 
   const auto bodySize = static_cast<DWORD>(body.size());
-  const auto* headers = L"Content-Type: application/json\r\n";
+  std::wstring headers = L"Content-Type: application/json\r\n";
+  if (!deviceApiKey.empty()) {
+    headers += L"X-Device-Api-Key: " + deviceApiKey + L"\r\n";
+  }
 
-  if (WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), body.empty() ? WINHTTP_NO_REQUEST_DATA
-                                                                                 : const_cast<char*>(body.data()),
+  if (WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1), body.empty() ? WINHTTP_NO_REQUEST_DATA
+                                                                                          : const_cast<char*>(body.data()),
                          bodySize, bodySize, 0) == FALSE) {
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connection);
@@ -471,6 +505,8 @@ HeartbeatResult ControlPlaneClient::SendHeartbeat(const AgentState& state) const
     throw std::runtime_error("Cannot send heartbeat without a device identifier");
   }
 
+  const auto deviceApiKey = ExtractDeviceApiKeyFromCommandChannelUrl(state.commandChannelUrl);
+
   std::ostringstream body;
   body << "{"
        << "\"agentVersion\":\"" << EscapeJsonString(state.agentVersion) << "\","
@@ -480,7 +516,8 @@ HeartbeatResult ControlPlaneClient::SendHeartbeat(const AgentState& state) const
        << "}";
 
   const auto response =
-      RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/heartbeat"), body.str());
+      RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/heartbeat"), body.str(),
+                  deviceApiKey);
 
   return HeartbeatResult{
       .receivedAt = RequireString(ExtractJsonString(response.body, "receivedAt"), "receivedAt"),
@@ -494,6 +531,8 @@ PolicyCheckInResult ControlPlaneClient::CheckInPolicy(const AgentState& state) c
     throw std::runtime_error("Cannot check in policy without a device identifier");
   }
 
+  const auto deviceApiKey = ExtractDeviceApiKeyFromCommandChannelUrl(state.commandChannelUrl);
+
   std::ostringstream body;
   body << "{"
        << "\"currentPolicyRevision\":\"" << EscapeJsonString(state.policy.revision) << "\","
@@ -502,7 +541,8 @@ PolicyCheckInResult ControlPlaneClient::CheckInPolicy(const AgentState& state) c
        << "}";
 
   const auto response =
-      RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/policy-check-in"), body.str());
+      RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/policy-check-in"), body.str(),
+                  deviceApiKey);
   const auto policyObject = ExtractJsonObject(response.body, "policy");
   if (!policyObject.has_value()) {
     throw std::runtime_error("Policy check-in response did not include a policy object");
@@ -519,6 +559,8 @@ TelemetryBatchResult ControlPlaneClient::SendTelemetryBatch(const AgentState& st
   if (state.deviceId.empty()) {
     throw std::runtime_error("Cannot send telemetry without a device identifier");
   }
+
+  const auto deviceApiKey = ExtractDeviceApiKeyFromCommandChannelUrl(state.commandChannelUrl);
 
   if (records.empty()) {
     return TelemetryBatchResult{};
@@ -544,7 +586,8 @@ TelemetryBatchResult ControlPlaneClient::SendTelemetryBatch(const AgentState& st
   body << "]}";
 
   const auto response =
-      RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/telemetry"), body.str());
+      RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/telemetry"), body.str(),
+                  deviceApiKey);
 
   return TelemetryBatchResult{
       .receivedAt = RequireString(ExtractJsonString(response.body, "receivedAt"), "receivedAt"),
@@ -557,8 +600,11 @@ CommandPollResult ControlPlaneClient::PollPendingCommands(const AgentState& stat
     throw std::runtime_error("Cannot poll commands without a device identifier");
   }
 
+  const auto deviceApiKey = ExtractDeviceApiKeyFromCommandChannelUrl(state.commandChannelUrl);
+
   const auto response = RequestJson(
-      L"GET", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/commands/pending?limit=" + std::to_wstring(limit)));
+      L"GET", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/commands/pending?limit=" + std::to_wstring(limit)),
+      {}, deviceApiKey);
 
   CommandPollResult result{
       .polledAt = RequireString(ExtractJsonString(response.body, "polledAt"), "polledAt"),
@@ -577,6 +623,8 @@ void ControlPlaneClient::CompleteCommand(const AgentState& state, const std::wst
     throw std::runtime_error("Cannot complete a command without a device identifier");
   }
 
+  const auto deviceApiKey = ExtractDeviceApiKeyFromCommandChannelUrl(state.commandChannelUrl);
+
   std::ostringstream body;
   body << "{"
        << "\"status\":\"" << EscapeJsonString(status) << "\"";
@@ -589,7 +637,7 @@ void ControlPlaneClient::CompleteCommand(const AgentState& state, const std::wst
 
   static_cast<void>(RequestJson(
       L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/commands/" + commandId + L"/complete"),
-      body.str()));
+      body.str(), deviceApiKey));
 }
 
 }  // namespace antivirus::agent

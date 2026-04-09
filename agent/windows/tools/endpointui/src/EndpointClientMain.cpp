@@ -27,13 +27,15 @@ namespace {
 using antivirus::agent::EndpointClientSnapshot;
 using antivirus::agent::LocalServiceState;
 
-constexpr wchar_t kWindowClassName[] = L"AntiVirusEndpointClientWindow";
-constexpr wchar_t kWindowTitle[] = L"AntiVirus Protection Center";
+constexpr wchar_t kWindowClassName[] = L"FenrirEndpointClientWindow";
+constexpr wchar_t kWindowTitle[] = L"Fenrir Protection Center";
+constexpr wchar_t kInstanceMutexName[] = L"Local\\FenrirEndpointClientSingleton";
+constexpr wchar_t kRestoreWindowMessageName[] = L"FenrirEndpointClient.RestoreWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kScanCompleteMessage = WM_APP + 2;
 constexpr UINT kScanProgressMessage = WM_APP + 3;
 constexpr UINT_PTR kRefreshTimerId = 100;
-constexpr UINT kRefreshIntervalMs = 30000;
+constexpr UINT kRefreshIntervalMs = 10000;
 
 enum : int {
   IDC_BRAND_CARD = 1001,
@@ -103,6 +105,12 @@ struct ScanProgressPayload {
   std::uint32_t totalTargets{0};
 };
 
+struct LaunchOptions {
+  bool backgroundMode{false};
+};
+
+HANDLE g_instanceMutex = nullptr;
+
 struct UiContext {
   antivirus::agent::AgentConfig config;
   EndpointClientSnapshot snapshot;
@@ -166,6 +174,11 @@ struct UiContext {
   HICON iconDangerLarge{};
   bool trayAdded{false};
   bool allowExit{false};
+  bool backgroundMode{false};
+  bool snapshotPrimed{false};
+  std::size_t lastObservedThreatCount{0};
+  LocalServiceState lastObservedServiceState{LocalServiceState::Unknown};
+  std::wstring lastThreatFingerprint;
   std::atomic_bool scanRunning{false};
   std::wstring activeScanLabel;
   ClientPage currentPage{ClientPage::Dashboard};
@@ -175,8 +188,44 @@ UiContext* GetContext(HWND hwnd) {
   return reinterpret_cast<UiContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 }
 
+void UpdateTrayIcon(UiContext& context);
+
 std::wstring NullableText(const std::wstring& value, const wchar_t* fallback = L"(not available)") {
   return value.empty() ? std::wstring(fallback) : value;
+}
+
+UINT RestoreWindowMessageId() {
+  static const UINT messageId = RegisterWindowMessageW(kRestoreWindowMessageName);
+  return messageId;
+}
+
+bool HasSwitch(const std::vector<std::wstring>& arguments, const wchar_t* value) {
+  return std::any_of(arguments.begin(), arguments.end(),
+                     [value](const std::wstring& argument) { return _wcsicmp(argument.c_str(), value) == 0; });
+}
+
+LaunchOptions ParseLaunchOptions() {
+  LaunchOptions options;
+  int argumentCount = 0;
+  const auto argumentValues = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+  if (argumentValues == nullptr) {
+    return options;
+  }
+
+  std::vector<std::wstring> arguments;
+  arguments.reserve(static_cast<std::size_t>(argumentCount));
+  for (int index = 0; index < argumentCount; ++index) {
+    arguments.emplace_back(argumentValues[index]);
+  }
+  LocalFree(argumentValues);
+
+  options.backgroundMode =
+      HasSwitch(arguments, L"--background") || HasSwitch(arguments, L"--tray") || HasSwitch(arguments, L"/background");
+  return options;
+}
+
+bool IsWindowInteractive(const UiContext& context) {
+  return IsWindowVisible(context.hwnd) != FALSE;
 }
 
 std::wstring ProtectionHeadline(const EndpointClientSnapshot& snapshot) {
@@ -267,7 +316,7 @@ std::wstring OverallStatusChip(const EndpointClientSnapshot& snapshot) {
 
 std::wstring BuildBrandCardText(const EndpointClientSnapshot& snapshot) {
   std::wstringstream stream;
-  stream << L"ANTIVIRUS ENDPOINT\r\n"
+  stream << L"FENRIR ENDPOINT\r\n"
          << NullableText(snapshot.agentState.hostname, L"Local device") << L"\r\n"
          << OverallStatusChip(snapshot) << L"\r\n"
          << L"Policy " << NullableText(snapshot.agentState.policy.revision, L"n/a");
@@ -605,15 +654,20 @@ HICON CreateBrandIcon(int size, BrandIconTone tone) {
   return icon;
 }
 
+HICON LoadFenrirIcon(const int size) {
+  return static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(100), IMAGE_ICON, size, size,
+                                       LR_DEFAULTCOLOR));
+}
+
 void CreateBrandIcons(UiContext& context) {
-  context.iconNeutralSmall = CreateBrandIcon(16, BrandIconTone::Neutral);
-  context.iconNeutralLarge = CreateBrandIcon(32, BrandIconTone::Neutral);
-  context.iconSafeSmall = CreateBrandIcon(16, BrandIconTone::Safe);
-  context.iconSafeLarge = CreateBrandIcon(32, BrandIconTone::Safe);
-  context.iconWarningSmall = CreateBrandIcon(16, BrandIconTone::Warning);
-  context.iconWarningLarge = CreateBrandIcon(32, BrandIconTone::Warning);
-  context.iconDangerSmall = CreateBrandIcon(16, BrandIconTone::Danger);
-  context.iconDangerLarge = CreateBrandIcon(32, BrandIconTone::Danger);
+  context.iconNeutralSmall = LoadFenrirIcon(16);
+  context.iconNeutralLarge = LoadFenrirIcon(32);
+  context.iconSafeSmall = LoadFenrirIcon(16);
+  context.iconSafeLarge = LoadFenrirIcon(32);
+  context.iconWarningSmall = LoadFenrirIcon(16);
+  context.iconWarningLarge = LoadFenrirIcon(32);
+  context.iconDangerSmall = LoadFenrirIcon(16);
+  context.iconDangerLarge = LoadFenrirIcon(32);
 }
 
 void DestroyBrandIcons(UiContext& context) {
@@ -944,11 +998,122 @@ void PopulateHistoryList(UiContext& context) {
     InsertListViewRow(context.historyList, row++,
                       {record.recordedAt,
                        HistoryDispositionLabel(record),
-                       ThreatDisplayPath(record),
-                       HistorySourceLabel(record.source),
-                       record.techniqueId.empty() ? std::wstring(L"(n/a)") : record.techniqueId,
-                       record.remediationStatus.empty() ? std::wstring(L"(none)") : record.remediationStatus});
+                      ThreatDisplayPath(record),
+                      HistorySourceLabel(record.source),
+                      record.techniqueId.empty() ? std::wstring(L"(n/a)") : record.techniqueId,
+                      record.remediationStatus.empty() ? std::wstring(L"(none)") : record.remediationStatus});
   }
+}
+
+std::wstring BuildThreatFingerprint(const EndpointClientSnapshot& snapshot) {
+  if (snapshot.recentThreats.empty()) {
+    return {};
+  }
+
+  const auto& record = snapshot.recentThreats.front();
+  return record.recordedAt + L"|" + record.subjectPath.wstring() + L"|" + record.disposition + L"|" +
+         record.techniqueId + L"|" + record.sha256;
+}
+
+bool ServiceStateNeedsNotification(const LocalServiceState state) {
+  switch (state) {
+    case LocalServiceState::Running:
+    case LocalServiceState::StartPending:
+      return false;
+    case LocalServiceState::NotInstalled:
+    case LocalServiceState::Stopped:
+    case LocalServiceState::StopPending:
+    case LocalServiceState::Paused:
+    case LocalServiceState::Unknown:
+    default:
+      return true;
+  }
+}
+
+std::wstring BuildThreatNotificationBody(const EndpointClientSnapshot& snapshot) {
+  if (snapshot.recentThreats.empty()) {
+    if (!snapshot.recentThreats.empty()) {
+      const auto& threat = snapshot.recentThreats.front();
+      const auto displayPath = ThreatDisplayPath(threat);
+      const auto fileName = std::filesystem::path(displayPath).filename().wstring();
+      std::wstringstream stream;
+      stream << (fileName.empty() ? L"A local threat" : fileName) << L" was blocked.";
+      if (!displayPath.empty()) {
+        stream << L" Path: " << displayPath;
+      }
+      return stream.str();
+    }
+
+    return L"The endpoint has local detections that need attention.";
+  }
+
+  const auto& record = snapshot.recentThreats.front();
+  std::wstringstream stream;
+  const auto displayTarget = record.subjectPath.filename().empty() ? record.subjectPath.wstring()
+                                                                   : record.subjectPath.filename().wstring();
+  stream << NullableText(displayTarget, L"Suspicious content") << L" was " << NullableText(record.disposition, L"blocked")
+         << L".";
+  if (snapshot.openThreatCount > 1) {
+    stream << L" " << snapshot.openThreatCount << L" unresolved local threats need review.";
+  }
+  return stream.str();
+}
+
+std::wstring BuildServiceNotificationBody(const EndpointClientSnapshot& snapshot) {
+  std::wstringstream stream;
+  stream << L"Background protection changed to "
+         << antivirus::agent::LocalServiceStateToString(snapshot.serviceState) << L".";
+  if (!snapshot.agentState.healthState.empty()) {
+    stream << L" Runtime health is " << snapshot.agentState.healthState << L".";
+  }
+  return stream.str();
+}
+
+void ShowTrayNotification(UiContext& context, const std::wstring& title, const std::wstring& body,
+                          const DWORD infoFlags) {
+  UpdateTrayIcon(context);
+  context.trayIcon.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON | NIF_INFO;
+  wcsncpy_s(context.trayIcon.szInfoTitle, title.c_str(), _TRUNCATE);
+  wcsncpy_s(context.trayIcon.szInfo, body.c_str(), _TRUNCATE);
+  context.trayIcon.dwInfoFlags = infoFlags | NIIF_LARGE_ICON;
+  context.trayIcon.uTimeout = 10000;
+  Shell_NotifyIconW(NIM_MODIFY, &context.trayIcon);
+}
+
+void UpdateNotificationBaseline(UiContext& context, const EndpointClientSnapshot& snapshot) {
+  context.lastObservedThreatCount = snapshot.openThreatCount;
+  context.lastObservedServiceState = snapshot.serviceState;
+  context.lastThreatFingerprint = BuildThreatFingerprint(snapshot);
+  context.snapshotPrimed = true;
+}
+
+void EvaluateNotifications(UiContext& context, const EndpointClientSnapshot& snapshot) {
+  const auto notificationsVisible = !IsWindowInteractive(context);
+  const auto threatFingerprint = BuildThreatFingerprint(snapshot);
+
+  bool notifyThreats = false;
+  bool notifyService = false;
+  if (!context.snapshotPrimed) {
+    notifyThreats = context.backgroundMode && snapshot.openThreatCount != 0;
+    notifyService = context.backgroundMode && ServiceStateNeedsNotification(snapshot.serviceState);
+  } else if (notificationsVisible) {
+    notifyThreats = snapshot.openThreatCount != 0 &&
+                    (snapshot.openThreatCount > context.lastObservedThreatCount ||
+                     (!threatFingerprint.empty() && threatFingerprint != context.lastThreatFingerprint));
+    notifyService = snapshot.serviceState != context.lastObservedServiceState &&
+                    ServiceStateNeedsNotification(snapshot.serviceState);
+  }
+
+  if (notifyThreats) {
+    ShowTrayNotification(context,
+                         snapshot.openThreatCount == 1 ? L"Threat found on this device" : L"Multiple threats detected",
+                         BuildThreatNotificationBody(snapshot), NIIF_WARNING);
+  } else if (notifyService) {
+    ShowTrayNotification(context, L"Protection service needs attention", BuildServiceNotificationBody(snapshot),
+                         NIIF_WARNING);
+  }
+
+  UpdateNotificationBaseline(context, snapshot);
 }
 
 void UpdateTrayIcon(UiContext& context) {
@@ -963,6 +1128,10 @@ void UpdateTrayIcon(UiContext& context) {
   wcsncpy_s(context.trayIcon.szTip, tooltip.c_str(), _TRUNCATE);
 
   Shell_NotifyIconW(context.trayAdded ? NIM_MODIFY : NIM_ADD, &context.trayIcon);
+  if (!context.trayAdded) {
+    context.trayIcon.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &context.trayIcon);
+  }
   context.trayAdded = true;
   SendMessageW(context.hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(SelectWindowIcon(context, false)));
   SendMessageW(context.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(SelectWindowIcon(context, true)));
@@ -1347,7 +1516,8 @@ void UpdateVisibleList(UiContext& context) {
 
 void RefreshSnapshot(UiContext& context) {
   try {
-    context.snapshot = antivirus::agent::LoadEndpointClientSnapshot(context.config);
+    const auto refreshedSnapshot = antivirus::agent::LoadEndpointClientSnapshot(context.config);
+    context.snapshot = refreshedSnapshot;
 
     UpdatePageChrome(context);
     SetWindowTextSafe(context.summaryCard, BuildSummaryCardText(context.snapshot));
@@ -1374,6 +1544,7 @@ void RefreshSnapshot(UiContext& context) {
     PopulateHistoryList(context);
     UpdateVisibleList(context);
     UpdateTrayIcon(context);
+    EvaluateNotifications(context, refreshedSnapshot);
   } catch (const std::exception& error) {
     UpdatePageChrome(context);
     SetWindowTextSafe(context.summaryCard, L"Unable to load local protection state.");
@@ -1386,6 +1557,7 @@ void RefreshSnapshot(UiContext& context) {
     ListView_DeleteAllItems(context.quarantineList);
     ListView_DeleteAllItems(context.historyList);
     SetWindowTextSafe(context.detailEdit, L"Local protection details could not be loaded.");
+    UpdateTrayIcon(context);
   }
 }
 
@@ -1556,12 +1728,15 @@ void ShowTrayMenu(UiContext& context) {
     return;
   }
 
-  AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"Open protection center");
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"Open Fenrir");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, IDM_TRAY_QUICKSCAN, L"Run quick scan");
   AppendMenuW(menu, MF_STRING, IDM_TRAY_FULLSCAN, L"Run full scan");
   AppendMenuW(menu, MF_STRING, IDM_TRAY_QUARANTINE, L"Open quarantine");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit local client");
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit Fenrir");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit Fenrir");
 
   POINT cursor{};
   GetCursorPos(&cursor);
@@ -1760,7 +1935,35 @@ LRESULT HandleListCustomDraw(const NMLVCUSTOMDRAW* customDraw) {
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  if (message == RestoreWindowMessageId()) {
+    if (auto* context = GetContext(hwnd)) {
+      RestoreFromTray(hwnd);
+      SelectPage(*context, ClientPage::Dashboard);
+      LayoutControls(*context);
+    }
+    return 0;
+  }
+
   switch (message) {
+    case kTrayMessage: {
+      auto* context = GetContext(hwnd);
+      if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK || lParam == NIN_BALLOONUSERCLICK ||
+          lParam == NIN_SELECT || lParam == NIN_KEYSELECT) {
+        RestoreFromTray(hwnd);
+        if (context != nullptr) {
+          SelectPage(*context, ClientPage::Dashboard);
+          LayoutControls(*context);
+        }
+        return 0;
+      }
+      if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+        if (context != nullptr) {
+          ShowTrayMenu(*context);
+        }
+        return 0;
+      }
+      break;
+    }
     case WM_ERASEBKGND: {
       RECT client{};
       GetClientRect(hwnd, &client);
@@ -1833,6 +2036,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       auto* context = new UiContext{};
       context->config = antivirus::agent::LoadAgentConfigForModule(nullptr);
       context->hwnd = hwnd;
+      const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+      const auto* launchOptions = create != nullptr ? reinterpret_cast<LaunchOptions*>(create->lpCreateParams) : nullptr;
+      context->backgroundMode = launchOptions != nullptr && launchOptions->backgroundMode;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
 
       NONCLIENTMETRICSW metrics{};
@@ -2081,6 +2287,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
           return 0;
         case IDM_TRAY_OPEN:
           RestoreFromTray(hwnd);
+          SelectPage(*context, ClientPage::Dashboard);
+          LayoutControls(*context);
           return 0;
         case IDM_TRAY_QUICKSCAN:
           RunScanAsync(hwnd, *context, ScanPreset::Quick, std::nullopt);
@@ -2112,8 +2320,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         RefreshSnapshot(*context);
         SelectPage(*context, context->snapshot.openThreatCount != 0 ? ClientPage::Threats : ClientPage::Scans);
         LayoutControls(*context);
-        MessageBoxW(hwnd, payload->summary.c_str(), kWindowTitle,
-                    MB_OK | (payload->success ? MB_ICONINFORMATION : MB_ICONWARNING));
+        if (IsWindowInteractive(*context)) {
+          MessageBoxW(hwnd, payload->summary.c_str(), kWindowTitle,
+                      MB_OK | (payload->success ? MB_ICONINFORMATION : MB_ICONWARNING));
+        } else {
+          ShowTrayNotification(*context, payload->success ? L"Scan completed" : L"Scan needs attention",
+                               payload->summary, payload->success ? NIIF_INFO : NIIF_WARNING);
+        }
       }
       delete payload;
       return 0;
@@ -2126,20 +2339,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         UpdateScanProgress(*context, payload->status, payload->completedTargets, payload->totalTargets);
       }
       delete payload;
-      return 0;
-    }
-
-    case kTrayMessage: {
-      auto* context = GetContext(hwnd);
-      if (context == nullptr) {
-        return 0;
-      }
-
-      if (lParam == WM_LBUTTONDBLCLK) {
-        RestoreFromTray(hwnd);
-      } else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
-        ShowTrayMenu(*context);
-      }
       return 0;
     }
 
@@ -2176,6 +2375,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
       }
 
+      if (g_instanceMutex != nullptr) {
+        CloseHandle(g_instanceMutex);
+        g_instanceMutex = nullptr;
+      }
+
       PostQuitMessage(0);
       return 0;
     }
@@ -2192,6 +2396,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   controls.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_TAB_CLASSES;
   InitCommonControlsEx(&controls);
   OleInitialize(nullptr);
+  const auto launchOptions = ParseLaunchOptions();
+
+  g_instanceMutex = CreateMutexW(nullptr, FALSE, kInstanceMutexName);
+  if (g_instanceMutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (!launchOptions.backgroundMode) {
+      PostMessageW(HWND_BROADCAST, RestoreWindowMessageId(), 0, 0);
+    }
+    CloseHandle(g_instanceMutex);
+    g_instanceMutex = nullptr;
+    OleUninitialize();
+    return 0;
+  }
 
   HICON classLargeIcon = CreateBrandIcon(32, BrandIconTone::Neutral);
   HICON classSmallIcon = CreateBrandIcon(16, BrandIconTone::Neutral);
@@ -2209,13 +2425,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
   HWND hwnd = CreateWindowExW(0, kWindowClassName, kWindowTitle, WS_OVERLAPPEDWINDOW,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1440, 980,
-                              nullptr, nullptr, instance, nullptr);
+                              nullptr, nullptr, instance, const_cast<LaunchOptions*>(&launchOptions));
   if (hwnd == nullptr) {
+    DestroyIcon(classLargeIcon);
+    DestroyIcon(classSmallIcon);
+    if (g_instanceMutex != nullptr) {
+      CloseHandle(g_instanceMutex);
+      g_instanceMutex = nullptr;
+    }
     OleUninitialize();
     return 1;
   }
 
-  ShowWindow(hwnd, showCommand == 0 ? SW_SHOWDEFAULT : showCommand);
+  ShowWindow(hwnd, launchOptions.backgroundMode ? SW_HIDE : (showCommand == 0 ? SW_SHOWDEFAULT : showCommand));
   UpdateWindow(hwnd);
 
   MSG message{};

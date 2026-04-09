@@ -11,7 +11,7 @@
 namespace antivirus::agent {
 namespace {
 
-constexpr wchar_t kAgentServiceName[] = L"AntiVirusAgent";
+constexpr wchar_t kAgentServiceName[] = L"FenrirAgent";
 
 struct ServiceHandleCloser {
   void operator()(SC_HANDLE handle) const noexcept {
@@ -109,6 +109,12 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
                                                   const std::size_t updateLimit) {
   LocalStateStore stateStore(config.runtimeDatabasePath, config.stateFilePath);
   const auto state = stateStore.LoadOrCreate();
+  auto serviceState = QueryAgentServiceState();
+  if (serviceState == LocalServiceState::Stopped || serviceState == LocalServiceState::Paused) {
+    if (StartAgentService()) {
+      serviceState = QueryAgentServiceState();
+    }
+  }
 
   RuntimeDatabase database(config.runtimeDatabasePath);
   const auto findings = database.ListScanHistory(std::max<std::size_t>({threatLimit, findingLimit, 200}));
@@ -116,7 +122,7 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
 
   EndpointClientSnapshot snapshot{
       .agentState = state,
-      .serviceState = QueryAgentServiceState(),
+      .serviceState = serviceState,
       .queuedTelemetryCount = database.CountTelemetryQueue(),
       .quarantineItems = quarantineItems,
       .updateJournal = database.ListUpdateJournal(updateLimit)};

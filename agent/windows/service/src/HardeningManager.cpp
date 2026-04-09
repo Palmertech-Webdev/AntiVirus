@@ -13,9 +13,11 @@
 namespace antivirus::agent {
 namespace {
 
-constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
+constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
+constexpr wchar_t kLegacyRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
 constexpr wchar_t kRuntimeRootValueName[] = L"RuntimeRoot";
 constexpr wchar_t kServiceLaunchProtectedValueName[] = L"LaunchProtectedConfigured";
+constexpr wchar_t kServiceControlProtectedValueName[] = L"ServiceControlProtected";
 constexpr wchar_t kElamCertificateInstalledValueName[] = L"ElamCertificateInstalled";
 constexpr wchar_t kElamDriverPathValueName[] = L"ElamDriverPath";
 
@@ -228,6 +230,32 @@ bool ApplyRegistryAcl(HKEY key, const bool allowUsersRead) {
   return status == ERROR_SUCCESS;
 }
 
+bool PersistRegistryDwordValue(const wchar_t* valueName, const DWORD value) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kRegistryRoot, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE,
+                      nullptr, &key, nullptr) != ERROR_SUCCESS) {
+    return false;
+  }
+
+  const auto wroteValue = WriteRegistryDword(key, valueName, value);
+  const auto aclApplied = ApplyRegistryAcl(key, true);
+  RegCloseKey(key);
+  return wroteValue && aclApplied;
+}
+
+HKEY OpenHardeningRegistryKeyForRead() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRegistryRoot, 0, KEY_READ, &key) == ERROR_SUCCESS) {
+    return key;
+  }
+
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kLegacyRegistryRoot, 0, KEY_READ, &key) == ERROR_SUCCESS) {
+    return key;
+  }
+
+  return nullptr;
+}
+
 bool QueryServiceLaunchProtected(const std::wstring& serviceName, bool* configured) {
   if (configured != nullptr) {
     *configured = false;
@@ -295,9 +323,9 @@ bool HardeningManager::ApplyPostInstallHardening(const std::wstring& uninstallTo
 
   if (!ApplyProtectedAcl(installRoot_, UsersAccessMode::ReadExecute, &localError) ||
       !ApplyProtectedAcl(config_.runtimeDatabasePath.parent_path(), UsersAccessMode::Modify, &localError) ||
-      !ApplyProtectedAcl(config_.quarantineRootPath, UsersAccessMode::Modify, &localError) ||
-      !ApplyProtectedAcl(config_.evidenceRootPath, UsersAccessMode::Modify, &localError) ||
-      !ApplyProtectedAcl(config_.updateRootPath, UsersAccessMode::Modify, &localError)) {
+      !ApplyProtectedAcl(config_.quarantineRootPath, UsersAccessMode::None, &localError) ||
+      !ApplyProtectedAcl(config_.evidenceRootPath, UsersAccessMode::None, &localError) ||
+      !ApplyProtectedAcl(config_.updateRootPath, UsersAccessMode::None, &localError)) {
     if (errorMessage != nullptr) {
       *errorMessage = localError;
     }
@@ -308,7 +336,7 @@ bool HardeningManager::ApplyPostInstallHardening(const std::wstring& uninstallTo
   if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kRegistryRoot, 0, nullptr, REG_OPTION_NON_VOLATILE,
                       KEY_READ | KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Could not create the anti-tamper registry root";
+      *errorMessage = L"Could not create the Fenrir anti-tamper registry root";
     }
     return false;
   }
@@ -323,6 +351,7 @@ bool HardeningManager::ApplyPostInstallHardening(const std::wstring& uninstallTo
       WriteRegistryString(key, kElamDriverPathValueName, config_.elamDriverPath.wstring()) &&
       WriteRegistryString(key, L"UninstallTokenSha256", tokenHash) &&
       WriteRegistryDword(key, L"UninstallProtectionEnabled", tokenHash.empty() ? 0 : 1) &&
+      WriteRegistryDword(key, kServiceControlProtectedValueName, 0) &&
       WriteRegistryDword(key, kElamCertificateInstalledValueName, 0) &&
       WriteRegistryDword(key, kServiceLaunchProtectedValueName, 0);
   const auto aclApplied = ApplyRegistryAcl(key, true);
@@ -335,6 +364,112 @@ bool HardeningManager::ApplyPostInstallHardening(const std::wstring& uninstallTo
     return false;
   }
 
+  return true;
+}
+
+bool HardeningManager::ApplyServiceControlProtection(const std::wstring& serviceName, SC_HANDLE serviceHandle,
+                                                     std::wstring* errorMessage) const {
+  SC_HANDLE manager = nullptr;
+  SC_HANDLE ownedService = nullptr;
+  if (serviceHandle == nullptr) {
+    manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (manager == nullptr) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Could not connect to the Service Control Manager to harden service permissions.";
+      }
+      return false;
+    }
+
+    ownedService = OpenServiceW(manager, serviceName.c_str(),
+                                READ_CONTROL | WRITE_DAC | SERVICE_QUERY_STATUS | SERVICE_START);
+    if (ownedService == nullptr) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Could not open the protection service to apply stop-control protection.";
+      }
+      CloseServiceHandle(manager);
+      return false;
+    }
+
+    serviceHandle = ownedService;
+  }
+
+  std::array<BYTE, SECURITY_MAX_SID_SIZE> administratorsBuffer{};
+  std::array<BYTE, SECURITY_MAX_SID_SIZE> systemBuffer{};
+  std::array<BYTE, SECURITY_MAX_SID_SIZE> usersBuffer{};
+  PSID administratorsSid = nullptr;
+  PSID systemSid = nullptr;
+  PSID usersSid = nullptr;
+  if (!CreateKnownSid(WinBuiltinAdministratorsSid, administratorsBuffer, &administratorsSid) ||
+      !CreateKnownSid(WinLocalSystemSid, systemBuffer, &systemSid) ||
+      !CreateKnownSid(WinBuiltinUsersSid, usersBuffer, &usersSid)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not resolve service-control SIDs for service hardening.";
+    }
+    if (ownedService != nullptr) {
+      CloseServiceHandle(ownedService);
+    }
+    if (manager != nullptr) {
+      CloseServiceHandle(manager);
+    }
+    return false;
+  }
+
+  std::array<EXPLICIT_ACCESSW, 3> entries{};
+
+  entries[0].grfAccessPermissions = SERVICE_ALL_ACCESS;
+  entries[0].grfAccessMode = SET_ACCESS;
+  entries[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  entries[0].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+  entries[0].Trustee.ptstrName = static_cast<LPWSTR>(administratorsSid);
+
+  entries[1].grfAccessPermissions = SERVICE_ALL_ACCESS;
+  entries[1].grfAccessMode = SET_ACCESS;
+  entries[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  entries[1].Trustee.TrusteeType = TRUSTEE_IS_USER;
+  entries[1].Trustee.ptstrName = static_cast<LPWSTR>(systemSid);
+
+  entries[2].grfAccessPermissions = SERVICE_QUERY_STATUS | SERVICE_INTERROGATE | SERVICE_START | READ_CONTROL;
+  entries[2].grfAccessMode = SET_ACCESS;
+  entries[2].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  entries[2].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+  entries[2].Trustee.ptstrName = static_cast<LPWSTR>(usersSid);
+
+  PACL acl = nullptr;
+  const auto aclStatus = SetEntriesInAclW(static_cast<ULONG>(entries.size()), entries.data(), nullptr, &acl);
+  if (aclStatus != ERROR_SUCCESS) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"SetEntriesInAclW failed while securing service stop permissions.";
+    }
+    if (ownedService != nullptr) {
+      CloseServiceHandle(ownedService);
+    }
+    if (manager != nullptr) {
+      CloseServiceHandle(manager);
+    }
+    return false;
+  }
+
+  const auto securityStatus = SetSecurityInfo(serviceHandle, SE_SERVICE,
+                                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr,
+                                              nullptr, acl, nullptr);
+  LocalFree(acl);
+
+  if (ownedService != nullptr) {
+    CloseServiceHandle(ownedService);
+  }
+  if (manager != nullptr) {
+    CloseServiceHandle(manager);
+  }
+
+  if (securityStatus != ERROR_SUCCESS) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"SetSecurityInfo failed while preventing standard users from stopping the service.";
+    }
+    PersistRegistryDwordValue(kServiceControlProtectedValueName, 0);
+    return false;
+  }
+
+  PersistRegistryDwordValue(kServiceControlProtectedValueName, 1);
   return true;
 }
 
@@ -406,8 +541,8 @@ bool HardeningManager::ApplyProtectedServiceRegistration(const std::wstring& ser
 
 bool HardeningManager::ValidateUninstallAuthorization(const std::wstring& uninstallToken,
                                                       std::wstring* errorMessage) const {
-  HKEY key = nullptr;
-  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRegistryRoot, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+  HKEY key = OpenHardeningRegistryKeyForRead();
+  if (key == nullptr) {
     return true;
   }
 
@@ -436,11 +571,12 @@ bool HardeningManager::ValidateUninstallAuthorization(const std::wstring& uninst
 
 HardeningStatus HardeningManager::QueryStatus(const std::wstring& serviceName) const {
   HardeningStatus status;
-  HKEY key = nullptr;
-  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRegistryRoot, 0, KEY_READ, &key) == ERROR_SUCCESS) {
+  HKEY key = OpenHardeningRegistryKeyForRead();
+  if (key != nullptr) {
     status.registryConfigured = true;
     status.uninstallTokenHash = ReadRegistryString(key, L"UninstallTokenSha256");
     status.uninstallProtectionEnabled = !status.uninstallTokenHash.empty();
+    status.serviceControlProtected = ReadRegistryDword(key, kServiceControlProtectedValueName, 0) != 0;
     status.elamDriverPath = ReadRegistryString(key, kElamDriverPathValueName);
     status.elamCertificateInstalled = ReadRegistryDword(key, kElamCertificateInstalledValueName, 0) != 0;
     status.launchProtectedConfigured = ReadRegistryDword(key, kServiceLaunchProtectedValueName, 0) != 0;
@@ -462,10 +598,10 @@ HardeningStatus HardeningManager::QueryStatus(const std::wstring& serviceName) c
   }
 
   status.statusMessage =
-      status.registryConfigured && status.runtimePathsProtected
+      status.registryConfigured && status.runtimePathsProtected && status.serviceControlProtected
           ? (status.launchProtectedConfigured
-                 ? L"Tamper protection, ELAM-backed certificate registration, and launch-protected service posture are configured."
-                 : L"Tamper protection is configured, but launch-protected service registration is not yet active.")
+                 ? L"Tamper protection, service stop-hardening, ELAM-backed certificate registration, and launch-protected service posture are configured."
+                 : L"Tamper protection and service stop-hardening are configured, but launch-protected service registration is not yet active.")
           : L"Tamper-protection is only partially configured.";
   return status;
 }

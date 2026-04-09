@@ -1,4 +1,4 @@
-import type { MailState } from "./types.js";
+import type { MailState } from "./types.ts";
 
 function minusMinutes(baseIso: string, minutes: number) {
   return new Date(Date.parse(baseIso) - minutes * 60_000).toISOString();

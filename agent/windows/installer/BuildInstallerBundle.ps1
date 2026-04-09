@@ -1,5 +1,5 @@
 param(
-    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build'),
+    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build-fenrir'),
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\installer'),
     [switch]$Clean
 )
@@ -30,13 +30,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $buildRootFull 'CMakeCache.txt'))) {
 
 cmake --build $buildRootFull --target antivirus-setup | Out-Host
 
-$setupSource = Join-Path $buildRootFull 'antivirus-setup.exe'
+$setupSource = Join-Path $buildRootFull 'FenrirSetup.exe'
 if (-not (Test-Path -LiteralPath $setupSource)) {
     throw "Installer output was not produced: $setupSource"
 }
 
-$setupTarget = Join-Path $outputRootFull 'AntiVirusSetup.exe'
+$setupTarget = Join-Path $outputRootFull 'FenrirSetup.exe'
 Copy-Item -LiteralPath $setupSource -Destination $setupTarget -Force
 
 Write-Host "Installer bundle written to $setupTarget"
-

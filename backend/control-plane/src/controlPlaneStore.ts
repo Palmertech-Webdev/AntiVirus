@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { generateAlertsFromTelemetry, mergeGeneratedAlerts } from "./detectionEngine.js";
-import { createEmptyState, createSeedState, DEMO_DEVICE_IDS, DEMO_HOSTNAMES } from "./seedState.js";
+import { generateAlertsFromTelemetry, mergeGeneratedAlerts } from "./detectionEngine.ts";
+import { createEmptyState, createSeedState, DEMO_DEVICE_IDS, DEMO_HOSTNAMES } from "./seedState.ts";
 import type {
   AlertSummary,
   CommandStatus,
@@ -33,7 +33,7 @@ import type {
   TelemetryBatchRequest,
   TelemetryBatchResponse,
   TelemetryRecord
-} from "./types.js";
+} from "./types.ts";
 
 const DEFAULT_STATE_FILE_PATH = join(process.cwd(), ".data", "control-plane-state.json");
 const DEFAULT_COMMAND_CHANNEL_URL = "wss://localhost:4000/api/v1/commands";

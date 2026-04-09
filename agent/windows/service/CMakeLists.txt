@@ -84,7 +84,7 @@ target_include_directories(antivirus-amsi-provider PRIVATE
   ../provider/amsi/include
 )
 target_link_libraries(antivirus-amsi-provider PRIVATE antivirus-amsi-provider-core antivirus-agent-core ole32 advapi32)
-set_target_properties(antivirus-amsi-provider PROPERTIES OUTPUT_NAME "antivirus-amsi-provider" PREFIX "")
+set_target_properties(antivirus-amsi-provider PROPERTIES OUTPUT_NAME "fenrir-amsi-provider" PREFIX "")
 antivirus_apply_portable_runtime(antivirus-amsi-provider)
 
 add_executable(antivirus-agent-service
@@ -93,6 +93,7 @@ add_executable(antivirus-agent-service
 
 target_link_libraries(antivirus-agent-service PRIVATE antivirus-agent-core advapi32)
 target_link_options(antivirus-agent-service PRIVATE -municode)
+set_target_properties(antivirus-agent-service PROPERTIES OUTPUT_NAME "fenrir-agent-service")
 antivirus_apply_portable_runtime(antivirus-agent-service)
 
 add_executable(antivirus-endpoint-client WIN32
@@ -104,6 +105,7 @@ target_include_directories(antivirus-endpoint-client PRIVATE include)
 target_link_libraries(antivirus-endpoint-client PRIVATE antivirus-agent-core comctl32 ole32 uxtheme)
 target_compile_definitions(antivirus-endpoint-client PRIVATE UNICODE _UNICODE)
 target_link_options(antivirus-endpoint-client PRIVATE -municode)
+set_target_properties(antivirus-endpoint-client PROPERTIES OUTPUT_NAME "fenrir-endpoint-client")
 antivirus_apply_portable_runtime(antivirus-endpoint-client)
 
 add_executable(antivirus-scannercli
@@ -113,6 +115,7 @@ add_executable(antivirus-scannercli
 target_include_directories(antivirus-scannercli PRIVATE include)
 target_link_libraries(antivirus-scannercli PRIVATE antivirus-agent-core)
 target_link_options(antivirus-scannercli PRIVATE -municode)
+set_target_properties(antivirus-scannercli PROPERTIES OUTPUT_NAME "fenrir-scannercli")
 antivirus_apply_portable_runtime(antivirus-scannercli)
 
 add_executable(antivirus-amsitestcli
@@ -125,6 +128,7 @@ target_include_directories(antivirus-amsitestcli PRIVATE
 )
 target_link_libraries(antivirus-amsitestcli PRIVATE antivirus-amsi-provider-core antivirus-agent-core ole32)
 target_link_options(antivirus-amsitestcli PRIVATE -municode)
+set_target_properties(antivirus-amsitestcli PROPERTIES OUTPUT_NAME "fenrir-amsitestcli")
 antivirus_apply_portable_runtime(antivirus-amsitestcli)
 
 add_executable(antivirus-etwtestcli
@@ -137,6 +141,7 @@ target_include_directories(antivirus-etwtestcli PRIVATE
 )
 target_link_libraries(antivirus-etwtestcli PRIVATE antivirus-agent-core)
 target_link_options(antivirus-etwtestcli PRIVATE -municode)
+set_target_properties(antivirus-etwtestcli PROPERTIES OUTPUT_NAME "fenrir-etwtestcli")
 antivirus_apply_portable_runtime(antivirus-etwtestcli)
 
 add_executable(antivirus-wfptestcli
@@ -149,6 +154,7 @@ target_include_directories(antivirus-wfptestcli PRIVATE
 )
 target_link_libraries(antivirus-wfptestcli PRIVATE antivirus-agent-core)
 target_link_options(antivirus-wfptestcli PRIVATE -municode)
+set_target_properties(antivirus-wfptestcli PROPERTIES OUTPUT_NAME "fenrir-wfptestcli")
 antivirus_apply_portable_runtime(antivirus-wfptestcli)
 
 set(INSTALLER_NATIVE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../installer/native)
@@ -169,10 +175,13 @@ if(MINGW AND NOT SETUP_WINPTHREAD_DLL)
 endif()
 
 file(TO_CMAKE_PATH "${INSTALLER_NATIVE_DIR}/include/SetupResourceIds.h" SETUP_RESOURCE_HEADER)
-file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/antivirus-agent-service.exe" SETUP_SERVICE_EXE)
-file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/antivirus-endpoint-client.exe" SETUP_ENDPOINT_CLIENT_EXE)
-file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/antivirus-amsi-provider.dll" SETUP_AMSI_PROVIDER_DLL)
-file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/antivirus-scannercli.exe" SETUP_SCANNERCLI_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-agent-service.exe" SETUP_SERVICE_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-endpoint-client.exe" SETUP_ENDPOINT_CLIENT_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-amsi-provider.dll" SETUP_AMSI_PROVIDER_DLL)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-scannercli.exe" SETUP_SCANNERCLI_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-amsitestcli.exe" SETUP_AMSITESTCLI_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-etwtestcli.exe" SETUP_ETWTESTCLI_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-wfptestcli.exe" SETUP_WFPTESTCLI_EXE)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../signatures/default-signatures.tsv" SETUP_SIGNATURES_FILE)
 file(TO_CMAKE_PATH "${SETUP_WINPTHREAD_DLL}" SETUP_WINPTHREAD_DLL_CMAKE)
 
@@ -182,6 +191,9 @@ IDR_PAYLOAD_SERVICE RCDATA \"${SETUP_SERVICE_EXE}\"\n\
 IDR_PAYLOAD_ENDPOINT_CLIENT RCDATA \"${SETUP_ENDPOINT_CLIENT_EXE}\"\n\
 IDR_PAYLOAD_AMSI_PROVIDER RCDATA \"${SETUP_AMSI_PROVIDER_DLL}\"\n\
 IDR_PAYLOAD_SCANNERCLI RCDATA \"${SETUP_SCANNERCLI_EXE}\"\n\
+IDR_PAYLOAD_AMSITESTCLI RCDATA \"${SETUP_AMSITESTCLI_EXE}\"\n\
+IDR_PAYLOAD_ETWTESTCLI RCDATA \"${SETUP_ETWTESTCLI_EXE}\"\n\
+IDR_PAYLOAD_WFPTESTCLI RCDATA \"${SETUP_WFPTESTCLI_EXE}\"\n\
 IDR_PAYLOAD_SIGNATURES RCDATA \"${SETUP_SIGNATURES_FILE}\"\n\
 IDR_PAYLOAD_WINPTHREAD RCDATA \"${SETUP_WINPTHREAD_DLL_CMAKE}\"\n")
 
@@ -196,6 +208,9 @@ add_dependencies(antivirus-setup
   antivirus-endpoint-client
   antivirus-amsi-provider
   antivirus-scannercli
+  antivirus-amsitestcli
+  antivirus-etwtestcli
+  antivirus-wfptestcli
 )
 
 target_include_directories(antivirus-setup PRIVATE
@@ -207,4 +222,5 @@ if(MINGW)
 endif()
 target_compile_definitions(antivirus-setup PRIVATE UNICODE _UNICODE)
 target_link_options(antivirus-setup PRIVATE -municode -static)
+set_target_properties(antivirus-setup PROPERTIES OUTPUT_NAME "FenrirSetup")
 antivirus_apply_portable_runtime(antivirus-setup)

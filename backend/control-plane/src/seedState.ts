@@ -1,4 +1,4 @@
-import type { ControlPlaneState } from "./types.js";
+import type { ControlPlaneState } from "./types.ts";
 
 export const DEMO_DEVICE_IDS = ["dev-lon-001", "dev-lon-002", "dev-lon-003"] as const;
 export const DEMO_HOSTNAMES = ["FINANCE-LAPTOP-07", "OPS-DESKTOP-03", "HR-LAPTOP-12"] as const;

@@ -190,6 +190,7 @@ export interface EnrollmentRequest {
 
 export interface EnrollmentResponse {
   deviceId: string;
+  deviceApiKey?: string;
   issuedAt: string;
   policy: PolicySummary;
   commandChannelUrl: string;

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { createEmptyMailState, createSeedMailState } from "./mailSeedState.js";
+import { createEmptyMailState, createSeedMailState } from "./mailSeedState.ts";
 import type {
   MailActionRecord,
   MailAuthResult,
@@ -19,7 +19,7 @@ import type {
   MailVerdict,
   MailVerificationStatus,
   SimulatedInboundMailRequest
-} from "./types.js";
+} from "./types.ts";
 
 const DEFAULT_STATE_FILE_PATH = join(process.cwd(), ".data", "mail-state.json");
 const MAX_MESSAGES = 2_000;

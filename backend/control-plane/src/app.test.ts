@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { buildServer } from "./app.js";
-import { createFileBackedControlPlaneStore } from "./controlPlaneStore.js";
-import { createFileBackedMailStore } from "./mailStore.js";
-import { createSeedState } from "./seedState.js";
+import { buildServer } from "./app.ts";
+import { createFileBackedControlPlaneStore } from "./controlPlaneStore.ts";
+import { createFileBackedMailStore } from "./mailStore.ts";
+import { createSeedState } from "./seedState.ts";
 
 async function createTestApp() {
   const tempDir = await mkdtemp(join(tmpdir(), "antivirus-control-plane-"));

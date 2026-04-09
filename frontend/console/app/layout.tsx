@@ -4,10 +4,14 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AntiVirus Security Console",
-  description: "Incident-led Windows enterprise AV and ATP operations console",
+  title: "Fenrir Security Console",
+  description: "Incident-led Windows endpoint protection and security operations console",
   icons: {
-    icon: "/icon.svg"
+    icon: [
+      { url: "/fenrir.ico", rel: "icon" },
+      { url: "/fenrir.png", type: "image/png" }
+    ],
+    apple: "/fenrir.png"
   }
 };
 

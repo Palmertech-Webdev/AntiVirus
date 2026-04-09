@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { z } from "zod";
+import { randomBytes } from "node:crypto";
 
 import {
   createFileBackedMailStore,
@@ -8,13 +9,13 @@ import {
   MailMessageNotFoundError,
   MailQuarantineItemNotFoundError,
   type MailStore
-} from "./mailStore.js";
+} from "./mailStore.ts";
 import {
   CommandNotFoundError,
   createFileBackedControlPlaneStore,
   DeviceNotFoundError,
   type ControlPlaneStore
-} from "./controlPlaneStore.js";
+} from "./controlPlaneStore.ts";
 
 const enrollmentRequestSchema = z.object({
   hostname: z.string().min(1),
@@ -266,9 +267,74 @@ function validateQueuedCommand(
 export function buildServer(options: BuildServerOptions = {}) {
   const store = options.store ?? createFileBackedControlPlaneStore();
   const mailStore = options.mailStore ?? createFileBackedMailStore();
+  const deviceApiKeys = new Map<string, string>();
   const app = Fastify({
     logger: true
   });
+
+  function issueDeviceApiKey() {
+    return `avd_${randomBytes(24).toString("hex")}`;
+  }
+
+  function buildCommandChannelUrl(baseUrl: string, deviceId: string, deviceApiKey: string) {
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${separator}deviceId=${encodeURIComponent(deviceId)}&deviceApiKey=${encodeURIComponent(deviceApiKey)}`;
+  }
+
+  function extractDeviceApiKey(request: { headers: Record<string, unknown>; raw: { url?: string } }) {
+    const headerValue = request.headers["x-device-api-key"];
+    if (typeof headerValue === "string" && headerValue.length > 0) {
+      return headerValue;
+    }
+
+    const authHeader = request.headers.authorization;
+    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+      return authHeader.slice("Bearer ".length).trim();
+    }
+
+    const rawUrl = request.raw.url;
+    if (typeof rawUrl === "string") {
+      const queryStart = rawUrl.indexOf("?");
+      if (queryStart >= 0) {
+        const query = rawUrl.slice(queryStart + 1);
+        const params = new URLSearchParams(query);
+        const queryKey = params.get("deviceApiKey");
+        if (queryKey && queryKey.length > 0) {
+          return queryKey;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  function requireDeviceAuthentication(
+    request: { headers: Record<string, unknown>; raw: { url?: string } },
+    reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } },
+    deviceId: string
+  ) {
+    const presentedKey = extractDeviceApiKey(request);
+    const expectedKey = deviceApiKeys.get(deviceId);
+
+    if (!expectedKey && presentedKey) {
+      deviceApiKeys.set(deviceId, presentedKey);
+      return true;
+    }
+
+    if (!expectedKey && !presentedKey) {
+      return true;
+    }
+
+    if (!expectedKey || !presentedKey || presentedKey !== expectedKey) {
+      reply.code(401).send({
+        error: "invalid_device_api_key",
+        deviceId
+      });
+      return false;
+    }
+
+    return true;
+  }
 
   void app.register(cors, {
     origin: true
@@ -489,13 +555,23 @@ export function buildServer(options: BuildServerOptions = {}) {
   app.get("/api/v1/policies/default", async () => store.getDefaultPolicy());
 
   app.post("/api/v1/enroll", async (request, reply) => {
+    const finalizeEnrollment = (enrollment: { deviceId: string; commandChannelUrl: string }) => {
+      const deviceApiKey = issueDeviceApiKey();
+      deviceApiKeys.set(enrollment.deviceId, deviceApiKey);
+
+      return {
+        ...enrollment,
+        deviceApiKey,
+        commandChannelUrl: buildCommandChannelUrl(enrollment.commandChannelUrl, enrollment.deviceId, deviceApiKey)
+      };
+    };
     const parsed = enrollmentRequestSchema.safeParse(request.body);
 
     if (!parsed.success) {
       return sendValidationError(reply, parsed.error.flatten());
     }
 
-    return reply.code(201).send(await store.enrollDevice(parsed.data));
+    return reply.code(201).send(finalizeEnrollment(await store.enrollDevice(parsed.data)));
   });
 
   app.post("/api/v1/devices/:deviceId/heartbeat", async (request, reply) => {
@@ -504,6 +580,10 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     if (!params.success) {
       return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!requireDeviceAuthentication(request, reply, params.data.deviceId)) {
+      return;
     }
 
     if (!body.success) {
@@ -527,6 +607,10 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     if (!params.success) {
       return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!requireDeviceAuthentication(request, reply, params.data.deviceId)) {
+      return;
     }
 
     if (!body.success) {
@@ -580,6 +664,10 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, params.error.flatten());
     }
 
+    if (!requireDeviceAuthentication(request, reply, params.data.deviceId)) {
+      return;
+    }
+
     if (!query.success) {
       return sendValidationError(reply, query.error.flatten());
     }
@@ -601,6 +689,10 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     if (!params.success) {
       return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!requireDeviceAuthentication(request, reply, params.data.deviceId)) {
+      return;
     }
 
     if (!body.success) {
@@ -628,6 +720,10 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     if (!params.success) {
       return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!requireDeviceAuthentication(request, reply, params.data.deviceId)) {
+      return;
     }
 
     if (!body.success) {

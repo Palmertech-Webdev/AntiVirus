@@ -1,0 +1,16 @@
+{
+  "defaultPolicy": {
+    "id": "mail-policy-default",
+    "name": "Inbound Mail Baseline",
+    "revision": "2026.04.08.1",
+    "defaultAction": "quarantined",
+    "urlRewriteEnabled": true,
+    "attachmentScanningEnabled": true,
+    "impersonationProtectionEnabled": true,
+    "quarantineRetentionDays": 30
+  },
+  "domains": [],
+  "messages": [],
+  "quarantineItems": [],
+  "actionRecords": []
+}

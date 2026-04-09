@@ -1,4 +1,4 @@
-import type { SVGProps } from "react";
+import type { CSSProperties, ImgHTMLAttributes, SVGProps } from "react";
 
 export type NavigationIconName =
   | "dashboard"
@@ -15,7 +15,7 @@ interface SvgIconProps extends SVGProps<SVGSVGElement> {
   title?: string;
 }
 
-interface BrandMarkProps extends SvgIconProps {
+interface BrandMarkProps extends ImgHTMLAttributes<HTMLImageElement> {
   tone?: "accent" | "ok" | "warning" | "danger";
 }
 
@@ -32,31 +32,21 @@ function toneColor(tone: NonNullable<BrandMarkProps["tone"]>) {
   }
 }
 
-export function BrandMark({ className, tone = "accent", title = "AntiVirus", ...props }: BrandMarkProps) {
-  const signal = toneColor(tone);
+export function BrandMark({ className, tone = "accent", title = "Fenrir", ...props }: BrandMarkProps) {
+  const accent = toneColor(tone);
+  const style: CSSProperties = {
+    boxShadow: `0 0 0 1px color-mix(in srgb, ${accent} 28%, transparent), 0 18px 40px color-mix(in srgb, ${accent} 16%, transparent)`,
+    borderRadius: 18
+  };
 
   return (
-    <svg
-      viewBox="0 0 48 48"
-      fill="none"
-      role="img"
-      aria-label={title}
+    <img
+      src="/fenrir.png"
+      alt={title}
       className={className}
+      style={style}
       {...props}>
-      <rect x="4" y="4" width="40" height="40" rx="14" fill="rgba(108, 194, 255, 0.1)" stroke="rgba(108, 194, 255, 0.22)" />
-      <path
-        d="M24 10.5L33.6 14.7V22.5C33.6 29.6 28.8 35.8 24 38.4C19.2 35.8 14.4 29.6 14.4 22.5V14.7L24 10.5Z"
-        fill="rgba(237, 244, 251, 0.98)"
-      />
-      <path
-        d="M17.8 24.4H21L23.2 19.5L25.3 28.4L27.1 23.5H30.4"
-        stroke={signal}
-        strokeWidth="2.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="30.8" cy="16.8" r="2.3" fill={signal} />
-    </svg>
+    </img>
   );
 }
 
