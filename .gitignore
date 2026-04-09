@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.env.local
+npm-debug.log*
+backend/control-plane/data/state.json
+agent/windows/service/build/
+agent/windows/service/runtime/

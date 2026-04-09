@@ -1,0 +1,524 @@
+#include <winsock2.h>
+#include <Windows.h>
+
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "AgentService.h"
+#include "AgentConfig.h"
+#include "HardeningManager.h"
+#include "SelfTestRunner.h"
+#include "StringUtils.h"
+#include "UpdaterService.h"
+#include "WscCoexistenceManager.h"
+
+namespace {
+
+constexpr wchar_t kServiceName[] = L"AntiVirusAgent";
+constexpr wchar_t kServiceDisplayName[] = L"AntiVirus Agent";
+constexpr wchar_t kServiceDescription[] =
+    L"Windows endpoint protection agent for policy sync, telemetry, and on-demand scanning.";
+constexpr wchar_t kAmsiProviderDllName[] = L"antivirus-amsi-provider.dll";
+
+SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
+SERVICE_STATUS g_serviceStatus{};
+antivirus::agent::AgentService* g_activeService = nullptr;
+
+bool InvokeAdjacentDllRegistration(bool registerProvider);
+void WaitForServiceStop(SC_HANDLE service);
+
+void UpdateServiceStatus(const DWORD currentState, const DWORD win32ExitCode = NO_ERROR,
+                         const DWORD waitHint = 0, const DWORD serviceSpecificExitCode = 0) {
+  g_serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+  g_serviceStatus.dwCurrentState = currentState;
+  g_serviceStatus.dwWin32ExitCode = win32ExitCode;
+  g_serviceStatus.dwWaitHint = waitHint;
+  g_serviceStatus.dwServiceSpecificExitCode = serviceSpecificExitCode;
+  g_serviceStatus.dwControlsAccepted =
+      currentState == SERVICE_START_PENDING ? 0 : (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
+  g_serviceStatus.dwCheckPoint =
+      (currentState == SERVICE_RUNNING || currentState == SERVICE_STOPPED) ? 0 : g_serviceStatus.dwCheckPoint + 1;
+
+  if (g_serviceStatusHandle != nullptr) {
+    SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
+  }
+}
+
+DWORD WINAPI ServiceControlHandler(const DWORD controlCode, DWORD, void*, void*) {
+  switch (controlCode) {
+    case SERVICE_CONTROL_STOP:
+    case SERVICE_CONTROL_SHUTDOWN:
+      UpdateServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, 15'000);
+      if (g_activeService != nullptr) {
+        g_activeService->RequestStop();
+      }
+      return NO_ERROR;
+    case SERVICE_CONTROL_INTERROGATE:
+      if (g_serviceStatusHandle != nullptr) {
+        SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
+      }
+      return NO_ERROR;
+    default:
+      return ERROR_CALL_NOT_IMPLEMENTED;
+  }
+}
+
+void WINAPI ServiceEntry(DWORD, LPWSTR*) {
+  g_serviceStatusHandle = RegisterServiceCtrlHandlerExW(kServiceName, ServiceControlHandler, nullptr);
+  if (g_serviceStatusHandle == nullptr) {
+    return;
+  }
+
+  UpdateServiceStatus(SERVICE_START_PENDING, NO_ERROR, 5'000);
+
+  antivirus::agent::AgentService service;
+  g_activeService = &service;
+
+  UpdateServiceStatus(SERVICE_RUNNING);
+  const auto exitCode = service.Run(antivirus::agent::AgentRunMode::Service);
+
+  g_activeService = nullptr;
+  UpdateServiceStatus(SERVICE_STOPPED, exitCode == 0 ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR, 0,
+                      static_cast<DWORD>(exitCode));
+}
+
+std::wstring GetModulePath() {
+  std::wstring buffer(MAX_PATH, L'\0');
+  const auto written = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+  if (written == 0) {
+    return {};
+  }
+
+  buffer.resize(written);
+  return buffer;
+}
+
+std::wstring GetArgumentValue(int argc, wchar_t* argv[], const std::wstring& name) {
+  for (int index = 1; index < argc - 1; ++index) {
+    if (argv[index] == name) {
+      return argv[index + 1];
+    }
+  }
+
+  return {};
+}
+
+std::filesystem::path GetInstallRoot() {
+  const auto modulePath = std::filesystem::path(GetModulePath());
+  return modulePath.has_parent_path() ? modulePath.parent_path() : std::filesystem::current_path();
+}
+
+void ConfigureServiceHardening(SC_HANDLE service) {
+  SERVICE_DESCRIPTIONW description{};
+  description.lpDescription = const_cast<LPWSTR>(kServiceDescription);
+  ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &description);
+
+  SERVICE_DELAYED_AUTO_START_INFO delayedStart{};
+  delayedStart.fDelayedAutostart = TRUE;
+  ChangeServiceConfig2W(service, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, &delayedStart);
+
+  SERVICE_SID_INFO sidInfo{};
+  sidInfo.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
+  ChangeServiceConfig2W(service, SERVICE_CONFIG_SERVICE_SID_INFO, &sidInfo);
+
+  SC_ACTION actions[3]{};
+  actions[0].Type = SC_ACTION_RESTART;
+  actions[0].Delay = 15'000;
+  actions[1].Type = SC_ACTION_RESTART;
+  actions[1].Delay = 30'000;
+  actions[2].Type = SC_ACTION_NONE;
+  actions[2].Delay = 0;
+
+  SERVICE_FAILURE_ACTIONSW failureActions{};
+  failureActions.dwResetPeriod = 24 * 60 * 60;
+  failureActions.cActions = static_cast<DWORD>(std::size(actions));
+  failureActions.lpsaActions = actions;
+  ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS, &failureActions);
+}
+
+bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToken) {
+  const auto modulePath = GetModulePath();
+  if (modulePath.empty()) {
+    std::wcerr << L"Could not determine the agent executable path." << std::endl;
+    return false;
+  }
+
+  const auto serviceCommandLine = L"\"" + modulePath + L"\"";
+  const auto scManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE | SC_MANAGER_CONNECT);
+  if (scManager == nullptr) {
+    std::wcerr << L"OpenSCManagerW failed with error " << GetLastError() << std::endl;
+    return false;
+  }
+
+  auto service = CreateServiceW(scManager, kServiceName, kServiceDisplayName,
+                                SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE | SERVICE_CHANGE_CONFIG,
+                                SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                                serviceCommandLine.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
+  if (service == nullptr) {
+    const auto error = GetLastError();
+    if (error == ERROR_SERVICE_EXISTS) {
+      service = OpenServiceW(scManager, kServiceName, SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE |
+                                                         SERVICE_CHANGE_CONFIG);
+      if (service == nullptr) {
+        CloseServiceHandle(scManager);
+        std::wcerr << L"OpenServiceW failed with error " << GetLastError() << std::endl;
+        return false;
+      }
+      if (ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                               serviceCommandLine.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr,
+                               kServiceDisplayName) == FALSE) {
+        std::wcerr << L"ChangeServiceConfigW failed with error " << GetLastError() << std::endl;
+        CloseServiceHandle(service);
+        CloseServiceHandle(scManager);
+        return false;
+      }
+    } else {
+      CloseServiceHandle(scManager);
+      std::wcerr << L"CreateServiceW failed with error " << error << std::endl;
+      return false;
+    }
+  }
+
+  ConfigureServiceHardening(service);
+
+  auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+  antivirus::agent::HardeningManager hardeningManager(config, GetInstallRoot());
+  std::wstring hardeningError;
+  const auto hardeningApplied = hardeningManager.ApplyPostInstallHardening(uninstallToken, &hardeningError);
+  if (!hardeningApplied) {
+    std::wcerr << L"Post-install hardening failed: " << hardeningError << std::endl;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  if (!config.elamDriverPath.empty()) {
+    std::wstring protectedServiceError;
+    if (!hardeningManager.ApplyProtectedServiceRegistration(kServiceName, service, config.elamDriverPath,
+                                                            &protectedServiceError)) {
+      std::wcerr << L"Protected-service registration failed: " << protectedServiceError << std::endl;
+      CloseServiceHandle(service);
+      CloseServiceHandle(scManager);
+      return false;
+    }
+  }
+
+  if (!InvokeAdjacentDllRegistration(true)) {
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  antivirus::agent::WscCoexistenceManager wscManager;
+  const auto wscSnapshot = wscManager.CaptureSnapshot();
+  std::wcout << L"WSC coexistence status: "
+             << (wscSnapshot.available ? wscSnapshot.providerHealth : wscSnapshot.errorMessage) << std::endl;
+
+  const auto hardeningStatus = hardeningManager.QueryStatus(kServiceName);
+  CloseServiceHandle(service);
+  CloseServiceHandle(scManager);
+  std::wcout << (repair ? L"Repaired " : L"Installed ") << kServiceDisplayName
+             << L" with delayed auto-start, recovery actions, AMSI registration, tamper hardening, and "
+             << (hardeningStatus.launchProtectedConfigured ? L"launch-protected antimalware service posture."
+                                                           : L"standard service posture.")
+             << std::endl;
+  return true;
+}
+
+std::wstring GetSiblingPath(const std::wstring& fileName) {
+  const auto modulePath = std::filesystem::path(GetModulePath());
+  const auto directory = modulePath.has_parent_path() ? modulePath.parent_path() : std::filesystem::current_path();
+  return (directory / fileName).wstring();
+}
+
+bool InvokeAdjacentDllRegistration(const bool registerProvider) {
+  const auto dllPath = GetSiblingPath(kAmsiProviderDllName);
+  const auto library = LoadLibraryW(dllPath.c_str());
+  if (library == nullptr) {
+    std::wcerr << L"Could not load " << dllPath << L" for AMSI provider registration." << std::endl;
+    return false;
+  }
+
+  using RegistrationFunction = HRESULT(__stdcall*)();
+  const auto exportName = registerProvider ? "DllRegisterServer" : "DllUnregisterServer";
+  const auto registration = reinterpret_cast<RegistrationFunction>(GetProcAddress(library, exportName));
+  if (registration == nullptr) {
+    std::wcerr << L"Could not find " << antivirus::agent::Utf8ToWide(exportName) << L" in " << dllPath << std::endl;
+    FreeLibrary(library);
+    return false;
+  }
+
+  const auto hr = registration();
+  FreeLibrary(library);
+  if (FAILED(hr)) {
+    std::wcerr << L"AMSI provider " << (registerProvider ? L"registration" : L"unregistration")
+               << L" failed with HRESULT 0x" << std::hex << hr << std::dec << std::endl;
+    return false;
+  }
+
+  std::wcout << L"AMSI provider " << (registerProvider ? L"registered" : L"unregistered") << L" successfully."
+             << std::endl;
+  return true;
+}
+
+void WaitForServiceStop(SC_HANDLE service) {
+  SERVICE_STATUS_PROCESS status{};
+  DWORD bytesNeeded = 0;
+
+  while (QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status),
+                              &bytesNeeded) != FALSE) {
+    if (status.dwCurrentState == SERVICE_STOPPED) {
+      return;
+    }
+
+    Sleep(500);
+  }
+}
+
+bool UninstallService(const std::wstring& uninstallToken) {
+  const auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+  antivirus::agent::HardeningManager hardeningManager(config, GetInstallRoot());
+  std::wstring validationError;
+  if (!hardeningManager.ValidateUninstallAuthorization(uninstallToken, &validationError)) {
+    std::wcerr << validationError << std::endl;
+    return false;
+  }
+
+  const auto scManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (scManager == nullptr) {
+    std::wcerr << L"OpenSCManagerW failed with error " << GetLastError() << std::endl;
+    return false;
+  }
+
+  const auto service = OpenServiceW(scManager, kServiceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+  if (service == nullptr) {
+    const auto error = GetLastError();
+    CloseServiceHandle(scManager);
+
+    if (error == ERROR_SERVICE_DOES_NOT_EXIST) {
+      std::wcout << L"The service is not installed." << std::endl;
+      return true;
+    }
+
+    std::wcerr << L"OpenServiceW failed with error " << error << std::endl;
+    return false;
+  }
+
+  SERVICE_STATUS status{};
+  ControlService(service, SERVICE_CONTROL_STOP, &status);
+  WaitForServiceStop(service);
+
+  const auto deleted = DeleteService(service) != FALSE;
+  if (!deleted) {
+    std::wcerr << L"DeleteService failed with error " << GetLastError() << std::endl;
+  }
+
+  CloseServiceHandle(service);
+  CloseServiceHandle(scManager);
+
+  InvokeAdjacentDllRegistration(false);
+
+  if (deleted) {
+    std::wcout << L"Removed " << kServiceDisplayName << L"." << std::endl;
+  }
+
+  return deleted;
+}
+
+bool UpgradeInstalledService(const std::wstring& manifestPath) {
+  if (manifestPath.empty()) {
+    std::wcerr << L"--upgrade requires a manifest path." << std::endl;
+    return false;
+  }
+
+  const auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+  const auto scManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (scManager == nullptr) {
+    std::wcerr << L"OpenSCManagerW failed with error " << GetLastError() << std::endl;
+    return false;
+  }
+
+  const auto service = OpenServiceW(scManager, kServiceName, SERVICE_STOP | SERVICE_START | SERVICE_QUERY_STATUS);
+  if (service == nullptr) {
+    std::wcerr << L"OpenServiceW failed with error " << GetLastError() << std::endl;
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  SERVICE_STATUS status{};
+  ControlService(service, SERVICE_CONTROL_STOP, &status);
+  WaitForServiceStop(service);
+
+  antivirus::agent::UpdaterService updater(config, GetInstallRoot());
+  const auto result = updater.ApplyPackage(manifestPath, antivirus::agent::UpdateApplyMode::Maintenance);
+  if (!result.success) {
+    std::wcerr << L"Upgrade failed: " << result.errorMessage << std::endl;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  if (StartServiceW(service, 0, nullptr) == FALSE && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+    std::wcerr << L"StartServiceW failed with error " << GetLastError() << std::endl;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  CloseServiceHandle(service);
+  CloseServiceHandle(scManager);
+  std::wcout << L"Upgrade status: " << result.status << L" (transaction " << result.transactionId << L")" << std::endl;
+  return true;
+}
+
+bool RollbackInstalledUpdate(const std::wstring& transactionId) {
+  if (transactionId.empty()) {
+    std::wcerr << L"--rollback-update requires a transaction identifier." << std::endl;
+    return false;
+  }
+
+  const auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+  antivirus::agent::UpdaterService updater(config, GetInstallRoot());
+  const auto result = updater.RollbackTransaction(transactionId);
+  if (!result.success) {
+    std::wcerr << L"Rollback failed: " << result.errorMessage << std::endl;
+    return false;
+  }
+
+  std::wcout << L"Rollback status: " << result.status << std::endl;
+  return true;
+}
+
+int PrintWscStatus() {
+  antivirus::agent::WscCoexistenceManager manager;
+  const auto snapshot = manager.CaptureSnapshot();
+  std::wcout << antivirus::agent::WscCoexistenceManager::ToJson(snapshot) << std::endl;
+  return snapshot.available ? 0 : 1;
+}
+
+int RunSelfTest() {
+  const auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+  const auto report = antivirus::agent::RunSelfTest(config, GetInstallRoot());
+  std::wcout << antivirus::agent::SelfTestReportToJson(report) << std::endl;
+  return antivirus::agent::SelfTestExitCode(report);
+}
+
+BOOL WINAPI ConsoleControlHandler(const DWORD controlCode) {
+  switch (controlCode) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+      if (g_activeService != nullptr) {
+        g_activeService->RequestStop();
+        return TRUE;
+      }
+      return FALSE;
+    default:
+      return FALSE;
+  }
+}
+
+int RunConsoleMode() {
+  antivirus::agent::AgentService service;
+  g_activeService = &service;
+  SetConsoleCtrlHandler(ConsoleControlHandler, TRUE);
+  const auto exitCode = service.Run(antivirus::agent::AgentRunMode::Console);
+  SetConsoleCtrlHandler(ConsoleControlHandler, FALSE);
+  g_activeService = nullptr;
+  return exitCode;
+}
+
+void PrintUsage() {
+  std::wcout << L"Usage: antivirus-agent-service.exe [--console|--install [--elam-driver <path>]|--repair [--elam-driver <path>]|--upgrade <manifest>|--rollback-update <transaction>|--uninstall [--token <token>]|--wsc-status|--self-test|--register-amsi-provider|--unregister-amsi-provider|--help]" << std::endl;
+  std::wcout << L"  --console   Run the agent loop interactively instead of under the SCM." << std::endl;
+  std::wcout << L"  --install   Register the agent as an auto-start Windows service and apply hardening." << std::endl;
+  std::wcout << L"  --repair    Reapply service hardening, AMSI registration, and protected runtime settings." << std::endl;
+  std::wcout << L"  --upgrade   Stop the service, apply a verified update manifest, and restart the service." << std::endl;
+  std::wcout << L"  --rollback-update  Roll back a recorded update transaction from the local update journal." << std::endl;
+  std::wcout << L"  --uninstall Remove the Windows service registration. Use --token when uninstall protection is enabled." << std::endl;
+  std::wcout << L"  --wsc-status Print the local Windows Security Center coexistence snapshot." << std::endl;
+  std::wcout << L"  --self-test Run a local endpoint validation sweep for packaging, hardening, AMSI, ETW, WFP, and the runtime store." << std::endl;
+  std::wcout << L"  --token     Optional uninstall/installation protection token for hardened endpoints." << std::endl;
+  std::wcout << L"  --elam-driver  Optional signed ELAM .sys path used to enable launch-protected antimalware service registration." << std::endl;
+  std::wcout << L"  --register-amsi-provider   Register the adjacent AMSI provider DLL." << std::endl;
+  std::wcout << L"  --unregister-amsi-provider Remove the AMSI provider DLL registration." << std::endl;
+}
+
+}  // namespace
+
+int wmain(int argc, wchar_t* argv[]) {
+  const auto token = GetArgumentValue(argc, argv, L"--token");
+  const auto elamDriver = GetArgumentValue(argc, argv, L"--elam-driver");
+  if (!elamDriver.empty()) {
+    SetEnvironmentVariableW(L"ANTIVIRUS_ELAM_DRIVER_PATH", elamDriver.c_str());
+  }
+  if (argc > 1) {
+    const std::wstring command = argv[1];
+    if (command == L"--console") {
+      return RunConsoleMode();
+    }
+
+    if (command == L"--install") {
+      return InstallOrRepairService(false, token) ? 0 : 1;
+    }
+
+    if (command == L"--repair") {
+      return InstallOrRepairService(true, token) ? 0 : 1;
+    }
+
+    if (command == L"--upgrade") {
+      return UpgradeInstalledService(argc > 2 ? argv[2] : L"") ? 0 : 1;
+    }
+
+    if (command == L"--rollback-update") {
+      return RollbackInstalledUpdate(argc > 2 ? argv[2] : L"") ? 0 : 1;
+    }
+
+    if (command == L"--uninstall") {
+      return UninstallService(token) ? 0 : 1;
+    }
+
+    if (command == L"--wsc-status") {
+      return PrintWscStatus();
+    }
+
+    if (command == L"--self-test") {
+      return RunSelfTest();
+    }
+
+    if (command == L"--register-amsi-provider") {
+      return InvokeAdjacentDllRegistration(true) ? 0 : 1;
+    }
+
+    if (command == L"--unregister-amsi-provider") {
+      return InvokeAdjacentDllRegistration(false) ? 0 : 1;
+    }
+
+    if (command == L"--help") {
+      PrintUsage();
+      return 0;
+    }
+
+    std::wcerr << L"Unknown option: " << command << std::endl;
+    PrintUsage();
+    return 1;
+  }
+
+  SERVICE_TABLE_ENTRYW serviceTable[] = {
+      {const_cast<LPWSTR>(kServiceName), ServiceEntry},
+      {nullptr, nullptr}};
+
+  if (StartServiceCtrlDispatcherW(serviceTable) != FALSE) {
+    return 0;
+  }
+
+  if (GetLastError() == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
+    return RunConsoleMode();
+  }
+
+  std::wcerr << L"StartServiceCtrlDispatcherW failed with error " << GetLastError() << std::endl;
+  return 1;
+}

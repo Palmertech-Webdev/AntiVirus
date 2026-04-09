@@ -1,0 +1,15 @@
+{
+  "name": "antivirus",
+  "private": true,
+  "workspaces": [
+    "backend/control-plane",
+    "frontend/console"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @antivirus/control-plane && npm run build --workspace @antivirus/console",
+    "check": "npm run check --workspace @antivirus/control-plane && npm run check --workspace @antivirus/console",
+    "dev:backend": "npm run dev --workspace @antivirus/control-plane",
+    "dev:frontend": "npm run dev --workspace @antivirus/console",
+    "test": "npm run test --workspace @antivirus/control-plane"
+  }
+}

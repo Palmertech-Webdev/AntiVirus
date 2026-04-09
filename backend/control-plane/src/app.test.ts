@@ -1,0 +1,1029 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { buildServer } from "./app.js";
+import { createFileBackedControlPlaneStore } from "./controlPlaneStore.js";
+import { createFileBackedMailStore } from "./mailStore.js";
+import { createSeedState } from "./seedState.js";
+
+async function createTestApp() {
+  const tempDir = await mkdtemp(join(tmpdir(), "antivirus-control-plane-"));
+  const stateFilePath = join(tempDir, "state.json");
+  const mailStateFilePath = join(tempDir, "mail-state.json");
+  const store = createFileBackedControlPlaneStore({
+    stateFilePath,
+    commandChannelUrl: "wss://test.local/api/v1/commands",
+    seedDemoData: true,
+    now: (() => {
+      let tick = 0;
+      return () => `2026-04-08T09:00:${String(tick++).padStart(2, "0")}Z`;
+    })()
+  });
+  const mailStore = createFileBackedMailStore({
+    stateFilePath: mailStateFilePath,
+    seedDemoData: true,
+    now: (() => {
+      let tick = 0;
+      return () => `2026-04-08T09:10:${String(tick++).padStart(2, "0")}Z`;
+    })()
+  });
+  const app = buildServer({ store, mailStore });
+
+  await app.ready();
+
+  return {
+    app,
+    stateFilePath,
+    async cleanup() {
+      await app.close();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  };
+}
+
+async function createTestAppWithState(rawState: object) {
+  const tempDir = await mkdtemp(join(tmpdir(), "antivirus-control-plane-"));
+  const stateFilePath = join(tempDir, "state.json");
+  const mailStateFilePath = join(tempDir, "mail-state.json");
+  await writeFile(stateFilePath, `${JSON.stringify(rawState, null, 2)}\n`, "utf8");
+
+  const store = createFileBackedControlPlaneStore({
+    stateFilePath,
+    commandChannelUrl: "wss://test.local/api/v1/commands",
+    now: (() => {
+      let tick = 0;
+      return () => `2026-04-08T10:00:${String(tick++).padStart(2, "0")}Z`;
+    })()
+  });
+  const mailStore = createFileBackedMailStore({
+    stateFilePath: mailStateFilePath,
+    seedDemoData: true,
+    now: (() => {
+      let tick = 0;
+      return () => `2026-04-08T10:10:${String(tick++).padStart(2, "0")}Z`;
+    })()
+  });
+  const app = buildServer({ store, mailStore });
+
+  await app.ready();
+
+  return {
+    app,
+    stateFilePath,
+    async cleanup() {
+      await app.close();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  };
+}
+
+test("dashboard loads seed state from persistent storage", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const response = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(response.statusCode, 200);
+
+  const payload = response.json();
+  assert.equal(payload.defaultPolicy.revision, "2026.04.08.1");
+  assert.equal(payload.devices.length, 3);
+  assert.equal(payload.alerts.length, 3);
+  assert.equal(payload.recentTelemetry.length, 0);
+  assert.equal(payload.recentCommands.length, 2);
+  assert.equal(payload.quarantineItems.length, 1);
+
+  const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
+    devices: Array<{ hostname: string }>;
+  };
+  assert.equal(persisted.devices[0].hostname, "FINANCE-LAPTOP-07");
+});
+
+test("mail dashboard exposes seeded domains, messages, and quarantine records", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const dashboardResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/mail/dashboard"
+  });
+
+  assert.equal(dashboardResponse.statusCode, 200);
+  const dashboardPayload = dashboardResponse.json() as {
+    domains: Array<{ domain: string }>;
+    recentMessages: Array<{ subject: string; verdict: string; deliveryAction: string }>;
+    quarantineItems: Array<{ subject: string; status: string }>;
+    recentActions: Array<{ actionType: string }>;
+    defaultPolicy: { name: string };
+  };
+
+  assert.equal(dashboardPayload.defaultPolicy.name, "Inbound Mail Baseline");
+  assert.equal(dashboardPayload.domains.length, 2);
+  assert.equal(dashboardPayload.recentMessages.length, 3);
+  assert.equal(dashboardPayload.quarantineItems.length, 2);
+  assert.equal(dashboardPayload.recentActions.length, 1);
+  assert.equal(dashboardPayload.recentMessages[0].subject, "Updated payroll portal instructions");
+
+  const messagesResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/mail/messages?verdict=phish&limit=10"
+  });
+
+  assert.equal(messagesResponse.statusCode, 200);
+  const messagesPayload = messagesResponse.json() as {
+    items: Array<{ subject: string; verdict: string; deliveryAction: string }>;
+  };
+
+  assert.equal(messagesPayload.items.length, 1);
+  assert.equal(messagesPayload.items[0].verdict, "phish");
+  assert.equal(messagesPayload.items[0].deliveryAction, "quarantined");
+});
+
+test("simulated inbound mail can be quarantined, released, and purged", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const simulateResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/mail/simulate",
+    payload: {
+      sender: "security-update@contoso-alerts.example",
+      recipients: ["finance@contoso-internal.test"],
+      subject: "Secure document review",
+      summary: "Simulation injected a credential-harvest lure for workflow validation.",
+      verdict: "phish",
+      deliveryAction: "quarantined",
+      relatedUser: "finance@contoso-internal.test",
+      attachments: [
+        {
+          fileName: "review-link.html",
+          sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          sizeBytes: 2048,
+          verdict: "phish"
+        }
+      ],
+      urls: [
+        {
+          originalUrl: "https://contoso-alerts.example/review",
+          verdict: "phish",
+          rewriteApplied: true
+        }
+      ],
+      auth: {
+        spf: "fail",
+        dkim: "none",
+        dmarc: "fail",
+        arc: "none"
+      }
+    }
+  });
+
+  assert.equal(simulateResponse.statusCode, 201);
+  const simulatedMessage = simulateResponse.json() as { id: string; deliveryAction: string; domain: string };
+  assert.equal(simulatedMessage.deliveryAction, "quarantined");
+  assert.equal(simulatedMessage.domain, "contoso-internal.test");
+
+  const quarantineResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/mail/quarantine?status=quarantined&limit=10"
+  });
+
+  assert.equal(quarantineResponse.statusCode, 200);
+  const quarantinePayload = quarantineResponse.json() as {
+    items: Array<{ id: string; mailMessageId: string; status: string }>;
+  };
+  const simulatedQuarantine = quarantinePayload.items.find((item) => item.mailMessageId === simulatedMessage.id);
+  assert.ok(simulatedQuarantine);
+  assert.equal(simulatedQuarantine.status, "quarantined");
+
+  const releaseResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/mail/quarantine/${simulatedQuarantine.id}/release`,
+    payload: {
+      requestedBy: "soc-tier1"
+    }
+  });
+
+  assert.equal(releaseResponse.statusCode, 200);
+  assert.equal(releaseResponse.json().status, "released");
+
+  const messageAfterRelease = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/mail/messages/${simulatedMessage.id}`
+  });
+
+  assert.equal(messageAfterRelease.statusCode, 200);
+  assert.equal(messageAfterRelease.json().deliveryAction, "delivered");
+
+  const purgeResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/mail/messages/${simulatedMessage.id}/purge`,
+    payload: {
+      requestedBy: "soc-tier2"
+    }
+  });
+
+  assert.equal(purgeResponse.statusCode, 200);
+  assert.equal(purgeResponse.json().deliveryAction, "purged");
+
+  const quarantineAfterPurge = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/mail/quarantine?limit=10"
+  });
+
+  assert.equal(quarantineAfterPurge.statusCode, 200);
+  const finalQuarantineState = (quarantineAfterPurge.json() as { items: Array<{ mailMessageId: string; status: string }> }).items.find(
+    (item) => item.mailMessageId === simulatedMessage.id
+  );
+  assert.ok(finalQuarantineState);
+  assert.equal(finalQuarantineState.status, "purged");
+});
+
+test("enrollment, heartbeat, and policy check-in persist device state", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-01",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0001"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+
+  const enrollment = enrollResponse.json() as { deviceId: string; commandChannelUrl: string };
+  assert.match(enrollment.deviceId, /^[0-9a-f-]{36}$/);
+  assert.equal(enrollment.commandChannelUrl, "wss://test.local/api/v1/commands");
+
+  const heartbeatResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/heartbeat`,
+    payload: {
+      agentVersion: "0.1.1-alpha",
+      platformVersion: "platform-0.1.1",
+      healthState: "degraded",
+      isolated: false
+    }
+  });
+
+  assert.equal(heartbeatResponse.statusCode, 200);
+  assert.equal(heartbeatResponse.json().effectivePolicyRevision, "2026.04.08.1");
+
+  const policyCheckInResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/policy-check-in`,
+    payload: {
+      currentPolicyRevision: "2026.04.07.9",
+      agentVersion: "0.1.1-alpha",
+      platformVersion: "platform-0.1.1"
+    }
+  });
+
+  assert.equal(policyCheckInResponse.statusCode, 200);
+  assert.equal(policyCheckInResponse.json().changed, true);
+
+  const devicesResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/devices"
+  });
+
+  assert.equal(devicesResponse.statusCode, 200);
+
+  const devicesPayload = devicesResponse.json() as {
+    items: Array<{ hostname: string; agentVersion: string; healthState: string }>;
+  };
+  assert.equal(devicesPayload.items[0].hostname, "LAB-ENDPOINT-01");
+  assert.equal(devicesPayload.items[0].agentVersion, "0.1.1-alpha");
+  assert.equal(devicesPayload.items[0].healthState, "degraded");
+
+  const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
+    devices: Array<{ hostname: string; agentVersion: string; lastPolicySyncAt: string | null }>;
+  };
+  const enrolledDevice = persisted.devices.find((device) => device.hostname === "LAB-ENDPOINT-01");
+  assert.ok(enrolledDevice);
+  assert.equal(enrolledDevice.agentVersion, "0.1.1-alpha");
+  assert.notEqual(enrolledDevice.lastPolicySyncAt, null);
+});
+
+test("unknown devices receive a 404 on heartbeat", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const response = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/devices/missing-device/heartbeat",
+    payload: {
+      agentVersion: "0.1.1-alpha",
+      platformVersion: "platform-0.1.1",
+      healthState: "healthy",
+      isolated: false
+    }
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.equal(response.json().error, "device_not_found");
+});
+
+test("telemetry batches persist and can be queried back", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-02",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0002"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const { deviceId } = enrollResponse.json() as { deviceId: string };
+
+  const ingestResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-001",
+          eventType: "service.started",
+          source: "agent-service",
+          summary: "The endpoint service completed a sync cycle.",
+          occurredAt: "2026-04-08T09:00:10Z",
+          payloadJson: "{\"cycle\":1}"
+        },
+        {
+          eventId: "evt-002",
+          eventType: "process.synthetic",
+          source: "telemetry-spool",
+          summary: "A synthetic process event was queued for backend validation.",
+          occurredAt: "2026-04-08T09:00:11Z",
+          payloadJson: "{\"imagePath\":\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(ingestResponse.statusCode, 200);
+  assert.equal(ingestResponse.json().accepted, 2);
+
+  const telemetryResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/telemetry?deviceId=${deviceId}&limit=10`
+  });
+
+  assert.equal(telemetryResponse.statusCode, 200);
+  const telemetryPayload = telemetryResponse.json() as {
+    items: Array<{ eventId: string; hostname: string; eventType: string }>;
+  };
+  assert.equal(telemetryPayload.items.length, 2);
+  assert.equal(telemetryPayload.items[0].eventId, "evt-002");
+  assert.equal(telemetryPayload.items[0].hostname, "LAB-ENDPOINT-02");
+
+  const dashboardResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+  assert.equal(dashboardResponse.statusCode, 200);
+  assert.equal(dashboardResponse.json().recentTelemetry.length, 2);
+
+  const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
+    telemetry: Array<{ eventId: string; deviceId: string }>;
+  };
+  assert.equal(persisted.telemetry.length, 2);
+  assert.equal(persisted.telemetry[0].deviceId, deviceId);
+});
+
+test("telemetry ingestion generates alerts and dedupes repeat detections", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-03",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0003"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const { deviceId } = enrollResponse.json() as { deviceId: string };
+
+  const firstIngestResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-detect-001",
+          eventType: "process.started",
+          source: "process-delta",
+          summary: "Process powershell.exe started with PID 4412 and parent PID 920.",
+          occurredAt: "2026-04-08T09:01:10Z",
+          payloadJson: "{\"pid\":4412,\"parentPid\":920,\"imageName\":\"powershell.exe\"}"
+        },
+        {
+          eventId: "evt-detect-002",
+          eventType: "file.created",
+          source: "file-delta",
+          summary: "File invoice-review.exe was created in C:\\\\Users\\\\matt\\\\Downloads.",
+          occurredAt: "2026-04-08T09:01:11Z",
+          payloadJson:
+            "{\"path\":\"C:\\\\Users\\\\matt\\\\Downloads\\\\invoice-review.exe\",\"sizeBytes\":48256,\"lastWriteTime\":\"2026-04-08T09:01:11Z\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(firstIngestResponse.statusCode, 200);
+  assert.equal(firstIngestResponse.json().accepted, 2);
+
+  const firstAlertsResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/alerts"
+  });
+
+  assert.equal(firstAlertsResponse.statusCode, 200);
+  const firstAlertsPayload = firstAlertsResponse.json() as {
+    items: Array<{
+      hostname: string;
+      title: string;
+      severity: string;
+      technique?: string;
+      detectedAt: string;
+      fingerprint?: string;
+      summary: string;
+    }>;
+  };
+
+  assert.equal(firstAlertsPayload.items.length, 5);
+
+  const powerShellAlert = firstAlertsPayload.items.find(
+    (alert) => alert.hostname === "LAB-ENDPOINT-03" && alert.title === "PowerShell execution observed"
+  );
+  assert.ok(powerShellAlert);
+  assert.equal(powerShellAlert.severity, "high");
+  assert.equal(powerShellAlert.technique, "T1059.001");
+  assert.match(powerShellAlert.summary, /post-exploitation behavior/i);
+
+  const fileDropAlert = firstAlertsPayload.items.find(
+    (alert) => alert.hostname === "LAB-ENDPOINT-03" && alert.title === "Executable dropped in monitored folder"
+  );
+  assert.ok(fileDropAlert);
+  assert.equal(fileDropAlert.severity, "high");
+  assert.equal(fileDropAlert.technique, "T1204.002");
+
+  const secondIngestResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-detect-003",
+          eventType: "process.started",
+          source: "process-delta",
+          summary: "Process powershell.exe started with PID 7780 and parent PID 1044.",
+          occurredAt: "2026-04-08T09:05:00Z",
+          payloadJson: "{\"pid\":7780,\"parentPid\":1044,\"imageName\":\"powershell.exe\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(secondIngestResponse.statusCode, 200);
+  assert.equal(secondIngestResponse.json().accepted, 1);
+
+  const secondAlertsResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/alerts"
+  });
+
+  assert.equal(secondAlertsResponse.statusCode, 200);
+  const secondAlertsPayload = secondAlertsResponse.json() as {
+    items: Array<{
+      hostname: string;
+      title: string;
+      detectedAt: string;
+      fingerprint?: string;
+      summary: string;
+    }>;
+  };
+
+  const repeatedPowerShellAlerts = secondAlertsPayload.items.filter(
+    (alert) => alert.hostname === "LAB-ENDPOINT-03" && alert.title === "PowerShell execution observed"
+  );
+  assert.equal(repeatedPowerShellAlerts.length, 1);
+  assert.equal(repeatedPowerShellAlerts[0].detectedAt, "2026-04-08T09:05:00Z");
+  assert.match(repeatedPowerShellAlerts[0].summary, /PID 7780/i);
+  assert.equal(secondAlertsPayload.items.length, 5);
+
+  const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
+    alerts: Array<{ hostname: string; title: string; fingerprint?: string }>;
+  };
+  const persistedPowerShellAlert = persisted.alerts.find(
+    (alert) => alert.hostname === "LAB-ENDPOINT-03" && alert.title === "PowerShell execution observed"
+  );
+  assert.ok(persistedPowerShellAlert);
+  assert.equal(persistedPowerShellAlert.fingerprint, `process:${deviceId}:powershell.exe`);
+});
+
+test("scan findings generate alerts with quarantine context", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-04",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0004"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const { deviceId } = enrollResponse.json() as { deviceId: string };
+
+  const sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const ingestResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-scan-001",
+          eventType: "scan.finding",
+          source: "scannercli",
+          summary: "On-demand scan flagged loader.exe for quarantine and moved it into local quarantine.",
+          occurredAt: "2026-04-08T09:10:00Z",
+          payloadJson:
+            "{\"path\":\"C:\\\\Users\\\\matt\\\\Downloads\\\\loader.exe\",\"sizeBytes\":8192,\"sha256\":\"" +
+            sha256 +
+            "\",\"remediationStatus\":\"quarantined\",\"disposition\":\"quarantine\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.002\",\"quarantineRecordId\":\"qr-001\",\"evidenceRecordId\":\"ev-001\",\"quarantinedPath\":\"C:\\\\ProgramData\\\\AntiVirus\\\\quarantine\\\\files\\\\qr-001.exe.quarantine\",\"remediationError\":\"\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(ingestResponse.statusCode, 200);
+  assert.equal(ingestResponse.json().accepted, 1);
+
+  const alertsResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/alerts"
+  });
+
+  assert.equal(alertsResponse.statusCode, 200);
+  const alertsPayload = alertsResponse.json() as {
+    items: Array<{
+      hostname: string;
+      title: string;
+      severity: string;
+      technique?: string;
+      fingerprint?: string;
+      summary: string;
+    }>;
+  };
+
+  const scanAlert = alertsPayload.items.find(
+    (alert) => alert.hostname === "LAB-ENDPOINT-04" && alert.title === "Suspicious file quarantined after on-demand scan"
+  );
+  assert.ok(scanAlert);
+  assert.equal(scanAlert.severity, "high");
+  assert.equal(scanAlert.technique, "T1204.002");
+  assert.equal(scanAlert.fingerprint, `scan:${deviceId}:${sha256}`);
+  assert.match(scanAlert.summary, /SHA-256/i);
+  assert.match(scanAlert.summary, /Local quarantine completed successfully/i);
+});
+
+test("device commands can be queued, polled, completed, and quarantine inventory updates", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-05",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0005"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const { deviceId } = enrollResponse.json() as { deviceId: string };
+
+  const queueResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/commands`,
+    payload: {
+      type: "scan.targeted",
+      issuedBy: "soc-tier3",
+      targetPath: "C:\\Users\\lab\\Downloads"
+    }
+  });
+
+  assert.equal(queueResponse.statusCode, 201);
+  const queuedCommand = queueResponse.json() as { id: string; status: string; targetPath?: string };
+  assert.equal(queuedCommand.status, "pending");
+  assert.equal(queuedCommand.targetPath, "C:\\Users\\lab\\Downloads");
+
+  const heartbeatResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/heartbeat`,
+    payload: {
+      agentVersion: "0.1.1-alpha",
+      platformVersion: "platform-0.1.1",
+      healthState: "healthy",
+      isolated: false
+    }
+  });
+
+  assert.equal(heartbeatResponse.statusCode, 200);
+  assert.equal(heartbeatResponse.json().commandsPending, 1);
+
+  const pollResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${deviceId}/commands/pending?limit=10`
+  });
+
+  assert.equal(pollResponse.statusCode, 200);
+  const pollPayload = pollResponse.json() as {
+    items: Array<{ id: string; status: string; issuedBy: string; targetPath?: string }>;
+  };
+  assert.equal(pollPayload.items.length, 1);
+  assert.equal(pollPayload.items[0].id, queuedCommand.id);
+  assert.equal(pollPayload.items[0].status, "in_progress");
+  assert.equal(pollPayload.items[0].issuedBy, "soc-tier3");
+
+  const completeResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/commands/${queuedCommand.id}/complete`,
+    payload: {
+      status: "completed",
+      resultJson: "{\"findingCount\":2}"
+    }
+  });
+
+  assert.equal(completeResponse.statusCode, 200);
+  assert.equal(completeResponse.json().status, "completed");
+
+  const commandsResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/commands?deviceId=${deviceId}`
+  });
+
+  assert.equal(commandsResponse.statusCode, 200);
+  assert.equal(commandsResponse.json().items[0].status, "completed");
+
+  const quarantineIngest = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-q-001",
+          eventType: "scan.finding",
+          source: "agent-service",
+          summary: "On-demand scan flagged seed.exe for quarantine and moved it into local quarantine.",
+          occurredAt: "2026-04-08T09:20:00Z",
+          payloadJson:
+            "{\"path\":\"C:\\\\Users\\\\lab\\\\Downloads\\\\seed.exe\",\"sizeBytes\":1024,\"sha256\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\",\"remediationStatus\":\"quarantined\",\"disposition\":\"quarantine\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.002\",\"quarantineRecordId\":\"qr-lab-001\",\"evidenceRecordId\":\"ev-lab-001\",\"quarantinedPath\":\"C:\\\\ProgramData\\\\AntiVirus\\\\quarantine\\\\files\\\\qr-lab-001.exe.quarantine\",\"remediationError\":\"\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(quarantineIngest.statusCode, 200);
+
+  const quarantineResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/quarantine?deviceId=${deviceId}`
+  });
+
+  assert.equal(quarantineResponse.statusCode, 200);
+  assert.equal(quarantineResponse.json().items.length, 1);
+  assert.equal(quarantineResponse.json().items[0].status, "quarantined");
+
+  const restoreIngest = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-q-002",
+          eventType: "quarantine.restored",
+          source: "command-executor",
+          summary: "A quarantined item was restored after a remote action.",
+          occurredAt: "2026-04-08T09:25:00Z",
+          payloadJson:
+            "{\"recordId\":\"qr-lab-001\",\"originalPath\":\"C:\\\\Users\\\\lab\\\\Downloads\\\\seed.exe\",\"quarantinedPath\":\"C:\\\\ProgramData\\\\AntiVirus\\\\quarantine\\\\files\\\\qr-lab-001.exe.quarantine\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(restoreIngest.statusCode, 200);
+
+  const quarantineAfterRestore = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/quarantine?deviceId=${deviceId}`
+  });
+
+  assert.equal(quarantineAfterRestore.statusCode, 200);
+  assert.equal(quarantineAfterRestore.json().items[0].status, "restored");
+});
+
+test("older persisted state without telemetry still loads cleanly", async (t) => {
+  const legacyState = {
+    defaultPolicy: {
+      id: "policy-default",
+      name: "Business Baseline",
+      revision: "2026.04.08.1",
+      realtimeProtection: true,
+      cloudLookup: true,
+      scriptInspection: true,
+      networkContainment: false
+    },
+    devices: [],
+    alerts: []
+  };
+
+  const harness = await createTestAppWithState(legacyState);
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const dashboardResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(dashboardResponse.statusCode, 200);
+  assert.equal(dashboardResponse.json().recentTelemetry.length, 0);
+
+  const telemetryResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/telemetry"
+  });
+
+  assert.equal(telemetryResponse.statusCode, 200);
+  assert.equal(telemetryResponse.json().items.length, 0);
+});
+
+test("live-mode store strips persisted demo records", async (t) => {
+  const harness = await createTestAppWithState(createSeedState("2026-04-08T10:00:00Z"));
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const liveStore = createFileBackedControlPlaneStore({
+    stateFilePath: harness.stateFilePath,
+    commandChannelUrl: "wss://test.local/api/v1/commands",
+    now: () => "2026-04-08T10:10:00Z",
+    seedDemoData: false
+  });
+  const liveApp = buildServer({ store: liveStore });
+  await liveApp.ready();
+  t.after(async () => {
+    await liveApp.close();
+  });
+
+  const dashboardResponse = await liveApp.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(dashboardResponse.statusCode, 200);
+  assert.equal(dashboardResponse.json().devices.length, 0);
+  assert.equal(dashboardResponse.json().alerts.length, 0);
+});
+
+test("device detail, evidence, scan history, and posture are derived from agent telemetry", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-06",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0006"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const { deviceId } = enrollResponse.json() as { deviceId: string };
+
+  const telemetryResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-posture-001",
+          eventType: "tamper.protection.ready",
+          source: "agent-service",
+          summary: "Tamper protection is configured and runtime paths are hardened.",
+          occurredAt: "2026-04-08T09:30:00Z",
+          payloadJson:
+            "{\"registryConfigured\":true,\"runtimePathsProtected\":true,\"uninstallProtectionEnabled\":true}"
+        },
+        {
+          eventId: "evt-posture-002",
+          eventType: "process.etw.failed",
+          source: "agent-service",
+          summary: "The ETW process sensor could not open the kernel session in the current context.",
+          occurredAt: "2026-04-08T09:30:01Z",
+          payloadJson: "{\"errorCode\":5}"
+        },
+        {
+          eventId: "evt-scan-telemetry-001",
+          eventType: "scan.finding",
+          source: "scannercli",
+          summary: "On-demand scan quarantined payroll-loader.exe after content inspection and heuristic scoring.",
+          occurredAt: "2026-04-08T09:30:02Z",
+          payloadJson:
+            "{\"path\":\"C:\\\\Users\\\\lab\\\\Downloads\\\\payroll-loader.exe\",\"sizeBytes\":24576,\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"contentType\":\"portable-executable\",\"reputation\":\"unsigned-user-writable\",\"signer\":\"Unsigned\",\"heuristicScore\":91,\"confidence\":99,\"archiveEntryCount\":0,\"disposition\":\"quarantine\",\"remediationStatus\":\"quarantined\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.002\",\"quarantineRecordId\":\"qr-lab-telemetry-001\",\"evidenceRecordId\":\"ev-lab-telemetry-001\",\"quarantinedPath\":\"C:\\\\ProgramData\\\\AntiVirus\\\\quarantine\\\\files\\\\qr-lab-telemetry-001.exe.quarantine\",\"remediationError\":\"\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(telemetryResponse.statusCode, 200);
+  assert.equal(telemetryResponse.json().accepted, 3);
+
+  const detailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${deviceId}`
+  });
+
+  assert.equal(detailResponse.statusCode, 200);
+  const detailPayload = detailResponse.json() as {
+    device: { hostname: string; postureState: string; lastTelemetryAt: string | null; quarantinedItemCount: number };
+    posture: { overallState: string; etwState: string; tamperProtectionState: string; runtimePathsProtected?: boolean };
+    evidence: Array<{ recordId: string; subjectPath: string; reputation?: string; signer?: string }>;
+    scanHistory: Array<{ eventId: string; subjectPath: string; remediationStatus?: string; confidence?: number }>;
+    quarantineItems: Array<{ recordId: string; status: string }>;
+  };
+
+  assert.equal(detailPayload.device.hostname, "LAB-ENDPOINT-06");
+  assert.equal(detailPayload.device.postureState, "failed");
+  assert.equal(detailPayload.device.lastTelemetryAt, "2026-04-08T09:30:02Z");
+  assert.equal(detailPayload.device.quarantinedItemCount, 1);
+  assert.equal(detailPayload.posture.overallState, "failed");
+  assert.equal(detailPayload.posture.etwState, "failed");
+  assert.equal(detailPayload.posture.tamperProtectionState, "ready");
+  assert.equal(detailPayload.posture.runtimePathsProtected, true);
+  assert.equal(detailPayload.evidence.length, 1);
+  assert.equal(detailPayload.evidence[0].recordId, "ev-lab-telemetry-001");
+  assert.match(detailPayload.evidence[0].subjectPath, /payroll-loader\.exe/i);
+  assert.equal(detailPayload.evidence[0].reputation, "unsigned-user-writable");
+  assert.equal(detailPayload.scanHistory.length, 1);
+  assert.equal(detailPayload.scanHistory[0].eventId, "evt-scan-telemetry-001");
+  assert.equal(detailPayload.scanHistory[0].remediationStatus, "quarantined");
+  assert.equal(detailPayload.scanHistory[0].confidence, 99);
+  assert.equal(detailPayload.quarantineItems[0].recordId, "qr-lab-telemetry-001");
+  assert.equal(detailPayload.quarantineItems[0].status, "quarantined");
+
+  const evidenceResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/evidence?deviceId=${deviceId}&limit=10`
+  });
+
+  assert.equal(evidenceResponse.statusCode, 200);
+  assert.equal(evidenceResponse.json().items.length, 1);
+  assert.equal(evidenceResponse.json().items[0].recordId, "ev-lab-telemetry-001");
+
+  const scanHistoryResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/scan-history?deviceId=${deviceId}&limit=10`
+  });
+
+  assert.equal(scanHistoryResponse.statusCode, 200);
+  assert.equal(scanHistoryResponse.json().items.length, 1);
+  assert.equal(scanHistoryResponse.json().items[0].eventId, "evt-scan-telemetry-001");
+});
+
+test("ransomware-oriented scan findings generate critical recovery and encryption alerts", async (t) => {
+  const harness = await createTestAppWithState({
+    defaultPolicy: {
+      id: "policy-default",
+      name: "Business Baseline",
+      revision: "2026.04.08.1",
+      realtimeProtection: true,
+      cloudLookup: true,
+      scriptInspection: true,
+      networkContainment: false
+    },
+    devices: [],
+    alerts: [],
+    telemetry: [],
+    commands: [],
+    quarantineItems: [],
+    evidence: [],
+    scanHistory: [],
+    devicePosture: []
+  });
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-RANSOM",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-RANSOM-01"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const { deviceId } = enrollResponse.json() as { deviceId: string };
+
+  const telemetryResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    payload: {
+      events: [
+        {
+          eventId: "evt-ransom-001",
+          eventType: "scan.finding",
+          source: "amsi-provider",
+          summary: "AMSI provider blocked cleanup.ps1 after it attempted to delete shadow copies and disable recovery settings.",
+          occurredAt: "2026-04-08T11:00:00Z",
+          payloadJson:
+            "{\"path\":\"C:\\\\Users\\\\lab\\\\Downloads\\\\cleanup.ps1\",\"sizeBytes\":4096,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"contentType\":\"script\",\"reputation\":\"unknown\",\"signer\":\"\",\"heuristicScore\":92,\"confidence\":99,\"archiveEntryCount\":0,\"disposition\":\"block\",\"remediationStatus\":\"none\",\"tacticId\":\"TA0040\",\"techniqueId\":\"T1490\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"ev-ransom-001\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}"
+        },
+        {
+          eventId: "evt-ransom-002",
+          eventType: "scan.finding",
+          source: "scannercli",
+          summary: "On-demand scan quarantined HOW_TO_RESTORE_FILES.txt after it matched ransomware-note content.",
+          occurredAt: "2026-04-08T11:00:01Z",
+          payloadJson:
+            "{\"path\":\"C:\\\\Users\\\\lab\\\\Desktop\\\\HOW_TO_RESTORE_FILES.txt\",\"sizeBytes\":2048,\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"contentType\":\"binary\",\"reputation\":\"unknown\",\"signer\":\"\",\"heuristicScore\":89,\"confidence\":97,\"archiveEntryCount\":0,\"disposition\":\"quarantine\",\"remediationStatus\":\"quarantined\",\"tacticId\":\"TA0040\",\"techniqueId\":\"T1486\",\"quarantineRecordId\":\"qr-ransom-002\",\"evidenceRecordId\":\"ev-ransom-002\",\"quarantinedPath\":\"C:\\\\ProgramData\\\\AntiVirus\\\\quarantine\\\\files\\\\qr-ransom-002.txt.quarantine\",\"remediationError\":\"\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(telemetryResponse.statusCode, 200);
+
+  const alertsResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/alerts?deviceId=${deviceId}`
+  });
+
+  assert.equal(alertsResponse.statusCode, 200);
+  const items = alertsResponse.json().items as Array<{ title: string; severity: string; technique?: string; summary: string }>;
+  assert.equal(items.length, 2);
+
+  const recoveryAlert = items.find((item) => item.technique === "T1490");
+  assert.ok(recoveryAlert);
+  assert.equal(recoveryAlert.severity, "critical");
+  assert.match(recoveryAlert.title, /recovery-inhibition/i);
+  assert.match(recoveryAlert.summary, /T1490/i);
+
+  const encryptionAlert = items.find((item) => item.technique === "T1486");
+  assert.ok(encryptionAlert);
+  assert.equal(encryptionAlert.severity, "critical");
+  assert.match(encryptionAlert.title, /ransomware/i);
+  assert.match(encryptionAlert.summary, /T1486/i);
+});

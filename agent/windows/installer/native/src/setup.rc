@@ -1,0 +1,5 @@
+#include "SetupResourceIds.h"
+
+IDI_SETUP_ICON ICON "..\\..\\..\\tools\\endpointui\\assets\\antivirus-endpoint.ico"
+1 RT_MANIFEST "setup.manifest"
+

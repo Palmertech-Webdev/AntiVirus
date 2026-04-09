@@ -1,0 +1,11 @@
+{
+  "recordId": "0CE24DB8-B18B-48D7-BC97-7C47167CFA9F",
+  "capturedAt": "2026-04-08T12:11:06.182Z",
+  "originalPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-runtime-db-test\\dropper.hta",
+  "quarantinedPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-runtime-db-test\\quarantine\\files\\0CE24DB8-B18B-48D7-BC97-7C47167CFA9F.hta.quarantine",
+  "sha256": "c1d7fd7f778b98ed50dcb6cae99a2eee54a30ade069a2ac6e5c9516b08a983c0",
+  "sizeBytes": 119,
+  "disposition": "quarantine",
+  "techniqueId": "T1218.005",
+  "localStatus": "quarantined"
+}
