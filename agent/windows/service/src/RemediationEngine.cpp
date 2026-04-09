@@ -350,7 +350,7 @@ RemediationOutcome RemediationEngine::RemediatePath(const std::filesystem::path&
 
   std::error_code error;
   if (std::filesystem::exists(subjectPath, error)) {
-    const auto finding = ScanFile(subjectPath, policy);
+    const auto finding = ScanFile(subjectPath, policy, config_.scanExcludedPaths);
     if (finding.has_value()) {
       auto mutableFinding = *finding;
       if (mutableFinding.verdict.disposition == VerdictDisposition::Quarantine ||

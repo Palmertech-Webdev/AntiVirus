@@ -470,6 +470,10 @@ code {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
+.grid-6 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
 .grid-2,
 .dashboard-bottom-grid {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -506,6 +510,7 @@ code {
   margin-top: 18px;
 }
 
+.tab-chip,
 .tab-button {
   display: grid;
   gap: 6px;
@@ -522,6 +527,19 @@ code {
   line-height: 1.5;
 }
 
+.tab-chip strong {
+  font-size: 1rem;
+  text-align: left;
+}
+
+.tab-chip small,
+.tab-button small {
+  color: var(--muted);
+  line-height: 1.5;
+  text-align: left;
+}
+
+.tab-chip.is-active,
 .tab-button.is-active {
   border-color: rgba(108, 194, 255, 0.26);
   background: linear-gradient(180deg, rgba(108, 194, 255, 0.14), rgba(108, 194, 255, 0.04));
@@ -621,6 +639,46 @@ code {
 .ops-table tr.is-selected,
 .ops-table tbody tr:hover {
   background: rgba(255, 255, 255, 0.025);
+}
+
+.software-table-shell {
+  margin-top: 18px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.software-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.software-table th,
+.software-table td {
+  padding: 14px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.software-table th {
+  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.software-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.table-subcopy {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .table-primary {

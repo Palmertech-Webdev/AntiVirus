@@ -8,6 +8,7 @@ import type {
   DeviceSummary,
   EvidenceSummary,
   QuarantineItemSummary,
+  RiskBand,
   ScanHistorySummary,
   TelemetryRecord
 } from "./types";
@@ -49,12 +50,19 @@ export interface IncidentSummary {
   title: string;
   summary: string;
   severity: AlertSeverity;
+  priorityScore: number;
   status: IncidentStatus;
   confidenceScore: number;
   owner: string;
   sourceMix: string[];
   deviceIds: string[];
   deviceNames: string[];
+  primaryDeviceId: string | null;
+  primaryDeviceName: string | null;
+  highestDeviceRiskScore: number | null;
+  highestDeviceRiskBand: RiskBand | null;
+  highestDeviceConfidenceScore: number | null;
+  deviceRiskSummary: string;
   affectedAssetCount: number;
   firstSeenAt: string;
   lastActivityAt: string;
@@ -104,12 +112,19 @@ interface IncidentSeed {
   title: string;
   summary: string;
   severity: AlertSeverity;
+  priorityScore: number;
   status: IncidentStatus;
   confidenceScore: number;
   owner: string;
   sourceMix: Set<string>;
   deviceIds: Set<string>;
   deviceNames: Set<string>;
+  primaryDeviceId: string | null;
+  primaryDeviceName: string | null;
+  highestDeviceRiskScore: number | null;
+  highestDeviceRiskBand: RiskBand | null;
+  highestDeviceConfidenceScore: number | null;
+  deviceRiskSummary: string;
   firstSeenAt: string;
   lastActivityAt: string;
   latestEvent: string;
@@ -135,6 +150,10 @@ const navItems: Array<{ key: NavigationKey; label: string; href: string; icon: N
   { key: "administration", label: "Administration", href: "/administration", icon: "administration" }
 ];
 
+export function getNavigationItems() {
+  return navItems;
+}
+
 function severityWeight(value: AlertSeverity) {
   switch (value) {
     case "critical":
@@ -148,6 +167,23 @@ function severityWeight(value: AlertSeverity) {
   }
 }
 
+function riskBandWeight(value: RiskBand | null | undefined) {
+  switch (value) {
+    case "critical":
+      return 5;
+    case "high":
+      return 4;
+    case "elevated":
+      return 3;
+    case "guarded":
+      return 2;
+    case "low":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 function severityFromPosture(value: DevicePostureSummary["overallState"]): AlertSeverity {
   if (value === "failed") {
     return "high";
@@ -158,6 +194,63 @@ function severityFromPosture(value: DevicePostureSummary["overallState"]): Alert
   }
 
   return "low";
+}
+
+function describeRiskBand(value: RiskBand | null | undefined) {
+  return value ? value.replaceAll("_", " ") : "pending";
+}
+
+function riskBandFloor(value: RiskBand | null | undefined) {
+  switch (value) {
+    case "critical":
+      return 90;
+    case "high":
+      return 75;
+    case "elevated":
+      return 55;
+    case "guarded":
+      return 35;
+    case "low":
+      return 15;
+    default:
+      return 0;
+  }
+}
+
+function devicePriorityContribution(device: DeviceSummary | undefined) {
+  if (!device) {
+    return 0;
+  }
+
+  const normalizedRisk = Math.max(device.riskScore ?? 0, riskBandFloor(device.riskBand));
+  const bandBoost = riskBandWeight(device.riskBand) * 14;
+  const isolationBoost = device.isolated ? 18 : 0;
+  const confidenceBoost =
+    device.confidenceScore == null ? 0 : device.confidenceScore >= 85 ? 10 : device.confidenceScore >= 65 ? 6 : 3;
+
+  return Math.round(normalizedRisk * 1.3 + bandBoost + isolationBoost + confidenceBoost);
+}
+
+function buildIncidentRiskLead(device: DeviceSummary | undefined) {
+  if (!device || device.riskScore == null || !device.riskBand) {
+    return "";
+  }
+
+  const riskText = `${device.hostname} currently scores ${device.riskScore}/100 (${describeRiskBand(device.riskBand)} risk)`;
+
+  if (device.riskBand === "critical") {
+    return `${riskText}, so keep it at the front of triage and containment. `;
+  }
+
+  if (device.riskBand === "high") {
+    return `${riskText}, so treat it as the primary response target. `;
+  }
+
+  if (device.riskBand === "elevated") {
+    return `${riskText}, so confirm whether this incident is part of a broader compromise. `;
+  }
+
+  return `${riskText}, so keep its score in the triage order. `;
 }
 
 function parsePayload(payloadJson: string) {
@@ -184,9 +277,17 @@ function incidentStatusFromAlertStatus(status: AlertStatus, isolated: boolean): 
   return "new";
 }
 
-function recommendedActionForSeverity(severity: AlertSeverity, isolated: boolean) {
+function recommendedActionForSeverity(severity: AlertSeverity, isolated: boolean, device?: DeviceSummary) {
   if (isolated) {
     return "Review containment state, validate blast radius, and collect investigation evidence.";
+  }
+
+  if (device?.riskBand === "critical") {
+    return "Isolate the device, confirm the blast radius, and collect evidence before broader remediation.";
+  }
+
+  if (device?.riskBand === "high") {
+    return "Validate the artifact or process chain and queue containment if the signal is confirmed.";
   }
 
   if (severity === "critical") {
@@ -195,6 +296,10 @@ function recommendedActionForSeverity(severity: AlertSeverity, isolated: boolean
 
   if (severity === "high") {
     return "Validate the artifact or process chain and queue remediation if the signal is confirmed.";
+  }
+
+  if (device?.riskBand === "elevated") {
+    return "Review the risk drivers, compare them with the incident evidence, and escalate if the pattern spreads.";
   }
 
   return "Triage the alert, review the device timeline, and decide whether escalation is required.";
@@ -311,18 +416,68 @@ function buildTimelineFromAlert(
   return timeline.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
 }
 
+function buildDeviceRiskSummary(
+  device: DeviceSummary | undefined,
+  score: number | null | undefined,
+  band: RiskBand | null | undefined,
+  confidenceScore: number | null | undefined
+) {
+  if (!device || score == null || !band) {
+    return "Device risk telemetry is still being derived for the affected asset.";
+  }
+
+  const confidenceText =
+    confidenceScore == null ? "confidence pending" : `${confidenceScore}% telemetry confidence`;
+  const priorityText = score >= 75 ? " This score is materially influencing incident triage order." : "";
+  return `${device.hostname} scores ${score}/100 (${describeRiskBand(band)} risk) with ${confidenceText}.${priorityText}`;
+}
+
+function computePriorityScore(
+  severity: AlertSeverity,
+  device: DeviceSummary | undefined,
+  confidenceScore: number,
+  alertCount: number,
+  commandCount: number
+) {
+  const severityComponent = severityWeight(severity) * 100;
+  const riskComponent = devicePriorityContribution(device);
+  const exposureComponent = Math.min(alertCount * 6, 24);
+  const commandComponent = Math.min(commandCount * 3, 12);
+  const containmentPenalty = device?.isolated ? -18 : 0;
+  const posturePenalty = device?.postureState === "failed" ? 16 : device?.postureState === "degraded" ? 8 : 0;
+  const confidenceComponent = Math.round(confidenceScore / 12);
+
+  return Math.max(
+    0,
+    severityComponent +
+      riskComponent +
+      exposureComponent +
+      commandComponent +
+      posturePenalty +
+      confidenceComponent +
+      containmentPenalty
+  );
+}
+
 function seedToSummary(seed: IncidentSeed): IncidentSummary {
   return {
     id: seed.id,
     title: seed.title,
     summary: seed.summary,
     severity: seed.severity,
+    priorityScore: seed.priorityScore,
     status: seed.status,
     confidenceScore: seed.confidenceScore,
     owner: seed.owner,
     sourceMix: [...seed.sourceMix],
     deviceIds: [...seed.deviceIds],
     deviceNames: [...seed.deviceNames],
+    primaryDeviceId: seed.primaryDeviceId,
+    primaryDeviceName: seed.primaryDeviceName,
+    highestDeviceRiskScore: seed.highestDeviceRiskScore,
+    highestDeviceRiskBand: seed.highestDeviceRiskBand,
+    highestDeviceConfidenceScore: seed.highestDeviceConfidenceScore,
+    deviceRiskSummary: seed.deviceRiskSummary,
     affectedAssetCount: seed.deviceIds.size,
     firstSeenAt: seed.firstSeenAt,
     lastActivityAt: seed.lastActivityAt,
@@ -342,24 +497,28 @@ function createAlertIncident(
   snapshot: DashboardSnapshot,
   alert: AlertSummary,
   devicesById: Map<string, DeviceSummary>,
+  devicesByHostname: Map<string, DeviceSummary>,
   postureByDeviceId: Map<string, DevicePostureSummary>
 ) {
-  const relatedDevice = alert.deviceId ? devicesById.get(alert.deviceId) : undefined;
-  const deviceId = alert.deviceId ?? relatedDevice?.id ?? alert.hostname;
+  const normalizedHostname = alert.hostname.toLowerCase();
+  const relatedDevice = alert.deviceId
+    ? devicesById.get(alert.deviceId) ?? devicesByHostname.get(normalizedHostname)
+    : devicesByHostname.get(normalizedHostname);
+  const deviceId = relatedDevice?.id ?? alert.deviceId ?? alert.hostname;
   const relatedTelemetry = snapshot.recentTelemetry.filter(
-    (item) => item.deviceId === alert.deviceId || item.hostname === alert.hostname
+    (item) => item.deviceId === alert.deviceId || item.hostname.toLowerCase() === normalizedHostname
   );
   const relatedCommands = snapshot.recentCommands.filter(
-    (item) => item.deviceId === alert.deviceId || item.hostname === alert.hostname
+    (item) => item.deviceId === alert.deviceId || item.hostname.toLowerCase() === normalizedHostname
   );
   const relatedEvidence = snapshot.recentEvidence.filter(
-    (item) => item.deviceId === alert.deviceId || item.hostname === alert.hostname
+    (item) => item.deviceId === alert.deviceId || item.hostname.toLowerCase() === normalizedHostname
   );
   const relatedQuarantine = snapshot.quarantineItems.filter(
-    (item) => item.deviceId === alert.deviceId || item.hostname === alert.hostname
+    (item) => item.deviceId === alert.deviceId || item.hostname.toLowerCase() === normalizedHostname
   );
   const relatedScanHistory = snapshot.recentScanHistory.filter(
-    (item) => item.deviceId === alert.deviceId || item.hostname === alert.hostname
+    (item) => item.deviceId === alert.deviceId || item.hostname.toLowerCase() === normalizedHostname
   );
   const posture = alert.deviceId ? postureByDeviceId.get(alert.deviceId) : undefined;
   const latestCommand = [...relatedCommands].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
@@ -401,22 +560,43 @@ function createAlertIncident(
 
   const confidence = computeConfidence(alert.severity, relatedScanHistory, relatedEvidence);
   const latestTimelineEvent = timeline.at(-1);
+  const priorityScore = computePriorityScore(
+    alert.severity,
+    relatedDevice,
+    confidence,
+    1 + relatedEvidence.length + relatedQuarantine.length,
+    relatedCommands.length
+  );
+  const riskSummary = buildDeviceRiskSummary(
+    relatedDevice,
+    relatedDevice?.riskScore,
+    relatedDevice?.riskBand,
+    relatedDevice?.confidenceScore
+  );
+  const deviceActionLead = buildIncidentRiskLead(relatedDevice);
 
   const seed: IncidentSeed = {
     id: `incident-${alert.id}`,
     title: alert.title,
     summary: alert.summary,
     severity: alert.severity,
+    priorityScore,
     status: incidentStatusFromAlertStatus(alert.status, relatedDevice?.isolated ?? false),
     confidenceScore: confidence,
     owner: latestCommand?.issuedBy ?? "unassigned",
     sourceMix: payloadSources,
     deviceIds: new Set([deviceId]),
-    deviceNames: new Set([alert.hostname]),
+    deviceNames: new Set([relatedDevice?.hostname ?? alert.hostname]),
+    primaryDeviceId: relatedDevice?.id ?? deviceId ?? null,
+    primaryDeviceName: relatedDevice?.hostname ?? alert.hostname,
+    highestDeviceRiskScore: relatedDevice?.riskScore ?? null,
+    highestDeviceRiskBand: relatedDevice?.riskBand ?? null,
+    highestDeviceConfidenceScore: relatedDevice?.confidenceScore ?? null,
+    deviceRiskSummary: riskSummary,
     firstSeenAt: alert.detectedAt,
     lastActivityAt: latestTimelineEvent?.occurredAt ?? alert.detectedAt,
     latestEvent: latestTimelineEvent?.summary ?? alert.summary,
-    recommendedAction: recommendedActionForSeverity(alert.severity, relatedDevice?.isolated ?? false),
+    recommendedAction: `${deviceActionLead}${recommendedActionForSeverity(alert.severity, relatedDevice?.isolated ?? false)}`.trim(),
     tactics,
     techniques,
     relatedAlertIds: new Set([alert.id]),
@@ -442,26 +622,37 @@ function createPostureIncident(device: DeviceSummary, posture: DevicePostureSumm
     posture.wscSummary ??
     "One or more protection layers are not reporting ready.";
   const latestEvent = posture.isolationSummary ?? summary;
+  const confidenceScore = severity === "high" ? 86 : 72;
+  const priorityScore = computePriorityScore(severity, device, confidenceScore, 1, 0);
+  const deviceActionLead = buildIncidentRiskLead(device);
 
   return {
     id: `incident-posture-${device.id}`,
     title,
     summary,
     severity,
+    priorityScore,
     status: device.isolated ? "contained" : "investigating",
-    confidenceScore: severity === "high" ? 86 : 72,
+    confidenceScore,
     owner: "platform-ops",
     sourceMix: ["endpoint", "posture"],
     deviceIds: [device.id],
     deviceNames: [device.hostname],
+    primaryDeviceId: device.id,
+    primaryDeviceName: device.hostname,
+    highestDeviceRiskScore: device.riskScore,
+    highestDeviceRiskBand: device.riskBand,
+    highestDeviceConfidenceScore: device.confidenceScore,
+    deviceRiskSummary: buildDeviceRiskSummary(device, device.riskScore, device.riskBand, device.confidenceScore),
     affectedAssetCount: 1,
     firstSeenAt: posture.updatedAt,
     lastActivityAt: posture.updatedAt,
     latestEvent,
-    recommendedAction:
+    recommendedAction: `${deviceActionLead}${
       severity === "high"
         ? "Repair the sensor stack and validate that real-time enforcement and telemetry are healthy."
-        : "Review degraded controls and confirm whether analyst intervention is needed.",
+        : "Review degraded controls and confirm whether analyst intervention is needed."
+    }`,
     tactics: [],
     techniques: [],
     relatedAlertIds: [],
@@ -481,16 +672,14 @@ function createPostureIncident(device: DeviceSummary, posture: DevicePostureSumm
     ]
   };
 }
-
-export function getNavigationItems() {
-  return navItems;
-}
-
 export function buildConsoleViewModel(snapshot: DashboardSnapshot): ConsoleViewModel {
   const devicesById = new Map(snapshot.devices.map((item) => [item.id, item]));
+  const devicesByHostname = new Map(snapshot.devices.map((item) => [item.hostname.toLowerCase(), item]));
   const postureByDeviceId = new Map(snapshot.postureOverview.map((item) => [item.deviceId, item]));
 
-  const incidents = snapshot.alerts.map((alert) => createAlertIncident(snapshot, alert, devicesById, postureByDeviceId));
+  const incidents = snapshot.alerts.map((alert) =>
+    createAlertIncident(snapshot, alert, devicesById, devicesByHostname, postureByDeviceId)
+  );
   const coveredDeviceIds = new Set(incidents.flatMap((item) => item.deviceIds));
 
   for (const posture of snapshot.postureOverview) {
@@ -507,6 +696,11 @@ export function buildConsoleViewModel(snapshot: DashboardSnapshot): ConsoleViewM
   }
 
   incidents.sort((left, right) => {
+    const priorityDelta = right.priorityScore - left.priorityScore;
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+
     const severityDelta = severityWeight(right.severity) - severityWeight(left.severity);
     if (severityDelta !== 0) {
       return severityDelta;
@@ -546,7 +740,11 @@ export function buildConsoleViewModel(snapshot: DashboardSnapshot): ConsoleViewM
     .map(([label, value]) => ({ label, value }));
 
   const devicesAtRisk = snapshot.devices.filter(
-    (device) => device.openAlertCount > 0 || device.postureState !== "ready" || device.isolated
+    (device) =>
+      device.openAlertCount > 0 ||
+      device.postureState !== "ready" ||
+      device.isolated ||
+      (device.riskScore ?? 0) >= 40
   ).length;
   const unhealthyEndpoints = snapshot.devices.filter((device) => device.healthState !== "healthy").length;
 
@@ -607,9 +805,15 @@ export function filterIncidents(incidents: IncidentSummary[], query: string) {
       incident.severity,
       incident.status,
       incident.deviceNames.join(" "),
+      incident.primaryDeviceName ?? "",
       incident.techniques.join(" "),
       incident.sourceMix.join(" "),
-      incident.latestEvent
+      incident.latestEvent,
+      incident.recommendedAction,
+      incident.deviceRiskSummary,
+      incident.highestDeviceRiskBand ?? "",
+      String(incident.highestDeviceRiskScore ?? ""),
+      String(incident.priorityScore)
     ].some((value) => value.toLowerCase().includes(normalized))
   );
 }
@@ -629,7 +833,10 @@ export function filterDevices(devices: DeviceSummary[], query: string) {
       device.serialNumber,
       device.policyName,
       device.healthState,
-      device.postureState
+      device.postureState,
+      device.riskBand ?? "",
+      String(device.riskScore ?? ""),
+      String(device.confidenceScore ?? "")
     ].some((value) => value.toLowerCase().includes(normalized))
   );
 }

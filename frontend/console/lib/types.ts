@@ -17,6 +17,9 @@ export type CommandType =
   | "persistence.cleanup"
   | "remediate.path"
   | "script.run"
+  | "privilege.elevation.request"
+  | "privilege.enforce"
+  | "privilege.recover"
   | "software.uninstall"
   | "software.update"
   | "software.update.search"
@@ -42,6 +45,14 @@ export interface PolicySummary {
   scriptInspection: boolean;
   networkContainment: boolean;
   quarantineOnMalicious: boolean;
+  dnsGuardEnabled: boolean;
+  trafficTelemetryEnabled: boolean;
+  integrityWatchEnabled: boolean;
+  privilegeHardeningEnabled: boolean;
+  pamLiteEnabled: boolean;
+  denyHighRiskElevation: boolean;
+  denyUnsignedElevation: boolean;
+  requireBreakGlassEscrow: boolean;
 }
 
 export interface PolicyProfile extends PolicySummary {
@@ -64,6 +75,87 @@ export interface ScriptSummary {
 }
 
 export type SoftwareUpdateState = "unknown" | "checking" | "available" | "current" | "error";
+export type RiskBand = "low" | "guarded" | "elevated" | "high" | "critical";
+export type RiskCategoryKey =
+  | "patch_posture"
+  | "software_hygiene"
+  | "threat_activity"
+  | "exposure"
+  | "network_behaviour"
+  | "control_health"
+  | "identity_posture";
+
+export type PrivilegeHardeningMode = "monitor_only" | "enforce" | "restricted" | "recovery";
+
+export interface PrivilegeAccountSummary {
+  name: string;
+  source: "local" | "domain" | "service";
+  enabled: boolean;
+  authorized: boolean;
+}
+
+export interface PrivilegeBaselineSnapshot {
+  deviceId: string;
+  hostname: string;
+  capturedAt: string;
+  localUsers: PrivilegeAccountSummary[];
+  localAdministrators: PrivilegeAccountSummary[];
+  domainLinkedAdminMemberships: Array<{
+    name: string;
+    group: string;
+    source: "local" | "domain";
+  }>;
+  breakGlassAccountName: string;
+  breakGlassAccountEnabled: boolean;
+  recoveryCredentialEscrowed: boolean;
+  recoveryCredentialLastRotatedAt?: string;
+}
+
+export type PrivilegeEventKind =
+  | "baseline.captured"
+  | "admin.added"
+  | "admin.removed"
+  | "admin.reenabled"
+  | "elevation.requested"
+  | "elevation.approved"
+  | "elevation.denied"
+  | "breakglass.used"
+  | "hardening.applied"
+  | "recovery.applied"
+  | "hardening.tamper";
+
+export interface PrivilegeEventSummary {
+  id: string;
+  deviceId: string;
+  hostname: string;
+  recordedAt: string;
+  kind: PrivilegeEventKind;
+  subject?: string;
+  actor?: string;
+  severity: AlertSeverity;
+  source: string;
+  summary: string;
+}
+
+export interface PrivilegeStateSnapshot {
+  deviceId: string;
+  hostname: string;
+  updatedAt: string;
+  privilegeHardeningMode: PrivilegeHardeningMode;
+  pamEnforcementEnabled: boolean;
+  standingAdminPresentFlag: boolean;
+  unapprovedAdminAccountCount: number;
+  adminGroupTamperIndicator: boolean;
+  directAdminLogonAttemptCount_7d: number;
+  breakGlassAccountUsageIndicator: boolean;
+  unauthorisedAdminReenableIndicator: boolean;
+  recoveryPathExists: boolean;
+  lastEnforcedAt?: string;
+  lastRecoveredAt?: string;
+  lastBreakGlassUsedAt?: string;
+  summary: string;
+  recommendedActions: string[];
+}
 
 export interface InstalledSoftwareSummary {
   id: string;
@@ -80,6 +172,102 @@ export interface InstalledSoftwareSummary {
   updateState: SoftwareUpdateState;
   lastUpdateCheckAt?: string;
   updateSummary?: string;
+}
+
+export interface DeviceRiskTelemetrySnapshot {
+  deviceId: string;
+  hostname: string;
+  updatedAt: string;
+  source: string;
+  os_patch_age_days?: number;
+  critical_patches_overdue_count?: number;
+  high_patches_overdue_count?: number;
+  known_exploited_vuln_count?: number;
+  internet_exposed_unpatched_critical_count?: number;
+  unsupported_software_count?: number;
+  outdated_browser_count?: number;
+  outdated_high_risk_app_count?: number;
+  untrusted_or_unsigned_software_count?: number;
+  active_malware_count?: number;
+  quarantined_threat_count_7d?: number;
+  persistent_threat_count?: number;
+  ransomware_behaviour_flag?: boolean;
+  lateral_movement_indicator?: boolean;
+  open_port_count?: number;
+  risky_open_port_count?: number;
+  internet_exposed_admin_service_count?: number;
+  smb_exposed_flag?: boolean;
+  rdp_exposed_flag?: boolean;
+  malicious_domain_contacts_7d?: number;
+  suspicious_domain_contacts_7d?: number;
+  dns_query_count_7d?: number;
+  dns_blocked_count_7d?: number;
+  malicious_destination_count_7d?: number;
+  suspicious_destination_count_7d?: number;
+  c2_beacon_indicator?: boolean;
+  data_exfiltration_indicator?: boolean;
+  unusual_egress_indicator?: boolean;
+  file_integrity_change_count_7d?: number;
+  protected_file_change_count_7d?: number;
+  edr_enabled?: boolean;
+  av_enabled?: boolean;
+  firewall_enabled?: boolean;
+  disk_encryption_enabled?: boolean;
+  tamper_protection_enabled?: boolean;
+  local_admin_users_count?: number;
+  standing_admin_present_flag?: boolean;
+  unapproved_admin_account_count?: number;
+  admin_group_tamper_indicator?: boolean;
+  direct_admin_logon_attempt_count_7d?: number;
+  break_glass_account_usage_indicator?: boolean;
+  pam_enforcement_enabled?: boolean;
+  privilege_hardening_mode?: PrivilegeHardeningMode;
+  unauthorised_admin_reenable_indicator?: boolean;
+  recovery_path_exists?: boolean;
+  risky_signin_indicator?: boolean;
+  stolen_token_indicator?: boolean;
+  mfa_gap_indicator?: boolean;
+  tacticIds?: string[];
+  techniqueIds?: string[];
+}
+
+export interface DeviceRiskCategoryScore {
+  category: RiskCategoryKey;
+  weight: number;
+  score: number;
+  contribution: number;
+}
+
+export interface RiskDriverSummary {
+  id: string;
+  category: RiskCategoryKey;
+  title: string;
+  detail: string;
+  scoreImpact: number;
+  severity: AlertSeverity;
+  tacticIds: string[];
+  techniqueIds: string[];
+}
+
+export interface DeviceScoreSnapshot {
+  id: string;
+  deviceId: string;
+  hostname: string;
+  calculatedAt: string;
+  telemetryUpdatedAt?: string;
+  telemetrySource?: string;
+  overallScore: number;
+  riskBand: RiskBand;
+  confidenceScore: number;
+  categoryScores: DeviceRiskCategoryScore[];
+  topRiskDrivers: RiskDriverSummary[];
+  overrideReasons: string[];
+  recommendedActions: string[];
+  missingTelemetryFields: string[];
+  tacticIds: string[];
+  techniqueIds: string[];
+  summary: string;
+  analystSummary: string;
 }
 
 export interface DeviceSummary {
@@ -103,6 +291,9 @@ export interface DeviceSummary {
   privateIpAddresses: string[];
   publicIpAddress: string | null;
   lastLoggedOnUser: string | null;
+  riskScore: number | null;
+  riskBand: RiskBand | null;
+  confidenceScore: number | null;
 }
 
 export interface AlertSummary {
@@ -245,6 +436,12 @@ export interface DashboardSnapshot {
 export interface DeviceDetail {
   device: DeviceSummary;
   posture: DevicePostureSummary | null;
+  latestScore: DeviceScoreSnapshot | null;
+  scoreHistory: DeviceScoreSnapshot[];
+  riskTelemetry: DeviceRiskTelemetrySnapshot | null;
+  privilegeBaseline: PrivilegeBaselineSnapshot | null;
+  privilegeState: PrivilegeStateSnapshot | null;
+  privilegeEvents: PrivilegeEventSummary[];
   alerts: AlertSummary[];
   telemetry: TelemetryRecord[];
   commands: DeviceCommandSummary[];
@@ -262,6 +459,14 @@ export interface CreatePolicyRequest {
   scriptInspection: boolean;
   networkContainment: boolean;
   quarantineOnMalicious: boolean;
+  dnsGuardEnabled?: boolean;
+  trafficTelemetryEnabled?: boolean;
+  integrityWatchEnabled?: boolean;
+  privilegeHardeningEnabled?: boolean;
+  pamLiteEnabled?: boolean;
+  denyHighRiskElevation?: boolean;
+  denyUnsignedElevation?: boolean;
+  requireBreakGlassEscrow?: boolean;
 }
 
 export interface UpdatePolicyRequest extends Partial<CreatePolicyRequest> {}

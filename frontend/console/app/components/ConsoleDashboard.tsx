@@ -68,6 +68,10 @@ export default function ConsoleDashboard() {
                   <dd>{selectedIncident.status}</dd>
                 </div>
                 <div>
+                  <dt>Priority</dt>
+                  <dd>{selectedIncident.priorityScore}</dd>
+                </div>
+                <div>
                   <dt>Owner</dt>
                   <dd>{selectedIncident.owner}</dd>
                 </div>
@@ -80,6 +84,14 @@ export default function ConsoleDashboard() {
                   <dd>{selectedIncident.confidenceScore}%</dd>
                 </div>
               </dl>
+              <div className="tag-row">
+                <span className={`state-chip ${severityClassName(selectedIncident.highestDeviceRiskBand ?? "default")}`}>
+                  {selectedIncident.highestDeviceRiskScore != null
+                    ? `${selectedIncident.highestDeviceRiskScore}/100 ${selectedIncident.highestDeviceRiskBand ?? "pending"}`
+                    : "risk pending"}
+                </span>
+              </div>
+              <p className="muted-copy">{selectedIncident.deviceRiskSummary}</p>
             </section>
 
             <section className="drawer-panel">
@@ -164,6 +176,7 @@ export default function ConsoleDashboard() {
                   <th>Severity</th>
                   <th>Title</th>
                   <th>Affected assets</th>
+                  <th>Device risk</th>
                   <th>Status</th>
                   <th>Owner</th>
                   <th>Last activity</th>
@@ -188,6 +201,16 @@ export default function ConsoleDashboard() {
                       </div>
                     </td>
                     <td>{incident.deviceNames.join(", ")}</td>
+                    <td>
+                      <div className="table-primary">
+                        <strong>
+                          {incident.highestDeviceRiskScore != null
+                            ? `${incident.highestDeviceRiskScore}/100`
+                            : "--"}
+                        </strong>
+                        <span>{incident.highestDeviceRiskBand ?? "pending"}</span>
+                      </div>
+                    </td>
                     <td>{incident.status}</td>
                     <td>{incident.owner}</td>
                     <td>{formatDateTime(incident.lastActivityAt)}</td>

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { buildServer } from "./app.ts";
 import { createFileBackedControlPlaneStore } from "./controlPlaneStore.ts";
+import { scoreDeviceRisk } from "./deviceRiskScoring.ts";
 import { createFileBackedMailStore } from "./mailStore.ts";
 import { createSeedState } from "./seedState.ts";
 
@@ -99,11 +100,11 @@ test("dashboard loads seed state from persistent storage", async (t) => {
 
   const payload = response.json();
   assert.equal(payload.defaultPolicy.revision, "2026.04.08.1");
-  assert.equal(payload.devices.length, 3);
-  assert.equal(payload.alerts.length, 3);
-  assert.equal(payload.recentTelemetry.length, 0);
-  assert.equal(payload.recentCommands.length, 2);
-  assert.equal(payload.quarantineItems.length, 1);
+  assert.equal(payload.devices.length, 8);
+  assert.equal(payload.alerts.length, 6);
+  assert.equal(payload.recentTelemetry.length, 3);
+  assert.equal(payload.recentCommands.length, 3);
+  assert.equal(payload.quarantineItems.length, 2);
 
   const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
     devices: Array<{ hostname: string }>;
@@ -317,11 +318,13 @@ test("enrollment, heartbeat, and policy check-in persist device state", async (t
   assert.equal(devicesResponse.statusCode, 200);
 
   const devicesPayload = devicesResponse.json() as {
-    items: Array<{ hostname: string; agentVersion: string; healthState: string }>;
+    items: Array<{ hostname: string; agentVersion: string; healthState: string; riskScore: number | null }>;
   };
-  assert.equal(devicesPayload.items[0].hostname, "LAB-ENDPOINT-01");
-  assert.equal(devicesPayload.items[0].agentVersion, "0.1.1-alpha");
-  assert.equal(devicesPayload.items[0].healthState, "degraded");
+  const enrolledDeviceSummary = devicesPayload.items.find((item) => item.hostname === "LAB-ENDPOINT-01");
+  assert.ok(enrolledDeviceSummary);
+  assert.equal(enrolledDeviceSummary.agentVersion, "0.1.1-alpha");
+  assert.equal(enrolledDeviceSummary.healthState, "degraded");
+  assert.notEqual(enrolledDeviceSummary.riskScore, null);
 
   const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
     devices: Array<{ hostname: string; agentVersion: string; lastPolicySyncAt: string | null }>;
@@ -412,21 +415,22 @@ test("telemetry batches persist and can be queried back", async (t) => {
     items: Array<{ eventId: string; hostname: string; eventType: string }>;
   };
   assert.equal(telemetryPayload.items.length, 2);
-  assert.equal(telemetryPayload.items[0].eventId, "evt-002");
-  assert.equal(telemetryPayload.items[0].hostname, "LAB-ENDPOINT-02");
+  assert.ok(telemetryPayload.items.some((item) => item.eventId === "evt-001" && item.hostname === "LAB-ENDPOINT-02"));
+  assert.ok(telemetryPayload.items.some((item) => item.eventId === "evt-002" && item.hostname === "LAB-ENDPOINT-02"));
 
   const dashboardResponse = await harness.app.inject({
     method: "GET",
     url: "/api/v1/dashboard"
   });
   assert.equal(dashboardResponse.statusCode, 200);
-  assert.equal(dashboardResponse.json().recentTelemetry.length, 2);
+  assert.equal(dashboardResponse.json().recentTelemetry.length, 5);
 
   const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
     telemetry: Array<{ eventId: string; deviceId: string }>;
   };
-  assert.equal(persisted.telemetry.length, 2);
-  assert.equal(persisted.telemetry[0].deviceId, deviceId);
+  assert.equal(persisted.telemetry.length, 5);
+  assert.ok(persisted.telemetry.some((item) => item.eventId === "evt-001" && item.deviceId === deviceId));
+  assert.ok(persisted.telemetry.some((item) => item.eventId === "evt-002" && item.deviceId === deviceId));
 });
 
 test("telemetry ingestion generates alerts and dedupes repeat detections", async (t) => {
@@ -497,7 +501,7 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
     }>;
   };
 
-  assert.equal(firstAlertsPayload.items.length, 5);
+  assert.equal(firstAlertsPayload.items.length, 8);
 
   const powerShellAlert = firstAlertsPayload.items.find(
     (alert) => alert.hostname === "LAB-ENDPOINT-03" && alert.title === "PowerShell execution observed"
@@ -557,7 +561,7 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
   assert.equal(repeatedPowerShellAlerts.length, 1);
   assert.equal(repeatedPowerShellAlerts[0].detectedAt, "2026-04-08T09:05:00Z");
   assert.match(repeatedPowerShellAlerts[0].summary, /PID 7780/i);
-  assert.equal(secondAlertsPayload.items.length, 5);
+  assert.equal(secondAlertsPayload.items.length, 8);
 
   const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
     alerts: Array<{ hostname: string; title: string; fingerprint?: string }>;
@@ -1165,4 +1169,313 @@ test("policies and stored scripts can be managed and dispatched to endpoints", a
   assert.ok(storedPolicy);
   assert.equal(storedPolicy.assignedDeviceIds[0], enrollment.deviceId);
   assert.ok(dashboardPayload.scripts.some((item) => item.id === createdScript.id));
+});
+
+test("device inventory telemetry populates endpoint summary and installed software detail", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-INVENTORY",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-INVENTORY-01"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+
+  const inventoryResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
+    payload: {
+      events: [
+        {
+          eventId: "evt-device-inventory-001",
+          eventType: "device.inventory.snapshot",
+          source: "device-inventory",
+          summary: "Fenrir refreshed the local user, address, and software inventory.",
+          occurredAt: "2026-04-08T12:00:00Z",
+          payloadJson: JSON.stringify({
+            privateIpAddresses: ["10.0.10.24", "192.168.1.20"],
+            lastLoggedOnUser: "CONTOSO\\matt.admin",
+            installedSoftware: [
+              {
+                id: "software-001",
+                displayName: "Contoso VPN",
+                displayVersion: "7.2.1",
+                publisher: "Contoso",
+                installLocation: "C:\\Program Files\\Contoso VPN",
+                uninstallCommand: "msiexec /x {CONTOSO-VPN}",
+                quietUninstallCommand: "msiexec /x {CONTOSO-VPN} /qn",
+                installDate: "20260401",
+                displayIconPath: "C:\\Program Files\\Contoso VPN\\vpn.exe",
+                executableNames: ["vpn.exe"],
+                blocked: false,
+                updateState: "available",
+                lastUpdateCheckAt: "2026-04-08T11:59:00Z",
+                updateSummary: "Version 7.2.3 is available."
+              }
+            ]
+          })
+        }
+      ]
+    }
+  });
+
+  assert.equal(inventoryResponse.statusCode, 200);
+
+  const detailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${enrollment.deviceId}`
+  });
+
+  assert.equal(detailResponse.statusCode, 200);
+  const detail = detailResponse.json() as {
+    device: { lastLoggedOnUser: string | null; privateIpAddresses: string[] };
+    installedSoftware: Array<{
+      id: string;
+      displayName: string;
+      blocked: boolean;
+      updateState: string;
+      updateSummary?: string;
+    }>;
+  };
+
+  assert.equal(detail.device.lastLoggedOnUser, "CONTOSO\\matt.admin");
+  assert.deepEqual(detail.device.privateIpAddresses, ["10.0.10.24", "192.168.1.20"]);
+  assert.equal(detail.installedSoftware.length, 1);
+  assert.equal(detail.installedSoftware[0].id, "software-001");
+  assert.equal(detail.installedSoftware[0].displayName, "Contoso VPN");
+  assert.equal(detail.installedSoftware[0].blocked, false);
+  assert.equal(detail.installedSoftware[0].updateState, "available");
+  assert.match(detail.installedSoftware[0].updateSummary ?? "", /7\.2\.3/);
+});
+
+test("software automation routes queue search, update, uninstall, and block commands", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-SOFTWARE",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-SOFTWARE-01"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const enrollment = enrollResponse.json() as { deviceId: string };
+
+  const payload = {
+    softwareId: "software-002",
+    displayName: "Northwind Chat",
+    displayVersion: "2.4.0",
+    publisher: "Northwind",
+    installLocation: "C:\\Program Files\\Northwind Chat",
+    uninstallCommand: "msiexec /x {NORTHWIND-CHAT}",
+    quietUninstallCommand: "msiexec /x {NORTHWIND-CHAT} /qn",
+    executableNames: ["northwind-chat.exe"],
+    issuedBy: "qa-operator"
+  };
+
+  const searchResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/actions/software-search-updates`,
+    payload
+  });
+  assert.equal(searchResponse.statusCode, 201);
+  assert.equal(searchResponse.json().type, "software.update.search");
+
+  const updateResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/actions/software-update`,
+    payload
+  });
+  assert.equal(updateResponse.statusCode, 201);
+  assert.equal(updateResponse.json().type, "software.update");
+
+  const uninstallResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/actions/software-uninstall`,
+    payload
+  });
+  assert.equal(uninstallResponse.statusCode, 201);
+  assert.equal(uninstallResponse.json().type, "software.uninstall");
+
+  const blockResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/actions/software-block`,
+    payload
+  });
+  assert.equal(blockResponse.statusCode, 201);
+  assert.equal(blockResponse.json().type, "software.block");
+
+  const commandsResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/commands?deviceId=${enrollment.deviceId}`
+  });
+
+  assert.equal(commandsResponse.statusCode, 200);
+  const queuedTypes = (commandsResponse.json().items as Array<{ type: string; issuedBy: string }>).map((item) => item.type);
+  assert.deepEqual(queuedTypes.slice(0, 4), [
+    "software.block",
+    "software.uninstall",
+    "software.update",
+    "software.update.search"
+  ]);
+});
+
+test("device risk scoring applies overrides and confidence tracking", () => {
+  const score = scoreDeviceRisk({
+    deviceId: "risk-unit-001",
+    hostname: "EXEC-LAPTOP-UNIT",
+    now: "2026-04-08T12:00:00Z",
+    telemetry: {
+      deviceId: "risk-unit-001",
+      hostname: "EXEC-LAPTOP-UNIT",
+      updatedAt: "2026-04-08T11:59:00Z",
+      source: "unit-test",
+      active_malware_count: 2,
+      ransomware_behaviour_flag: true,
+      c2_beacon_indicator: true,
+      edr_enabled: false,
+      av_enabled: false,
+      firewall_enabled: true,
+      tamper_protection_enabled: false,
+      local_admin_users_count: 3,
+      tacticIds: ["TA0040"],
+      techniqueIds: ["T1486"]
+    }
+  });
+
+  assert.equal(score.riskBand, "critical");
+  assert.ok(score.overallScore >= 90);
+  assert.ok(score.overrideReasons.some((reason) => /ransomware/i.test(reason)));
+  assert.ok(score.overrideReasons.some((reason) => /command-and-control|c2/i.test(reason)));
+  assert.ok(score.confidenceScore < 100);
+  assert.ok(score.missingTelemetryFields.includes("critical_patches_overdue_count"));
+  assert.ok(score.missingTelemetryFields.includes("malicious_domain_contacts_7d"));
+  assert.ok(score.recommendedActions.some((action) => /isolate|contain/i.test(action)));
+});
+
+test("device risk telemetry endpoints expose score, history, findings, and summary", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "RISK-ENDPOINT-01",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "RISK-0001"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+
+  const upsertResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/risk-telemetry`,
+    headers: deviceAuthHeaders(enrollment),
+    payload: {
+      source: "device-risk-agent",
+      os_patch_age_days: 61,
+      critical_patches_overdue_count: 2,
+      known_exploited_vuln_count: 1,
+      internet_exposed_unpatched_critical_count: 1,
+      unsupported_software_count: 1,
+      untrusted_or_unsigned_software_count: 1,
+      active_malware_count: 1,
+      persistent_threat_count: 1,
+      internet_exposed_admin_service_count: 1,
+      rdp_exposed_flag: true,
+      malicious_domain_contacts_7d: 2,
+      c2_beacon_indicator: true,
+      av_enabled: false,
+      edr_enabled: false,
+      firewall_enabled: true,
+      disk_encryption_enabled: true,
+      tamper_protection_enabled: false,
+      risky_signin_indicator: true,
+      tacticIds: ["TA0011"],
+      techniqueIds: ["T1071"]
+    }
+  });
+
+  assert.equal(upsertResponse.statusCode, 200);
+
+  const scoreResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${enrollment.deviceId}/score`
+  });
+
+  assert.equal(scoreResponse.statusCode, 200);
+  const scorePayload = scoreResponse.json() as {
+    overallScore: number;
+    riskBand: string;
+    confidenceScore: number;
+    topRiskDrivers: Array<{ title: string }>;
+    overrideReasons: string[];
+    recommendedActions: string[];
+  };
+  assert.equal(scorePayload.riskBand, "critical");
+  assert.ok(scorePayload.overallScore >= 80);
+  assert.ok(scorePayload.confidenceScore > 0);
+  assert.ok(scorePayload.topRiskDrivers.length > 0);
+  assert.ok(scorePayload.overrideReasons.length > 0);
+  assert.ok(scorePayload.recommendedActions.length > 0);
+
+  const historyResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${enrollment.deviceId}/score-history?limit=10`
+  });
+
+  assert.equal(historyResponse.statusCode, 200);
+  assert.ok((historyResponse.json().items as unknown[]).length >= 1);
+
+  const findingsResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${enrollment.deviceId}/findings`
+  });
+
+  assert.equal(findingsResponse.statusCode, 200);
+  assert.ok(
+    (findingsResponse.json().items as Array<{ title: string }>).some((item) =>
+      /malware|admin service|command/i.test(item.title)
+    )
+  );
+
+  const summaryResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${enrollment.deviceId}/risk-summary`
+  });
+
+  assert.equal(summaryResponse.statusCode, 200);
+  const summaryPayload = summaryResponse.json() as { summary: string; explanation: string; score: { deviceId: string } };
+  assert.match(summaryPayload.summary, /critical risk|risk/i);
+  assert.match(summaryPayload.explanation, /recommended actions|override/i);
+  assert.equal(summaryPayload.score.deviceId, enrollment.deviceId);
+
+  const recalcResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/score/recalculate`
+  });
+
+  assert.equal(recalcResponse.statusCode, 200);
+  assert.equal(recalcResponse.json().deviceId, enrollment.deviceId);
 });

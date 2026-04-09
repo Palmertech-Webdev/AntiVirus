@@ -18,8 +18,10 @@
 
 #include "AgentConfig.h"
 #include "EndpointClient.h"
+#include "ProcessInventory.h"
 #include "LocalScanRunner.h"
 #include "LocalStateStore.h"
+#include "ServiceInventory.h"
 #include "StringUtils.h"
 
 namespace {
@@ -202,6 +204,10 @@ UINT RestoreWindowMessageId() {
 bool HasSwitch(const std::vector<std::wstring>& arguments, const wchar_t* value) {
   return std::any_of(arguments.begin(), arguments.end(),
                      [value](const std::wstring& argument) { return _wcsicmp(argument.c_str(), value) == 0; });
+}
+
+bool IsCurrentUserAdmin() {
+  return IsUserAnAdmin() != FALSE;
 }
 
 LaunchOptions ParseLaunchOptions() {
@@ -885,6 +891,15 @@ std::wstring BuildHistoryDetailText(const antivirus::agent::ScanHistoryRecord& r
 }
 
 std::wstring BuildServiceOverviewText(const UiContext& context) {
+  const auto processes = antivirus::agent::CollectProcessInventory(6);
+  const auto services = antivirus::agent::CollectServiceInventory(6);
+  const auto prioritizedProcessCount = std::count_if(processes.begin(), processes.end(), [](const auto& process) {
+    return process.prioritized;
+  });
+  const auto riskyServiceCount = std::count_if(services.begin(), services.end(), [](const auto& service) {
+    return service.risky;
+  });
+
   std::wstringstream stream;
   stream << L"Runtime posture\r\n\r\n"
          << L"Device ID: " << NullableText(context.snapshot.agentState.deviceId, L"(not enrolled)") << L"\r\n"
@@ -895,9 +910,29 @@ std::wstring BuildServiceOverviewText(const UiContext& context) {
          << L"Last heartbeat: " << NullableText(context.snapshot.agentState.lastHeartbeatAt, L"(never)") << L"\r\n"
          << L"Last policy sync: " << NullableText(context.snapshot.agentState.lastPolicySyncAt, L"(never)") << L"\r\n"
          << L"Queued telemetry: " << context.snapshot.queuedTelemetryCount << L"\r\n"
+          << L"Processes observed: " << processes.size() << L" (" << prioritizedProcessCount << L" prioritized)\r\n"
+          << L"Services observed: " << services.size() << L" (" << riskyServiceCount << L" flagged)\r\n"
          << L"Agent version: " << NullableText(context.config.agentVersion) << L"\r\n"
          << L"Platform version: " << NullableText(context.config.platformVersion) << L"\r\n"
          << L"Command channel: " << NullableText(context.snapshot.agentState.commandChannelUrl, L"(not assigned)");
+
+        if (!processes.empty()) {
+          const auto& process = processes.front();
+          stream << L"\r\n\r\nHighlighted process\r\n"
+            << L"Name: " << NullableText(process.imageName, L"(unknown)") << L"\r\n"
+            << L"Path: " << NullableText(process.imagePath, L"(unknown)") << L"\r\n"
+            << L"PID: " << process.pid;
+        }
+
+        if (!services.empty()) {
+          const auto& service = services.front();
+          stream << L"\r\n\r\nHighlighted service\r\n"
+            << L"Name: " << NullableText(service.displayName, L"(unknown)") << L"\r\n"
+            << L"Service: " << NullableText(service.serviceName, L"(unknown)") << L"\r\n"
+            << L"Binary: " << NullableText(service.binaryPath, L"(unknown)") << L"\r\n"
+            << L"State: " << NullableText(service.currentState, L"(unknown)") << L"\r\n"
+            << L"Account: " << NullableText(service.accountName, L"(unknown)");
+        }
 
   if (!context.snapshot.updateJournal.empty()) {
     const auto& latest = context.snapshot.updateJournal.front();
@@ -1466,6 +1501,7 @@ void UpdateActionButtons(UiContext& context) {
   ShowWindow(context.openQuarantineButton, (dashboardMode || quarantineMode || threatsMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.restoreButton, quarantineMode ? SW_SHOW : SW_HIDE);
   ShowWindow(context.deleteButton, quarantineMode ? SW_SHOW : SW_HIDE);
+  EnableWindow(context.restoreButton, quarantineMode && IsCurrentUserAdmin());
 }
 
 void UpdateDetailPane(UiContext& context) {
@@ -1890,6 +1926,12 @@ void PerformQuarantineAction(UiContext& context, const bool restore) {
   const auto index = ListView_GetNextItem(context.quarantineList, -1, LVNI_SELECTED);
   if (index < 0 || static_cast<std::size_t>(index) >= context.snapshot.quarantineItems.size()) {
     MessageBoxW(context.hwnd, L"Select a quarantined item first.", kWindowTitle, MB_OK | MB_ICONINFORMATION);
+    return;
+  }
+
+  if (restore && !IsCurrentUserAdmin()) {
+    MessageBoxW(context.hwnd, L"Restoring quarantined files requires an elevated administrator session.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
     return;
   }
 

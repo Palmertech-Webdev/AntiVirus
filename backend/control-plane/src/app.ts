@@ -60,6 +60,64 @@ const telemetryQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional()
 });
 
+const limitQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(200).optional()
+});
+
+const upsertDeviceRiskTelemetryRequestSchema = z.object({
+  source: z.string().min(1).optional(),
+  os_patch_age_days: z.number().int().nonnegative().max(10_000).optional(),
+  critical_patches_overdue_count: z.number().int().nonnegative().max(10_000).optional(),
+  high_patches_overdue_count: z.number().int().nonnegative().max(10_000).optional(),
+  known_exploited_vuln_count: z.number().int().nonnegative().max(10_000).optional(),
+  internet_exposed_unpatched_critical_count: z.number().int().nonnegative().max(10_000).optional(),
+  unsupported_software_count: z.number().int().nonnegative().max(10_000).optional(),
+  outdated_browser_count: z.number().int().nonnegative().max(10_000).optional(),
+  outdated_high_risk_app_count: z.number().int().nonnegative().max(10_000).optional(),
+  untrusted_or_unsigned_software_count: z.number().int().nonnegative().max(10_000).optional(),
+  active_malware_count: z.number().int().nonnegative().max(10_000).optional(),
+  quarantined_threat_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  persistent_threat_count: z.number().int().nonnegative().max(10_000).optional(),
+  ransomware_behaviour_flag: z.boolean().optional(),
+  lateral_movement_indicator: z.boolean().optional(),
+  open_port_count: z.number().int().nonnegative().max(10_000).optional(),
+  risky_open_port_count: z.number().int().nonnegative().max(10_000).optional(),
+  internet_exposed_admin_service_count: z.number().int().nonnegative().max(10_000).optional(),
+  smb_exposed_flag: z.boolean().optional(),
+  rdp_exposed_flag: z.boolean().optional(),
+  malicious_domain_contacts_7d: z.number().int().nonnegative().max(10_000).optional(),
+  suspicious_domain_contacts_7d: z.number().int().nonnegative().max(10_000).optional(),
+  dns_query_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  dns_blocked_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  malicious_destination_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  suspicious_destination_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  c2_beacon_indicator: z.boolean().optional(),
+  data_exfiltration_indicator: z.boolean().optional(),
+  unusual_egress_indicator: z.boolean().optional(),
+  file_integrity_change_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  protected_file_change_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  edr_enabled: z.boolean().optional(),
+  av_enabled: z.boolean().optional(),
+  firewall_enabled: z.boolean().optional(),
+  disk_encryption_enabled: z.boolean().optional(),
+  tamper_protection_enabled: z.boolean().optional(),
+  local_admin_users_count: z.number().int().nonnegative().max(10_000).optional(),
+  standing_admin_present_flag: z.boolean().optional(),
+  unapproved_admin_account_count: z.number().int().nonnegative().max(10_000).optional(),
+  admin_group_tamper_indicator: z.boolean().optional(),
+  direct_admin_logon_attempt_count_7d: z.number().int().nonnegative().max(10_000).optional(),
+  break_glass_account_usage_indicator: z.boolean().optional(),
+  pam_enforcement_enabled: z.boolean().optional(),
+  privilege_hardening_mode: z.enum(["monitor_only", "enforce", "restricted", "recovery"]).optional(),
+  unauthorised_admin_reenable_indicator: z.boolean().optional(),
+  recovery_path_exists: z.boolean().optional(),
+  risky_signin_indicator: z.boolean().optional(),
+  stolen_token_indicator: z.boolean().optional(),
+  mfa_gap_indicator: z.boolean().optional(),
+  tacticIds: z.array(z.string().min(1)).optional(),
+  techniqueIds: z.array(z.string().min(1)).optional()
+});
+
 const commandsQuerySchema = z.object({
   deviceId: z.string().min(1).optional(),
   status: z.enum(["pending", "in_progress", "completed", "failed"]).optional(),
@@ -87,6 +145,9 @@ const queueCommandRequestSchema = z.object({
     "persistence.cleanup",
     "remediate.path",
     "script.run",
+    "privilege.elevation.request",
+    "privilege.enforce",
+    "privilege.recover",
     "software.uninstall",
     "software.update",
     "software.update.search",
@@ -114,6 +175,14 @@ const createPolicyRequestSchema = z.object({
   scriptInspection: z.boolean(),
   networkContainment: z.boolean(),
   quarantineOnMalicious: z.boolean()
+  ,dnsGuardEnabled: z.boolean().optional(),
+  trafficTelemetryEnabled: z.boolean().optional(),
+  integrityWatchEnabled: z.boolean().optional(),
+  privilegeHardeningEnabled: z.boolean().optional(),
+  pamLiteEnabled: z.boolean().optional(),
+  denyHighRiskElevation: z.boolean().optional(),
+  denyUnsignedElevation: z.boolean().optional(),
+  requireBreakGlassEscrow: z.boolean().optional()
 });
 
 const updatePolicyRequestSchema = createPolicyRequestSchema.partial();
@@ -138,6 +207,11 @@ const deviceRecordParamsSchema = z.object({
 
 const issuedByRequestSchema = z.object({
   issuedBy: z.string().min(1).optional()
+});
+
+const privilegeActionRequestSchema = z.object({
+  issuedBy: z.string().min(1).optional(),
+  reason: z.string().min(1).optional()
 });
 
 const targetPathActionRequestSchema = z.object({
@@ -351,6 +425,13 @@ function validateQueuedCommand(
     return {
       valid: false,
       details: `${body.type} requires recordId`
+    };
+  }
+
+  if (body.type === "privilege.elevation.request" && !body.payloadJson) {
+    return {
+      valid: false,
+      details: "privilege.elevation.request requires payloadJson"
     };
   }
 
@@ -590,6 +671,211 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     try {
       return await store.getDeviceDetail(params.data.deviceId);
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/score", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      return await store.getLatestDeviceScore(params.data.deviceId);
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/score-history", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const query = limitQuerySchema.safeParse(request.query);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!query.success) {
+      return sendValidationError(reply, query.error.flatten());
+    }
+
+    try {
+      return {
+        items: await store.listDeviceScoreHistory(params.data.deviceId, query.data.limit)
+      };
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/findings", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      const score = await store.getLatestDeviceScore(params.data.deviceId);
+      return {
+        items: score.topRiskDrivers
+      };
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/risk-summary", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      return await store.getDeviceRiskSummary(params.data.deviceId);
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/score/recalculate", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      return await store.recalculateDeviceScore(params.data.deviceId);
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/privilege/baseline", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      return await store.getDevicePrivilegeBaseline(params.data.deviceId);
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/privilege/state", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      return await store.getDevicePrivilegeState(params.data.deviceId);
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/devices/:deviceId/privilege/events", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const query = limitQuerySchema.safeParse(request.query);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!query.success) {
+      return sendValidationError(reply, query.error.flatten());
+    }
+
+    try {
+      return { items: await store.listDevicePrivilegeEvents(params.data.deviceId, query.data.limit) };
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/privilege/enforce", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = privilegeActionRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(await store.enforceDevicePrivilegeHardening(params.data.deviceId, body.data));
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/privilege/recover", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = privilegeActionRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(await store.recoverDevicePrivilegeHardening(params.data.deviceId, body.data));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
@@ -1337,6 +1623,33 @@ export function buildServer(options: BuildServerOptions = {}) {
 
     try {
       return await store.ingestTelemetry(params.data.deviceId, body.data, extractObservedRemoteAddress(request));
+    } catch (error) {
+      if (error instanceof DeviceNotFoundError) {
+        return sendNotFound(reply, params.data.deviceId);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/devices/:deviceId/risk-telemetry", async (request, reply) => {
+    const params = deviceParamsSchema.safeParse(request.params);
+    const body = upsertDeviceRiskTelemetryRequestSchema.safeParse(request.body ?? {});
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!requireDeviceAuthentication(request, reply, params.data.deviceId)) {
+      return;
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return await store.upsertDeviceRiskTelemetry(params.data.deviceId, body.data);
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);

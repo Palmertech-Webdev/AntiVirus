@@ -54,6 +54,10 @@ export default function IncidentsView() {
                   <dd>{selectedIncident.severity}</dd>
                 </div>
                 <div>
+                  <dt>Priority</dt>
+                  <dd>{selectedIncident.priorityScore}</dd>
+                </div>
+                <div>
                   <dt>Status</dt>
                   <dd>{selectedIncident.status}</dd>
                 </div>
@@ -66,6 +70,19 @@ export default function IncidentsView() {
                   <dd>{selectedIncident.deviceNames.join(", ")}</dd>
                 </div>
               </dl>
+              <div className="tag-row">
+                <span className={`state-chip tone-${selectedIncident.highestDeviceRiskBand ?? "default"}`}>
+                  {selectedIncident.highestDeviceRiskScore != null
+                    ? `${selectedIncident.highestDeviceRiskScore}/100 ${selectedIncident.highestDeviceRiskBand ?? "pending"}`
+                    : "risk pending"}
+                </span>
+                {selectedIncident.highestDeviceConfidenceScore != null ? (
+                  <span className="state-chip tone-default">
+                    {selectedIncident.highestDeviceConfidenceScore}% device confidence
+                  </span>
+                ) : null}
+              </div>
+              <p className="muted-copy">{selectedIncident.deviceRiskSummary}</p>
             </section>
             <section className="drawer-panel">
               <p className="section-kicker">Next action</p>
@@ -93,6 +110,7 @@ export default function IncidentsView() {
                 <th>Severity</th>
                 <th>Title</th>
                 <th>Affected assets</th>
+                <th>Device risk</th>
                 <th>Source mix</th>
                 <th>Status</th>
                 <th>Owner</th>
@@ -119,6 +137,14 @@ export default function IncidentsView() {
                     </Link>
                   </td>
                   <td>{incident.deviceNames.join(", ")}</td>
+                  <td>
+                    <div className="table-primary">
+                      <strong>
+                        {incident.highestDeviceRiskScore != null ? `${incident.highestDeviceRiskScore}/100` : "--"}
+                      </strong>
+                      <span>{incident.highestDeviceRiskBand ?? "pending"}</span>
+                    </div>
+                  </td>
                   <td>{incident.sourceMix.join(", ")}</td>
                   <td>{incident.status}</td>
                   <td>{incident.owner}</td>

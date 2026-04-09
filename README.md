@@ -28,6 +28,7 @@ The design target is to become capable of meeting strong independent-test expect
 - `docs/DATA_MODEL.md` - Recommended data model and event schema
 - `docs/ROADMAP.md` - Phased delivery plan
 - `docs/EMAIL_SECURITY.md` - Phase A email-security gateway and investigation plan
+- `docs/DEVICE_RISK_SCORING.md` - Deterministic device risk scoring MVP, API surface, and verification steps
 
 ## Current Scaffold
 
@@ -41,7 +42,9 @@ npm run dev:frontend
 The current implementation focus is Phase 0 plus the first real-time protection slice:
 
 - A file-backed control-plane API for health, enrollment, devices, alerts, heartbeat, policy check-in, and telemetry ingest
+- A deterministic device risk scoring model with explainable category scores, override reasons, recommended actions, confidence scoring, seeded risk profiles, and device summary/detail API support
 - A management-console shell wired to the backend dashboard endpoint with periodic refresh, recent telemetry, response actions, and quarantine inventory
+- Device risk views in the console that surface per-device score, band, confidence, category breakdown, risk drivers, and telemetry completeness inside the existing device list and detail workflow
 - A native Windows agent surface with an SCM-compatible service, a local endpoint client and tray app, canonical event/policy/verdict contracts, enrollment, heartbeat, command polling, a SQLite-backed runtime store, targeted scanning, quarantine/evidence handling, a content-aware scan engine, a real-time verdict broker, and change-detection sensors
 - A WDK-oriented Windows minifilter source skeleton that shares a protocol with the user-mode real-time broker
 - A native Windows AMSI provider DLL plus test CLI for script and fileless inspection, telemetry spooling, and evidence capture

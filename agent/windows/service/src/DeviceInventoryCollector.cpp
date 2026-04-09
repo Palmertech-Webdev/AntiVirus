@@ -1,7 +1,13 @@
 #include "DeviceInventoryCollector.h"
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+
+#include <winsock2.h>
 #include <Windows.h>
 #include <iphlpapi.h>
+#include <iptypes.h>
 #include <wtsapi32.h>
 #include <ws2tcpip.h>
 
@@ -229,15 +235,15 @@ std::vector<std::wstring> CollectPrivateIpAddresses() {
   ULONG bufferLength = 16 * 1024;
   std::vector<BYTE> buffer(bufferLength);
 
-  auto* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+  auto* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES_LH*>(buffer.data());
   ULONG result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                                     GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_FRIENDLY_NAME,
+                                                     GAA_FLAG_SKIP_DNS_SERVER,
                                       nullptr, addresses, &bufferLength);
   if (result == ERROR_BUFFER_OVERFLOW) {
     buffer.resize(bufferLength);
-    addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES_LH*>(buffer.data());
     result = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                               GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_FRIENDLY_NAME,
+                                               GAA_FLAG_SKIP_DNS_SERVER,
                                   nullptr, addresses, &bufferLength);
   }
 

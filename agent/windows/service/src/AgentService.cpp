@@ -21,6 +21,7 @@
 #include "HardeningManager.h"
 #include "ProcessInventory.h"
 #include "ProcessSnapshotCollector.h"
+#include "ServiceSnapshotCollector.h"
 #include "QuarantineStore.h"
 #include "RemediationEngine.h"
 #include "RuntimeDatabase.h"
@@ -706,7 +707,7 @@ std::wstring AgentService::ExecuteTargetedScan(const RemoteCommand& command) {
     throw std::runtime_error("Targeted scan path does not exist");
   }
 
-  auto findings = ScanTargets({targetPath}, policy_);
+  auto findings = ScanTargets({targetPath}, policy_, ScanProgressCallback{}, config_.scanExcludedPaths);
   QuarantineStore quarantineStore(config_.quarantineRootPath, config_.runtimeDatabasePath);
   EvidenceRecorder evidenceRecorder(config_.evidenceRootPath, config_.runtimeDatabasePath);
 
@@ -1319,6 +1320,14 @@ void AgentService::QueueCycleTelemetry(const int cycle) {
       QueueTelemetryRecords(processSnapshotRecords);
     }
     QueueTelemetryRecords(processDeltaTracker_.CollectDeltaTelemetry(processInventory));
+  }
+
+  const auto serviceSnapshotRecords = CollectServiceSnapshotTelemetry(4);
+  if (serviceSnapshotRecords.empty()) {
+    QueueTelemetryEvent(L"service.snapshot.empty", L"service-snapshot",
+                        L"No service snapshot records were collected during this cycle.", BuildCyclePayload(cycle));
+  } else {
+    QueueTelemetryRecords(serviceSnapshotRecords);
   }
 
   const auto fileInventory = CollectFileInventory(BuildMonitoredRoots());

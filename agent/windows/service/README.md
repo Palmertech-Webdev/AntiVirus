@@ -17,11 +17,13 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Batched telemetry upload
 - Real process and recent-file snapshot collection
 - Process start/exit and file create/modify/delete delta tracking across sync cycles
+- Service snapshot collection for installed services alongside the process inventory
 - Configurable sync loop for development and testing
 - Cached-policy startup when the control plane is unavailable
 - Executable-relative runtime paths so service launches do not write into `System32`
 - A shared on-demand scan engine used by `antivirus-scannercli`
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
+- Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories
 - An external signature-bundle path so detection content can ship independently of the core agent binary
 - A real-time verdict broker that can accept minifilter-style file create/open/write/execute requests
 - Real-time block/quarantine decisions flowing through the same evidence and telemetry pipeline as on-demand scans
@@ -102,6 +104,7 @@ The purpose of this folder is to establish the internal contracts we will build 
 - `ANTIVIRUS_ISOLATION_ALLOW_LOOPBACK`
 - `ANTIVIRUS_ISOLATION_ALLOW_REMOTE`
 - `ANTIVIRUS_ISOLATION_ALLOW_APPLICATIONS`
+- `ANTIVIRUS_SCAN_EXCLUDE_PATHS`
 
 The default sync interval is now 60 seconds when the agent is run in multi-iteration mode.
 

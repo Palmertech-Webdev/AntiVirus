@@ -24,15 +24,17 @@ struct CliOptions {
   bool helpRequested{false};
   bool realtimeMode{false};
   antivirus::agent::RealtimeFileOperation realtimeOperation{ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE};
+  std::vector<std::filesystem::path> exclusions;
   std::vector<std::filesystem::path> targets;
 };
 
 void PrintUsage() {
-  std::wcout << L"Usage: antivirus-scannercli.exe [--json] [--no-telemetry] [--no-remediation] [--realtime-op <create|open|write|execute>] [--path <target>] <target>..."
+  std::wcout << L"Usage: antivirus-scannercli.exe [--json] [--no-telemetry] [--no-remediation] [--exclude <path>] [--realtime-op <create|open|write|execute>] [--path <target>] <target>..."
              << std::endl;
   std::wcout << L"  --json          Print findings as JSON." << std::endl;
   std::wcout << L"  --no-telemetry  Do not queue scan telemetry locally." << std::endl;
   std::wcout << L"  --no-remediation  Do not quarantine files even when policy would allow it." << std::endl;
+  std::wcout << L"  --exclude <path>  Skip a file or directory during the scan. Repeatable." << std::endl;
   std::wcout << L"  --realtime-op <operation>  Simulate a minifilter request through the real-time verdict broker."
              << std::endl;
   std::wcout << L"  --path <target> Add an explicit file or directory target." << std::endl;
@@ -84,6 +86,16 @@ bool ParseOptions(const int argc, wchar_t* argv[], CliOptions& options) {
 
     if (argument == L"--no-remediation") {
       options.noRemediation = true;
+      continue;
+    }
+
+    if (argument == L"--exclude") {
+      if (index + 1 >= argc) {
+        std::wcerr << L"--exclude requires a following file or directory path." << std::endl;
+        return false;
+      }
+
+      options.exclusions.emplace_back(argv[++index]);
       continue;
     }
 
@@ -347,6 +359,9 @@ int wmain(int argc, wchar_t* argv[]) {
   }
 
   const auto config = antivirus::agent::LoadAgentConfig();
+  auto effectiveConfig = config;
+  effectiveConfig.scanExcludedPaths.insert(effectiveConfig.scanExcludedPaths.end(), options.exclusions.begin(),
+                                          options.exclusions.end());
   antivirus::agent::LocalStateStore stateStore(config.runtimeDatabasePath, config.stateFilePath);
   const auto state = stateStore.LoadOrCreate();
 
@@ -356,16 +371,17 @@ int wmain(int argc, wchar_t* argv[]) {
       return 1;
     }
 
-    return RunRealtimeMode(config, state, options, resolvedTargets.front());
+    return RunRealtimeMode(effectiveConfig, state, options, resolvedTargets.front());
   }
 
-  auto findings = antivirus::agent::ScanTargets(resolvedTargets, state.policy);
+  auto findings = antivirus::agent::ScanTargets(resolvedTargets, state.policy,
+                                                antivirus::agent::ScanProgressCallback{}, effectiveConfig.scanExcludedPaths);
 
-  ApplyLocalRemediation(config, findings, options.noRemediation);
-  RecordEvidence(config, state.policy, findings);
+  ApplyLocalRemediation(effectiveConfig, findings, options.noRemediation);
+  RecordEvidence(effectiveConfig, state.policy, findings);
 
   if (!options.noTelemetry) {
-    QueueTelemetry(config, state.policy, findings, resolvedTargets.size());
+    QueueTelemetry(effectiveConfig, state.policy, findings, resolvedTargets.size());
   }
 
   if (options.json) {

@@ -162,7 +162,8 @@ bool IsContainerExtension(const std::wstring& extension) {
 }
 
 ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const RealtimeFileOperation operation,
-                                 const PolicySnapshot& policy) {
+                                 const PolicySnapshot& policy,
+                                 const std::vector<std::filesystem::path>& excludedPaths) {
   const auto extension = ToLowerCopy(path.extension().wstring());
   const auto userControlledPath = IsUserControlledPath(path);
 
@@ -189,7 +190,7 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
             {L"HASH_UNAVAILABLE", L"SHA-256 computation failed during real-time evaluation."});
       }
 
-      if (const auto analyzedFinding = ScanFile(path, policy); analyzedFinding.has_value()) {
+      if (const auto analyzedFinding = ScanFile(path, policy, excludedPaths); analyzedFinding.has_value()) {
         auto promoted = *analyzedFinding;
         if (promoted.verdict.disposition == VerdictDisposition::Block &&
             operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE) {
@@ -382,7 +383,7 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
                         .reasons = {{L"REALTIME_DISABLED", L"Real-time protection is disabled by policy."}}}}};
   }
 
-  auto finding = BuildRealtimeFinding(targetPath, operation, policy);
+  auto finding = BuildRealtimeFinding(targetPath, operation, policy, config_.scanExcludedPaths);
   if (finding.verdict.disposition == VerdictDisposition::Allow) {
     return RealtimeInspectionOutcome{
         .action = ANTIVIRUS_REALTIME_RESPONSE_ACTION_ALLOW,

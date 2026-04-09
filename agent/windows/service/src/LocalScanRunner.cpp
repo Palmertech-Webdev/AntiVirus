@@ -235,7 +235,7 @@ LocalScanExecutionResult ExecuteLocalScan(const AgentConfig& config, const Agent
         .findingCount = update.findingCount,
         .currentTarget = update.currentPath,
     });
-  });
+  }, config.scanExcludedPaths);
 
   ApplyLocalRemediation(config, findings, options.applyRemediation);
   RecordEvidence(config, state.policy, findings, options.source);

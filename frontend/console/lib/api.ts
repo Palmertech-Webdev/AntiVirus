@@ -6,13 +6,19 @@ import type {
   DashboardSnapshot,
   DeviceCommandSummary,
   DeviceDetail,
+  PrivilegeBaselineSnapshot,
+  PrivilegeEventSummary,
+  DeviceRiskTelemetrySnapshot,
+  DeviceScoreSnapshot,
   MailDashboardSnapshot,
   MailMessageSummary,
   MailQuarantineItemSummary,
   PolicyAssignmentRequest,
   PolicyProfile,
   QuarantineItemSummary,
+  RiskDriverSummary,
   ScriptSummary,
+  PrivilegeStateSnapshot,
   UpdatePolicyRequest,
   UpdateScriptRequest
 } from "./types";
@@ -104,6 +110,60 @@ export async function loadDeviceDetail(deviceId: string): Promise<LoadResult<Dev
       source: "fallback"
     };
   }
+}
+
+export async function loadDeviceScore(deviceId: string): Promise<DeviceScoreSnapshot> {
+  return requestJson<DeviceScoreSnapshot>(`/devices/${deviceId}/score`);
+}
+
+export async function loadDeviceScoreHistory(deviceId: string, limit?: number): Promise<DeviceScoreSnapshot[]> {
+  const suffix = typeof limit === "number" ? `?limit=${limit}` : "";
+  const response = await requestJson<{ items: DeviceScoreSnapshot[] }>(`/devices/${deviceId}/score-history${suffix}`);
+  return response.items;
+}
+
+export async function loadDeviceRiskSummary(deviceId: string): Promise<{
+  deviceId: string;
+  summary: string;
+  explanation: string;
+  score: DeviceScoreSnapshot;
+}> {
+  return requestJson<{ deviceId: string; summary: string; explanation: string; score: DeviceScoreSnapshot }>(
+    `/devices/${deviceId}/risk-summary`
+  );
+}
+
+export async function loadDevicePrivilegeBaseline(deviceId: string): Promise<PrivilegeBaselineSnapshot | null> {
+  return requestJson<PrivilegeBaselineSnapshot | null>(`/devices/${deviceId}/privilege/baseline`);
+}
+
+export async function loadDevicePrivilegeState(deviceId: string): Promise<PrivilegeStateSnapshot | null> {
+  return requestJson<PrivilegeStateSnapshot | null>(`/devices/${deviceId}/privilege/state`);
+}
+
+export async function loadDevicePrivilegeEvents(
+  deviceId: string,
+  limit?: number
+): Promise<PrivilegeEventSummary[]> {
+  const suffix = typeof limit === "number" ? `?limit=${limit}` : "";
+  const response = await requestJson<{ items: PrivilegeEventSummary[] }>(`/devices/${deviceId}/privilege/events${suffix}`);
+  return response.items;
+}
+
+export async function loadDeviceFindings(deviceId: string): Promise<RiskDriverSummary[]> {
+  const response = await requestJson<{ items: RiskDriverSummary[] }>(`/devices/${deviceId}/findings`);
+  return response.items;
+}
+
+export async function recalculateDeviceScore(deviceId: string): Promise<DeviceScoreSnapshot> {
+  return requestJsonWithBody<DeviceScoreSnapshot>(`/devices/${deviceId}/score/recalculate`, "POST");
+}
+
+export async function upsertDeviceRiskTelemetry(
+  deviceId: string,
+  request: Partial<DeviceRiskTelemetrySnapshot>
+): Promise<DeviceRiskTelemetrySnapshot> {
+  return requestJsonWithBody<DeviceRiskTelemetrySnapshot>(`/devices/${deviceId}/risk-telemetry`, "POST", request);
 }
 
 export async function loadMailDashboard(): Promise<LoadResult<MailDashboardSnapshot>> {
@@ -239,6 +299,44 @@ export async function queueRunScript(
     scriptId,
     issuedBy
   });
+}
+
+export async function queuePrivilegeElevation(
+  deviceId: string,
+  request: {
+    requestedBy?: string;
+    applicationName?: string;
+    targetPath?: string;
+    reason?: string;
+    approved?: boolean;
+    issuedBy?: string;
+  }
+): Promise<DeviceCommandSummary> {
+  return requestJsonWithBody<DeviceCommandSummary>(`/devices/${deviceId}/commands`, "POST", {
+    type: "privilege.elevation.request",
+    issuedBy: request.issuedBy ?? "console",
+    payloadJson: JSON.stringify({
+      requestedBy: request.requestedBy ?? request.issuedBy ?? "console",
+      applicationName: request.applicationName,
+      targetPath: request.targetPath,
+      reason: request.reason,
+      approved: request.approved ?? false
+    })
+  });
+}
+
+export async function enforceDevicePrivilegeHardening(
+  deviceId: string,
+  request: { issuedBy?: string; reason?: string } = {}
+): Promise<PrivilegeStateSnapshot> {
+  return requestJsonWithBody<PrivilegeStateSnapshot>(`/devices/${deviceId}/privilege/enforce`, "POST", request);
+}
+
+export async function recoverDevicePrivilegeHardening(
+  deviceId: string,
+  request: { issuedBy?: string; reason?: string } = {}
+): Promise<PrivilegeStateSnapshot> {
+  return requestJsonWithBody<PrivilegeStateSnapshot>(`/devices/${deviceId}/privilege/recover`, "POST", request);
 }
 
 export async function queueSoftwareUninstall(

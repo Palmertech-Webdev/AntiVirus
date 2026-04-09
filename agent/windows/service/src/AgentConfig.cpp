@@ -407,6 +407,10 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
       ParseWideList(ReadEnvironmentVariable(L"ANTIVIRUS_ISOLATION_ALLOW_REMOTE"));
   config.isolationAllowedApplications =
       ParseWideList(ReadEnvironmentVariable(L"ANTIVIRUS_ISOLATION_ALLOW_APPLICATIONS"));
+  config.scanExcludedPaths = {};
+  for (const auto& excludedPath : ParseWideList(ReadEnvironmentVariable(L"ANTIVIRUS_SCAN_EXCLUDE_PATHS"))) {
+    config.scanExcludedPaths.emplace_back(excludedPath);
+  }
 
   const auto runtimeRootOverridden =
       runtimeDatabasePathOverridden || stateFilePathOverridden || telemetryQueuePathOverridden ||
@@ -423,6 +427,20 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   }
   config.quarantineRootPath = ResolveRuntimePath(config.quarantineRootPath, moduleHandle, preferredRuntimeRoot);
   config.evidenceRootPath = ResolveRuntimePath(config.evidenceRootPath, moduleHandle, preferredRuntimeRoot);
+
+  const auto appendScanExclusion = [&config](const std::filesystem::path& path) {
+    if (!path.empty()) {
+      config.scanExcludedPaths.push_back(path);
+    }
+  };
+
+  appendScanExclusion(installRoot);
+  appendScanExclusion(config.runtimeDatabasePath);
+  appendScanExclusion(config.stateFilePath);
+  appendScanExclusion(config.telemetryQueuePath);
+  appendScanExclusion(config.updateRootPath);
+  appendScanExclusion(config.quarantineRootPath);
+  appendScanExclusion(config.evidenceRootPath);
 
   if (preferredRuntimeRoot.has_value()) {
     PersistRuntimeRootMarker(*preferredRuntimeRoot, installRoot);

@@ -27,6 +27,7 @@ struct AgentConfig {
   bool isolationAllowLoopback{true};
   std::vector<std::wstring> isolationAllowedRemoteAddresses{};
   std::vector<std::wstring> isolationAllowedApplications{};
+  std::vector<std::filesystem::path> scanExcludedPaths{};
 };
 
 AgentConfig LoadAgentConfig();

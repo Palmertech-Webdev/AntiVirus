@@ -11,6 +11,23 @@ function formatDateTime(value: string | null) {
   return value ? new Date(value).toLocaleString() : "Awaiting sync";
 }
 
+function riskTone(value: string | null) {
+  switch (value) {
+    case "critical":
+      return "critical";
+    case "high":
+      return "high";
+    case "elevated":
+      return "warning";
+    case "guarded":
+      return "default";
+    case "low":
+      return "low";
+    default:
+      return "unknown";
+  }
+}
+
 export default function DevicesView() {
   const { snapshot, source, refreshing, refreshSnapshot } = useConsoleData();
   const [query, setQuery] = useState("");
@@ -37,7 +54,11 @@ export default function DevicesView() {
       policyRevision={snapshot.defaultPolicy.revision}
       statusItems={[
         { label: `${snapshot.devices.length} reporting devices` },
-        { label: `${model.metrics.devicesAtRisk} at risk`, tone: model.metrics.devicesAtRisk > 0 ? "warning" : "default" }
+        { label: `${model.metrics.devicesAtRisk} at risk`, tone: model.metrics.devicesAtRisk > 0 ? "warning" : "default" },
+        {
+          label: `${snapshot.devices.filter((device) => device.riskBand === "critical").length} critical`,
+          tone: snapshot.devices.some((device) => device.riskBand === "critical") ? "danger" : "default"
+        }
       ]}
       drawer={
         selectedDevice ? (
@@ -52,8 +73,16 @@ export default function DevicesView() {
                   <dd>{selectedDevice.healthState}</dd>
                 </div>
                 <div>
-                  <dt>Posture</dt>
-                  <dd>{selectedDevice.postureState}</dd>
+                  <dt>Risk band</dt>
+                  <dd>{selectedDevice.riskBand ?? "pending"}</dd>
+                </div>
+                <div>
+                  <dt>Risk score</dt>
+                  <dd>{selectedDevice.riskScore ?? "--"}</dd>
+                </div>
+                <div>
+                  <dt>Confidence</dt>
+                  <dd>{selectedDevice.confidenceScore != null ? `${selectedDevice.confidenceScore}%` : "--"}</dd>
                 </div>
                 <div>
                   <dt>Open alerts</dt>
@@ -93,7 +122,9 @@ export default function DevicesView() {
                 <th>Device name</th>
                 <th>OS</th>
                 <th>Sensor status</th>
-                <th>Risk level</th>
+                <th>Risk score</th>
+                <th>Risk band</th>
+                <th>Confidence</th>
                 <th>Last seen</th>
                 <th>Incidents</th>
                 <th>Policy</th>
@@ -120,8 +151,12 @@ export default function DevicesView() {
                     <span className={`state-chip tone-${device.healthState}`}>{device.healthState}</span>
                   </td>
                   <td>
-                    <span className={`state-chip tone-${device.postureState}`}>{device.postureState}</span>
+                    <strong>{device.riskScore ?? "--"}</strong>
                   </td>
+                  <td>
+                    <span className={`state-chip tone-${riskTone(device.riskBand)}`}>{device.riskBand ?? "pending"}</span>
+                  </td>
+                  <td>{device.confidenceScore != null ? `${device.confidenceScore}%` : "--"}</td>
                   <td>{formatDateTime(device.lastSeenAt)}</td>
                   <td>{device.openAlertCount}</td>
                   <td>{device.policyName}</td>

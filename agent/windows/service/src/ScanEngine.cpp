@@ -104,6 +104,66 @@ bool TrustedPath(const std::filesystem::path& path) {
          Contains(lower, L"\\program files (x86)\\");
 }
 
+std::wstring NormalizePathForComparison(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return {};
+  }
+
+  std::error_code error;
+  auto normalized = std::filesystem::absolute(path, error);
+  if (error) {
+    normalized = path;
+  }
+
+  normalized = normalized.lexically_normal();
+  auto value = ToLowerCopy(normalized.wstring());
+  std::replace(value.begin(), value.end(), L'/', L'\\');
+  while (value.size() > 1 && value.back() == L'\\') {
+    if (value.size() == 3 && value[1] == L':') {
+      break;
+    }
+    if (value.size() == 2 && value[0] == L'\\' && value[1] == L'\\') {
+      break;
+    }
+    value.pop_back();
+  }
+
+  return value;
+}
+
+bool PathIsWithinRoot(const std::wstring& candidate, const std::wstring& root) {
+  if (candidate.empty() || root.empty()) {
+    return false;
+  }
+
+  if (candidate == root) {
+    return true;
+  }
+
+  std::wstring rootPrefix = root;
+  if (!rootPrefix.empty() && rootPrefix.back() != L'\\') {
+    rootPrefix.push_back(L'\\');
+  }
+
+  return candidate.starts_with(rootPrefix);
+}
+
+bool IsExcludedPath(const std::filesystem::path& path, const std::vector<std::filesystem::path>& exclusions) {
+  const auto normalizedPath = NormalizePathForComparison(path);
+  if (normalizedPath.empty()) {
+    return false;
+  }
+
+  for (const auto& exclusion : exclusions) {
+    const auto normalizedExclusion = NormalizePathForComparison(exclusion);
+    if (PathIsWithinRoot(normalizedPath, normalizedExclusion)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool ExecutableExt(const std::wstring& ext) {
   return ext == L".exe" || ext == L".dll" || ext == L".scr" || ext == L".msi" || ext == L".com";
 }
@@ -549,7 +609,12 @@ std::wstring GuessTechnique(const FileData& file) {
 
 }  // namespace
 
-std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy) {
+std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
+                                    const std::vector<std::filesystem::path>& excludedPaths) {
+  if (IsExcludedPath(path, excludedPaths)) {
+    return std::nullopt;
+  }
+
   const auto loaded = LoadFileData(path);
   if (!loaded.has_value()) {
     return std::nullopt;
@@ -789,15 +854,29 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   return finding;
 }
 
-std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy) {
-  return ScanTargets(targets, policy, {});
+std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy) {
+  return ScanFile(path, policy, {});
 }
 
 std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy,
                                      const ScanProgressCallback& progressCallback) {
+  return ScanTargets(targets, policy, progressCallback, {});
+}
+
+std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy) {
+  return ScanTargets(targets, policy, ScanProgressCallback{}, {});
+}
+
+std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy,
+                                     const ScanProgressCallback& progressCallback,
+                                     const std::vector<std::filesystem::path>& excludedPaths) {
   std::vector<std::filesystem::path> files;
   for (const auto& target : targets) {
     std::error_code error;
+    if (IsExcludedPath(target, excludedPaths)) {
+      continue;
+    }
+
     if (std::filesystem::is_regular_file(target, error)) {
       files.push_back(target);
       continue;
@@ -816,8 +895,19 @@ std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& t
         continue;
       }
 
+      const auto entryPath = iterator->path();
+      if (IsExcludedPath(entryPath, excludedPaths)) {
+        if (iterator->is_directory(error)) {
+          iterator.disable_recursion_pending();
+        }
+        if (error) {
+          error.clear();
+        }
+        continue;
+      }
+
       if (iterator->is_regular_file(error)) {
-        files.push_back(iterator->path());
+        files.push_back(entryPath);
       }
 
       if (error) {
@@ -841,7 +931,7 @@ std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& t
       });
     }
 
-    if (const auto finding = ScanFile(file, policy); finding.has_value()) {
+    if (const auto finding = ScanFile(file, policy, excludedPaths); finding.has_value()) {
       findings.push_back(*finding);
     }
   }

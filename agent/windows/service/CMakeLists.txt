@@ -56,6 +56,8 @@ add_library(antivirus-agent-core STATIC
   src/ScanEngine.cpp
   src/SelfTestRunner.cpp
   src/StringUtils.cpp
+  src/ServiceInventory.cpp
+  src/ServiceSnapshotCollector.cpp
   src/TelemetryQueueStore.cpp
   src/UpdaterService.cpp
   src/WscCoexistenceManager.cpp
