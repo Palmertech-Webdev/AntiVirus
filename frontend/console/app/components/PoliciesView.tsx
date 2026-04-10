@@ -26,6 +26,11 @@ export default function PoliciesView() {
   const [newScriptInspection, setNewScriptInspection] = useState(true);
   const [newNetworkContainment, setNewNetworkContainment] = useState(true);
   const [newQuarantineOnMalicious, setNewQuarantineOnMalicious] = useState(true);
+  const [newPrivilegeHardeningEnabled, setNewPrivilegeHardeningEnabled] = useState(false);
+  const [newPamLiteEnabled, setNewPamLiteEnabled] = useState(false);
+  const [newDenyHighRiskElevation, setNewDenyHighRiskElevation] = useState(false);
+  const [newDenyUnsignedElevation, setNewDenyUnsignedElevation] = useState(false);
+  const [newRequireBreakGlassEscrow, setNewRequireBreakGlassEscrow] = useState(true);
 
   const policies = snapshot.policies;
   const currentPolicy = policies.find((item) => item.id === selectedPolicyId) ?? policies[0] ?? null;
@@ -38,6 +43,11 @@ export default function PoliciesView() {
   const [policyScriptInspection, setPolicyScriptInspection] = useState(true);
   const [policyNetworkContainment, setPolicyNetworkContainment] = useState(true);
   const [policyQuarantineOnMalicious, setPolicyQuarantineOnMalicious] = useState(true);
+  const [policyPrivilegeHardeningEnabled, setPolicyPrivilegeHardeningEnabled] = useState(false);
+  const [policyPamLiteEnabled, setPolicyPamLiteEnabled] = useState(false);
+  const [policyDenyHighRiskElevation, setPolicyDenyHighRiskElevation] = useState(false);
+  const [policyDenyUnsignedElevation, setPolicyDenyUnsignedElevation] = useState(false);
+  const [policyRequireBreakGlassEscrow, setPolicyRequireBreakGlassEscrow] = useState(true);
 
   useEffect(() => {
     if (!selectedPolicyId && policies[0]) {
@@ -57,6 +67,11 @@ export default function PoliciesView() {
     setPolicyScriptInspection(currentPolicy.scriptInspection);
     setPolicyNetworkContainment(currentPolicy.networkContainment);
     setPolicyQuarantineOnMalicious(currentPolicy.quarantineOnMalicious);
+    setPolicyPrivilegeHardeningEnabled(currentPolicy.privilegeHardeningEnabled);
+    setPolicyPamLiteEnabled(currentPolicy.pamLiteEnabled);
+    setPolicyDenyHighRiskElevation(currentPolicy.denyHighRiskElevation);
+    setPolicyDenyUnsignedElevation(currentPolicy.denyUnsignedElevation);
+    setPolicyRequireBreakGlassEscrow(currentPolicy.requireBreakGlassEscrow);
     setSelectedDeviceIds(currentPolicy.assignedDeviceIds);
   }, [currentPolicy]);
 
@@ -137,6 +152,11 @@ export default function PoliciesView() {
           <strong className="metric-number">{policies.length}</strong>
           <p className="muted-copy">Profiles now persisted in the backend instead of being a single static baseline.</p>
         </article>
+        <article className="metric-surface">
+          <span className="metric-label">PAM hardening</span>
+          <strong className="metric-number">{formatBoolean(snapshot.defaultPolicy.privilegeHardeningEnabled)}</strong>
+          <p className="muted-copy">No-standing-admin controls available on the current policy baseline.</p>
+        </article>
       </section>
 
       {actionMessage ? (
@@ -172,6 +192,16 @@ export default function PoliciesView() {
             <label className="field-group inline-toggle"><span>Script inspection</span><input type="checkbox" checked={newScriptInspection} onChange={(event) => setNewScriptInspection(event.target.checked)} /></label>
             <label className="field-group inline-toggle"><span>Network containment</span><input type="checkbox" checked={newNetworkContainment} onChange={(event) => setNewNetworkContainment(event.target.checked)} /></label>
             <label className="field-group inline-toggle"><span>Quarantine on malicious</span><input type="checkbox" checked={newQuarantineOnMalicious} onChange={(event) => setNewQuarantineOnMalicious(event.target.checked)} /></label>
+            <div className="field-group field-span-2">
+              <span className="section-kicker">Privilege access management</span>
+              <div className="tag-row">
+                <label className="inline-toggle"><span>PAM hardening</span><input type="checkbox" checked={newPrivilegeHardeningEnabled} onChange={(event) => setNewPrivilegeHardeningEnabled(event.target.checked)} /></label>
+                <label className="inline-toggle"><span>PAM lite</span><input type="checkbox" checked={newPamLiteEnabled} onChange={(event) => setNewPamLiteEnabled(event.target.checked)} /></label>
+                <label className="inline-toggle"><span>Deny high-risk elevation</span><input type="checkbox" checked={newDenyHighRiskElevation} onChange={(event) => setNewDenyHighRiskElevation(event.target.checked)} /></label>
+                <label className="inline-toggle"><span>Deny unsigned elevation</span><input type="checkbox" checked={newDenyUnsignedElevation} onChange={(event) => setNewDenyUnsignedElevation(event.target.checked)} /></label>
+                <label className="inline-toggle"><span>Require break-glass escrow</span><input type="checkbox" checked={newRequireBreakGlassEscrow} onChange={(event) => setNewRequireBreakGlassEscrow(event.target.checked)} /></label>
+              </div>
+            </div>
           </div>
           <div className="form-actions">
             <button
@@ -187,7 +217,12 @@ export default function PoliciesView() {
                     cloudLookup: newCloudLookup,
                     scriptInspection: newScriptInspection,
                     networkContainment: newNetworkContainment,
-                    quarantineOnMalicious: newQuarantineOnMalicious
+                    quarantineOnMalicious: newQuarantineOnMalicious,
+                    privilegeHardeningEnabled: newPrivilegeHardeningEnabled,
+                    pamLiteEnabled: newPamLiteEnabled,
+                    denyHighRiskElevation: newDenyHighRiskElevation,
+                    denyUnsignedElevation: newDenyUnsignedElevation,
+                    requireBreakGlassEscrow: newRequireBreakGlassEscrow
                   });
                   setNewPolicyName("");
                   setNewPolicyDescription("");
@@ -245,6 +280,16 @@ export default function PoliciesView() {
               <label className="field-group inline-toggle"><span>Script inspection</span><input type="checkbox" checked={policyScriptInspection} onChange={(event) => setPolicyScriptInspection(event.target.checked)} /></label>
               <label className="field-group inline-toggle"><span>Network containment</span><input type="checkbox" checked={policyNetworkContainment} onChange={(event) => setPolicyNetworkContainment(event.target.checked)} /></label>
               <label className="field-group inline-toggle"><span>Quarantine on malicious</span><input type="checkbox" checked={policyQuarantineOnMalicious} onChange={(event) => setPolicyQuarantineOnMalicious(event.target.checked)} /></label>
+              <div className="field-group field-span-2">
+                <span className="section-kicker">Privilege access management</span>
+                <div className="tag-row">
+                  <label className="inline-toggle"><span>PAM hardening</span><input type="checkbox" checked={policyPrivilegeHardeningEnabled} onChange={(event) => setPolicyPrivilegeHardeningEnabled(event.target.checked)} /></label>
+                  <label className="inline-toggle"><span>PAM lite</span><input type="checkbox" checked={policyPamLiteEnabled} onChange={(event) => setPolicyPamLiteEnabled(event.target.checked)} /></label>
+                  <label className="inline-toggle"><span>Deny high-risk elevation</span><input type="checkbox" checked={policyDenyHighRiskElevation} onChange={(event) => setPolicyDenyHighRiskElevation(event.target.checked)} /></label>
+                  <label className="inline-toggle"><span>Deny unsigned elevation</span><input type="checkbox" checked={policyDenyUnsignedElevation} onChange={(event) => setPolicyDenyUnsignedElevation(event.target.checked)} /></label>
+                  <label className="inline-toggle"><span>Require break-glass escrow</span><input type="checkbox" checked={policyRequireBreakGlassEscrow} onChange={(event) => setPolicyRequireBreakGlassEscrow(event.target.checked)} /></label>
+                </div>
+              </div>
             </div>
             <div className="form-actions">
               <button
@@ -260,7 +305,12 @@ export default function PoliciesView() {
                       cloudLookup: policyCloudLookup,
                       scriptInspection: policyScriptInspection,
                       networkContainment: policyNetworkContainment,
-                      quarantineOnMalicious: policyQuarantineOnMalicious
+                      quarantineOnMalicious: policyQuarantineOnMalicious,
+                      privilegeHardeningEnabled: policyPrivilegeHardeningEnabled,
+                      pamLiteEnabled: policyPamLiteEnabled,
+                      denyHighRiskElevation: policyDenyHighRiskElevation,
+                      denyUnsignedElevation: policyDenyUnsignedElevation,
+                      requireBreakGlassEscrow: policyRequireBreakGlassEscrow
                     });
                   });
                 }}
