@@ -1064,149 +1064,6 @@ export function buildServer(options: BuildServerOptions = {}) {
 
   app.get("/api/v1/scan-history", async (request, reply) => {
     const parsed = telemetryQuerySchema.safeParse(request.query);
-
-      app.post("/api/v1/admin/auth/login", async (request, reply) => {
-        const body = adminLoginRequestSchema.safeParse(request.body);
-
-        if (!body.success) {
-          return sendValidationError(reply, body.error.flatten());
-        }
-
-        try {
-          return reply.code(201).send(
-            await store.loginAdmin(
-              body.data,
-              extractObservedRemoteAddress(request),
-              typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
-            )
-          );
-        } catch (error) {
-          if (error instanceof AdminAuthenticationError) {
-            return reply.code(401).send({
-              error: "admin_auth_failed",
-              details: error.message
-            });
-          }
-
-          throw error;
-        }
-      });
-
-      app.get("/api/v1/admin/auth/me", async (request, reply) => {
-        const token = extractAdminSessionToken(request);
-        if (!token) {
-          return sendAdminUnauthorized(reply);
-        }
-
-        const session = await store.resolveAdminSession(
-          token,
-          extractObservedRemoteAddress(request),
-          typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
-        );
-
-        if (!session) {
-          return sendAdminUnauthorized(reply, "Admin session is invalid or expired");
-        }
-
-        return session;
-      });
-
-      app.post("/api/v1/admin/auth/logout", async (request, reply) => {
-        const token = extractAdminSessionToken(request);
-        if (!token) {
-          return sendAdminUnauthorized(reply);
-        }
-
-        const revoked = await store.logoutAdminSession(token, extractObservedRemoteAddress(request));
-        return {
-          revoked
-        };
-      });
-
-      app.get("/api/v1/admin/sessions", async (request, reply) => {
-        const actor = await requireAdminActor(request, reply, store, ["admin"]);
-        if (!actor) {
-          return;
-        }
-
-        return {
-          items: await store.listAdminSessions()
-        };
-      });
-
-      app.get("/api/v1/admin/audit", async (request, reply) => {
-        const actor = await requireAdminActor(request, reply, store, ["admin", "analyst", "operator", "read_only"]);
-        if (!actor) {
-          return;
-        }
-
-        const parsed = adminLimitQuerySchema.safeParse(request.query);
-        if (!parsed.success) {
-          return sendValidationError(reply, parsed.error.flatten());
-        }
-
-        return {
-          items: await store.listAdminAuditEvents(parsed.data.limit)
-        };
-      });
-
-      app.get("/api/v1/admin/api-keys", async (request, reply) => {
-        const actor = await requireAdminActor(request, reply, store, ["admin"]);
-        if (!actor) {
-          return;
-        }
-
-        return {
-          items: await store.listAdminApiKeys()
-        };
-      });
-
-      app.post("/api/v1/admin/api-keys", async (request, reply) => {
-        const actor = await requireAdminActor(request, reply, store, ["admin"]);
-        if (!actor) {
-          return;
-        }
-
-        const body = adminApiKeyCreateRequestSchema.safeParse(request.body);
-        if (!body.success) {
-          return sendValidationError(reply, body.error.flatten());
-        }
-
-        try {
-          return reply.code(201).send(
-            await store.createAdminApiKey(body.data, actor, extractObservedRemoteAddress(request))
-          );
-        } catch (error) {
-          if (error instanceof AdminAuthorizationError) {
-            return sendAdminForbidden(reply);
-          }
-
-          throw error;
-        }
-      });
-
-      app.post("/api/v1/admin/api-keys/:apiKeyId/revoke", async (request, reply) => {
-        const params = z.object({ apiKeyId: z.string().min(1) }).safeParse(request.params);
-        if (!params.success) {
-          return sendValidationError(reply, params.error.flatten());
-        }
-
-        const actor = await requireAdminActor(request, reply, store, ["admin"]);
-        if (!actor) {
-          return;
-        }
-
-        try {
-          return await store.revokeAdminApiKey(params.data.apiKeyId, actor);
-        } catch (error) {
-          if (error instanceof AdminAuthorizationError) {
-            return sendAdminForbidden(reply);
-          }
-
-          throw error;
-        }
-      });
-
     if (!parsed.success) {
       return sendValidationError(reply, parsed.error.flatten());
     }
@@ -1214,6 +1071,148 @@ export function buildServer(options: BuildServerOptions = {}) {
     return {
       items: await store.listScanHistory(parsed.data.deviceId, parsed.data.limit)
     };
+  });
+
+  app.post("/api/v1/admin/auth/login", async (request, reply) => {
+    const body = adminLoginRequestSchema.safeParse(request.body);
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.loginAdmin(
+          body.data,
+          extractObservedRemoteAddress(request),
+          typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
+        )
+      );
+    } catch (error) {
+      if (error instanceof AdminAuthenticationError) {
+        return reply.code(401).send({
+          error: "admin_auth_failed",
+          details: error.message
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  app.get("/api/v1/admin/auth/me", async (request, reply) => {
+    const token = extractAdminSessionToken(request);
+    if (!token) {
+      return sendAdminUnauthorized(reply);
+    }
+
+    const session = await store.resolveAdminSession(
+      token,
+      extractObservedRemoteAddress(request),
+      typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
+    );
+
+    if (!session) {
+      return sendAdminUnauthorized(reply, "Admin session is invalid or expired");
+    }
+
+    return session;
+  });
+
+  app.post("/api/v1/admin/auth/logout", async (request, reply) => {
+    const token = extractAdminSessionToken(request);
+    if (!token) {
+      return sendAdminUnauthorized(reply);
+    }
+
+    const revoked = await store.logoutAdminSession(token, extractObservedRemoteAddress(request));
+    return {
+      revoked
+    };
+  });
+
+  app.get("/api/v1/admin/sessions", async (request, reply) => {
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    return {
+      items: await store.listAdminSessions()
+    };
+  });
+
+  app.get("/api/v1/admin/audit", async (request, reply) => {
+    const actor = await requireAdminActor(request, reply, store, ["admin", "analyst", "operator", "read_only"]);
+    if (!actor) {
+      return;
+    }
+
+    const parsed = adminLimitQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return sendValidationError(reply, parsed.error.flatten());
+    }
+
+    return {
+      items: await store.listAdminAuditEvents(parsed.data.limit)
+    };
+  });
+
+  app.get("/api/v1/admin/api-keys", async (request, reply) => {
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    return {
+      items: await store.listAdminApiKeys()
+    };
+  });
+
+  app.post("/api/v1/admin/api-keys", async (request, reply) => {
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    const body = adminApiKeyCreateRequestSchema.safeParse(request.body);
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    try {
+      return reply.code(201).send(
+        await store.createAdminApiKey(body.data, actor, extractObservedRemoteAddress(request))
+      );
+    } catch (error) {
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/admin/api-keys/:apiKeyId/revoke", async (request, reply) => {
+    const params = z.object({ apiKeyId: z.string().min(1) }).safeParse(request.params);
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    try {
+      return await store.revokeAdminApiKey(params.data.apiKeyId, actor);
+    } catch (error) {
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
+      }
+
+      throw error;
+    }
   });
 
   app.get("/api/v1/policies/default", async () => store.getDefaultPolicy());

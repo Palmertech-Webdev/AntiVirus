@@ -7,6 +7,7 @@ import type {
   AdminAuditEventSummary,
   AdminLoginRequest,
   AdminLoginResponse,
+  AdminSessionStateResponse,
   CreatePolicyRequest,
   CreateScriptRequest,
   DashboardSnapshot,
@@ -244,8 +245,8 @@ export async function loginAdmin(request: AdminLoginRequest): Promise<AdminLogin
   return response;
 }
 
-export async function loadAdminSession(): Promise<AdminLoginResponse> {
-  return requestJson<AdminLoginResponse>("/admin/auth/me");
+export async function loadAdminSession(): Promise<AdminSessionStateResponse> {
+  return requestJson<AdminSessionStateResponse>("/admin/auth/me");
 }
 
 export async function logoutAdmin(): Promise<{ revoked: boolean }> {

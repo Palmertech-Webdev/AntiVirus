@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { buildServer } from "./app.ts";
+import { DEFAULT_ADMIN_MFA_SECRET, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, generateTotpCode } from "./adminAuth.ts";
 import { createFileBackedControlPlaneStore } from "./controlPlaneStore.ts";
 import { scoreDeviceRisk } from "./deviceRiskScoring.ts";
 import { createFileBackedMailStore } from "./mailStore.ts";
@@ -35,9 +36,12 @@ async function createTestApp() {
 
   await app.ready();
 
+  const adminHeaders = await loginBootstrapAdmin(app);
+
   return {
     app,
     stateFilePath,
+    adminHeaders,
     async cleanup() {
       await app.close();
       await rm(tempDir, { recursive: true, force: true });
@@ -71,9 +75,12 @@ async function createTestAppWithState(rawState: object) {
 
   await app.ready();
 
+  const adminHeaders = await loginBootstrapAdmin(app);
+
   return {
     app,
     stateFilePath,
+    adminHeaders,
     async cleanup() {
       await app.close();
       await rm(tempDir, { recursive: true, force: true });
@@ -107,14 +114,33 @@ async function createTestAppWithRawState(rawStateText: string) {
 
   await app.ready();
 
+  const adminHeaders = await loginBootstrapAdmin(app);
+
   return {
     app,
     stateFilePath,
+    adminHeaders,
     async cleanup() {
       await app.close();
       await rm(tempDir, { recursive: true, force: true });
     }
   };
+}
+
+async function loginBootstrapAdmin(app: { inject: (options: { method: string; url: string; payload?: unknown }) => Promise<{ statusCode: number; json(): unknown }> }) {
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/v1/admin/auth/login",
+    payload: {
+      username: DEFAULT_ADMIN_USERNAME,
+      password: DEFAULT_ADMIN_PASSWORD,
+      mfaCode: generateTotpCode(DEFAULT_ADMIN_MFA_SECRET)
+    }
+  });
+
+  assert.equal(response.statusCode, 201);
+  const payload = response.json() as { accessToken: string };
+  return { "x-admin-session-token": payload.accessToken };
 }
 
 function deviceAuthHeaders(enrollment: { deviceApiKey?: string }) {
@@ -860,6 +886,7 @@ test("device commands can be queued, polled, completed, and quarantine inventory
   const queueResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${deviceId}/commands`,
+    headers: harness.adminHeaders,
     payload: {
       type: "scan.targeted",
       issuedBy: "soc-tier3",
@@ -1258,6 +1285,7 @@ test("policies and stored scripts can be managed and dispatched to endpoints", a
   const createPolicyResponse = await harness.app.inject({
     method: "POST",
     url: "/api/v1/policies",
+    headers: harness.adminHeaders,
     payload: {
       name: "High Containment",
       description: "Aggressive response profile for high-risk devices.",
@@ -1290,6 +1318,7 @@ test("policies and stored scripts can be managed and dispatched to endpoints", a
   const assignPolicyResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/policies/${createdPolicy.id}/assign`,
+    headers: harness.adminHeaders,
     payload: {
       deviceIds: [enrollment.deviceId]
     }
@@ -1301,6 +1330,7 @@ test("policies and stored scripts can be managed and dispatched to endpoints", a
   const createScriptResponse = await harness.app.inject({
     method: "POST",
     url: "/api/v1/scripts",
+    headers: harness.adminHeaders,
     payload: {
       name: "Collect triage package",
       description: "Collect a quick triage bundle from the endpoint.",
@@ -1316,6 +1346,7 @@ test("policies and stored scripts can be managed and dispatched to endpoints", a
   const updateScriptResponse = await harness.app.inject({
     method: "PATCH",
     url: `/api/v1/scripts/${createdScript.id}`,
+    headers: harness.adminHeaders,
     payload: {
       description: "Collect a quick triage bundle and stage it for upload."
     }
@@ -1327,6 +1358,7 @@ test("policies and stored scripts can be managed and dispatched to endpoints", a
   const runScriptResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/actions/run-script`,
+    headers: harness.adminHeaders,
     payload: {
       scriptId: createdScript.id,
       issuedBy: "soc-tier3"
@@ -1483,6 +1515,7 @@ test("software automation routes queue search, update, uninstall, and block comm
   const searchResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/actions/software-search-updates`,
+    headers: harness.adminHeaders,
     payload
   });
   assert.equal(searchResponse.statusCode, 201);
@@ -1491,6 +1524,7 @@ test("software automation routes queue search, update, uninstall, and block comm
   const updateResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/actions/software-update`,
+    headers: harness.adminHeaders,
     payload
   });
   assert.equal(updateResponse.statusCode, 201);
@@ -1499,6 +1533,7 @@ test("software automation routes queue search, update, uninstall, and block comm
   const uninstallResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/actions/software-uninstall`,
+    headers: harness.adminHeaders,
     payload
   });
   assert.equal(uninstallResponse.statusCode, 201);
@@ -1507,6 +1542,7 @@ test("software automation routes queue search, update, uninstall, and block comm
   const blockResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/devices/${enrollment.deviceId}/actions/software-block`,
+    headers: harness.adminHeaders,
     payload
   });
   assert.equal(blockResponse.statusCode, 201);

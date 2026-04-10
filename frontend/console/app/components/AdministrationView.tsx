@@ -1,12 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import ConsoleShell from "./ConsoleShell";
 import { useConsoleData } from "./useConsoleData";
-import { apiBaseUrl, createScript, updateScript } from "../../lib/api";
+import {
+  apiBaseUrl,
+  clearStoredAdminSessionToken,
+  createAdminApiKey,
+  createScript,
+  getStoredAdminSessionToken,
+  listAdminApiKeys,
+  listAdminAuditEvents,
+  listAdminSessions,
+  loadAdminSession,
+  loginAdmin,
+  logoutAdmin,
+  revokeAdminApiKey,
+  updateScript
+} from "../../lib/api";
 import { buildConsoleViewModel } from "../../lib/console-model";
+import type { AdminApiKeySummary, AdminAuditEventSummary, AdminSessionStateResponse } from "../../lib/types";
 
 type AdminTabKey = "connectors" | "access" | "deployment" | "scripts" | "retention" | "api" | "audit";
 
@@ -42,6 +57,15 @@ export default function AdministrationView() {
   const [query, setQuery] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTabKey>("connectors");
   const [lastAction, setLastAction] = useState("Administration now uses internal tabs. Save actions currently update the local UI draft.");
+  const [adminSession, setAdminSession] = useState<AdminSessionStateResponse | null>(null);
+  const [adminSessions, setAdminSessions] = useState<AdminSessionStateResponse["session"][]>([]);
+  const [adminAuditEvents, setAdminAuditEvents] = useState<AdminAuditEventSummary[]>([]);
+  const [adminApiKeys, setAdminApiKeys] = useState<AdminApiKeySummary[]>([]);
+  const [adminLoginUsername, setAdminLoginUsername] = useState("admin@fenrir.local");
+  const [adminLoginPassword, setAdminLoginPassword] = useState("");
+  const [adminLoginMfaCode, setAdminLoginMfaCode] = useState("");
+  const [adminActionBusy, setAdminActionBusy] = useState(false);
+  const [lastIssuedApiKeyToken, setLastIssuedApiKeyToken] = useState("");
 
   const [identityTenant, setIdentityTenant] = useState("");
   const [identityClientId, setIdentityClientId] = useState("");
@@ -61,15 +85,6 @@ export default function AdministrationView() {
   const [evidenceDays, setEvidenceDays] = useState(90);
   const [newApiKeyName, setNewApiKeyName] = useState("");
   const [newApiKeyScopes, setNewApiKeyScopes] = useState("devices:read, incidents:read");
-  const [apiKeys, setApiKeys] = useState([
-    {
-      id: "key-ops-001",
-      name: "soc-automation",
-      scopes: "devices:read, incidents:read, commands:write",
-      tokenPreview: maskToken("socautomation001"),
-      lastUsed: snapshot.generatedAt
-    }
-  ]);
 
   const model = buildConsoleViewModel(snapshot);
   const selectedScript = snapshot.scripts.find((item) => item.id === selectedScriptId) ?? snapshot.scripts[0] ?? null;
@@ -83,6 +98,12 @@ export default function AdministrationView() {
   }, [snapshot.devices]);
 
   const auditFeed = useMemo(() => {
+    const adminEvents = adminAuditEvents.map((item) => ({
+      id: `admin-${item.id}`,
+      title: item.action.replaceAll(".", " "),
+      detail: `${item.actorName} · ${item.outcome}`,
+      occurredAt: item.occurredAt
+    }));
     const commandEvents = snapshot.recentCommands.map((item) => ({
       id: `command-${item.id}`,
       title: `${item.type.replaceAll(".", " ")} ${item.status.replaceAll("_", " ")}`,
@@ -96,10 +117,10 @@ export default function AdministrationView() {
       occurredAt: item.recordedAt
     }));
 
-    return [...commandEvents, ...evidenceEvents]
+    return [...adminEvents, ...commandEvents, ...evidenceEvents]
       .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
       .filter((item) => matchesQuery(query, [item.title, item.detail]));
-  }, [query, snapshot.recentCommands, snapshot.recentEvidence]);
+  }, [adminAuditEvents, query, snapshot.recentCommands, snapshot.recentEvidence]);
 
   const visibleTabs = adminTabs.filter((tab) => matchesQuery(query, [tab.label, tab.description]));
   const currentTab = visibleTabs.some((tab) => tab.key === activeTab) ? activeTab : (visibleTabs[0]?.key ?? "connectors");
@@ -117,23 +138,132 @@ export default function AdministrationView() {
     setLastAction(`${message} Backend persistence for administration settings is the next implementation step.`);
   }
 
-  function createApiKey() {
-    if (!newApiKeyName.trim()) {
-      setLastAction("Enter a key name before generating a new API token preview.");
+  async function refreshAdminState() {
+    if (!getStoredAdminSessionToken()) {
+      setAdminSession(null);
+      setAdminSessions([]);
+      setAdminAuditEvents([]);
+      setAdminApiKeys([]);
       return;
     }
 
-    const next = {
-      id: `key-${Date.now()}`,
-      name: newApiKeyName.trim(),
-      scopes: newApiKeyScopes.trim(),
-      tokenPreview: maskToken(`${newApiKeyName.trim()}${Date.now()}`),
-      lastUsed: snapshot.generatedAt
-    };
+    try {
+      const [session, sessions, auditEvents, apiKeys] = await Promise.all([
+        loadAdminSession(),
+        listAdminSessions(),
+        listAdminAuditEvents(50),
+        listAdminApiKeys()
+      ]);
 
-    setApiKeys((current) => [next, ...current]);
-    setNewApiKeyName("");
-    setLastAction(`Generated local API key draft for ${next.name}.`);
+      setAdminSession(session);
+      setAdminSessions(sessions);
+      setAdminAuditEvents(auditEvents);
+      setAdminApiKeys(apiKeys);
+    } catch {
+      clearStoredAdminSessionToken();
+      setAdminSession(null);
+      setAdminSessions([]);
+      setAdminAuditEvents([]);
+      setAdminApiKeys([]);
+      setLastIssuedApiKeyToken("");
+    }
+  }
+
+  async function handleAdminLogin() {
+    if (!adminLoginUsername.trim() || !adminLoginPassword.trim() || !adminLoginMfaCode.trim()) {
+      setLastAction("Enter username, password, and MFA code to sign in.");
+      return;
+    }
+
+    setAdminActionBusy(true);
+    try {
+      const session = await loginAdmin({
+        username: adminLoginUsername.trim(),
+        password: adminLoginPassword,
+        mfaCode: adminLoginMfaCode.trim(),
+        sessionMinutes
+      });
+
+      setAdminSession(session);
+      setAdminLoginPassword("");
+      setAdminLoginMfaCode("");
+      await refreshAdminState();
+      setLastAction(`Signed in as ${session.principal.displayName}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setLastAction(`Admin sign-in failed: ${message}`);
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function handleAdminLogout() {
+    setAdminActionBusy(true);
+    try {
+      await logoutAdmin();
+      clearStoredAdminSessionToken();
+      setAdminSession(null);
+      setAdminSessions([]);
+      setAdminAuditEvents([]);
+      setAdminApiKeys([]);
+        setLastIssuedApiKeyToken("");
+        setLastAction("Signed out of the admin console.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setLastAction(`Admin sign-out failed: ${message}`);
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function handleCreateApiKey() {
+    if (!newApiKeyName.trim()) {
+      setLastAction("Enter a key name before creating an API key.");
+      return;
+    }
+
+    const scopes = newApiKeyScopes
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+
+    if (scopes.length === 0) {
+      setLastAction("Enter at least one scope before creating an API key.");
+      return;
+    }
+
+    setAdminActionBusy(true);
+    try {
+      const created = await createAdminApiKey({
+        name: newApiKeyName.trim(),
+        scopes,
+        sessionMinutes
+      });
+
+      setAdminApiKeys((current) => [created.apiKey, ...current.filter((item) => item.id !== created.apiKey.id)]);
+      setNewApiKeyName("");
+      setLastIssuedApiKeyToken(created.accessKey);
+      setLastAction(`Created API key ${created.apiKey.name}. Token preview ${maskToken(created.accessKey)}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setLastAction(`API key creation failed: ${message}`);
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function handleRevokeApiKey(apiKeyId: string) {
+    setAdminActionBusy(true);
+    try {
+      const revoked = await revokeAdminApiKey(apiKeyId);
+      setAdminApiKeys((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
+      setLastAction(`Revoked API key ${revoked.name}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setLastAction(`API key revocation failed: ${message}`);
+    } finally {
+      setAdminActionBusy(false);
+    }
   }
 
   async function saveScript() {
@@ -168,6 +298,17 @@ export default function AdministrationView() {
       setLastAction(`Script save failed: ${message}`);
     }
   }
+
+  useEffect(() => {
+    if (!getStoredAdminSessionToken()) {
+      return;
+    }
+
+    void refreshAdminState().catch((error) => {
+      const message = error instanceof Error ? error.message : "Request failed";
+      setLastAction(`Admin session restore failed: ${message}`);
+    });
+  }, []);
 
   return (
     <ConsoleShell
@@ -309,16 +450,57 @@ export default function AdministrationView() {
             <article className="surface-card inset-card">
               <p className="section-kicker">Access controls</p>
               <h4>Authentication and sessions</h4>
-              <div className="field-grid">
-                <label className="field-group inline-toggle"><span>Enable SSO</span><input type="checkbox" checked={ssoEnabled} onChange={(event) => setSsoEnabled(event.target.checked)} /></label>
-                <label className="field-group inline-toggle"><span>Require MFA</span><input type="checkbox" checked={mfaRequired} onChange={(event) => setMfaRequired(event.target.checked)} /></label>
-                <label className="field-group">
-                  <span>Session minutes</span>
-                  <input className="admin-input" type="number" min={30} value={sessionMinutes} onChange={(event) => setSessionMinutes(Number(event.target.value) || 30)} />
-                </label>
-              </div>
+              {adminSession ? (
+                <div className="list-stack">
+                  <article className="mini-card">
+                    <div className="row-between">
+                      <strong>{adminSession.principal.displayName}</strong>
+                      <span className="state-chip tone-default">{adminSession.principal.roles.join(", ")}</span>
+                    </div>
+                    <p>{adminSession.principal.username}</p>
+                    <span className="mini-meta">Session expires {formatDateTime(adminSession.session.expiresAt)}</span>
+                    <span className="mini-meta">{adminSessions.filter((item) => !item.revokedAt).length} active session(s) in state</span>
+                  </article>
+                  <div className="field-grid">
+                    <label className="field-group inline-toggle"><span>Enable SSO</span><input type="checkbox" checked={ssoEnabled} onChange={(event) => setSsoEnabled(event.target.checked)} /></label>
+                    <label className="field-group inline-toggle"><span>Require MFA</span><input type="checkbox" checked={mfaRequired} onChange={(event) => setMfaRequired(event.target.checked)} /></label>
+                    <label className="field-group">
+                      <span>Session minutes</span>
+                      <input className="admin-input" type="number" min={30} value={sessionMinutes} onChange={(event) => setSessionMinutes(Number(event.target.value) || 30)} />
+                    </label>
+                  </div>
+                </div>
+              ) : (
+                <div className="field-grid">
+                  <label className="field-group">
+                    <span>Username</span>
+                    <input className="admin-input" value={adminLoginUsername} onChange={(event) => setAdminLoginUsername(event.target.value)} placeholder="admin@fenrir.local" />
+                  </label>
+                  <label className="field-group">
+                    <span>Password</span>
+                    <input className="admin-input" type="password" value={adminLoginPassword} onChange={(event) => setAdminLoginPassword(event.target.value)} placeholder="Bootstrap password" />
+                  </label>
+                  <label className="field-group">
+                    <span>MFA code</span>
+                    <input className="admin-input" inputMode="numeric" value={adminLoginMfaCode} onChange={(event) => setAdminLoginMfaCode(event.target.value)} placeholder="123456" />
+                  </label>
+                  <label className="field-group">
+                    <span>Session minutes</span>
+                    <input className="admin-input" type="number" min={30} value={sessionMinutes} onChange={(event) => setSessionMinutes(Number(event.target.value) || 30)} />
+                  </label>
+                </div>
+              )}
               <div className="form-actions">
-                <button type="button" className="primary-link" onClick={() => saveDraft("Saved access control draft.")}>Save access</button>
+                {adminSession ? (
+                  <button type="button" className="primary-link" onClick={() => void handleAdminLogout()} disabled={adminActionBusy}>
+                    Sign out
+                  </button>
+                ) : (
+                  <button type="button" className="primary-link" onClick={() => void handleAdminLogin()} disabled={adminActionBusy}>
+                    Sign in
+                  </button>
+                )}
+                <button type="button" className="secondary-link" onClick={() => saveDraft("Saved access control draft.")}>Save access</button>
               </div>
             </article>
 
@@ -502,22 +684,36 @@ export default function AdministrationView() {
                 </label>
               </div>
               <div className="form-actions">
-                <button type="button" className="primary-link" onClick={createApiKey}>Generate key</button>
+                <button type="button" className="primary-link" onClick={() => void handleCreateApiKey()} disabled={adminActionBusy || !adminSession}>
+                  Generate key
+                </button>
               </div>
+              {lastIssuedApiKeyToken ? <code className="hash-line">{lastIssuedApiKeyToken}</code> : null}
             </article>
 
             <article className="surface-card inset-card">
-              <p className="section-kicker">Issued key drafts</p>
+              <p className="section-kicker">Issued keys</p>
               <h4>Current tokens</h4>
               <div className="list-stack">
-                {apiKeys.filter((item) => matchesQuery(query, [item.name, item.scopes, item.tokenPreview])).map((item) => (
+                {adminApiKeys.filter((item) => matchesQuery(query, [item.name, item.scopes.join(", "), item.principalUsername])).map((item) => (
                   <article key={item.id} className="mini-card">
-                    <div className="row-between"><strong>{item.name}</strong><span className="state-chip tone-default">active</span></div>
-                    <p>{item.scopes}</p>
-                    <code className="hash-line">{item.tokenPreview}</code>
-                    <span className="mini-meta">Last used {formatDateTime(item.lastUsed)}</span>
+                    <div className="row-between">
+                      <strong>{item.name}</strong>
+                      <span className={`state-chip ${item.revokedAt ? "tone-warning" : "tone-default"}`}>{item.revokedAt ? "revoked" : "active"}</span>
+                    </div>
+                    <p>{item.principalUsername} · {item.scopes.join(", ")}</p>
+                    <span className="mini-meta">Created {formatDateTime(item.createdAt)}</span>
+                    <span className="mini-meta">{item.lastUsedAt ? `Last used ${formatDateTime(item.lastUsedAt)}` : "Never used"}</span>
+                    {!item.revokedAt ? (
+                      <div className="form-actions">
+                        <button type="button" className="secondary-link" onClick={() => void handleRevokeApiKey(item.id)} disabled={adminActionBusy}>
+                          Revoke
+                        </button>
+                      </div>
+                    ) : null}
                   </article>
                 ))}
+                {adminApiKeys.length === 0 ? <p className="empty-state">No API keys have been issued yet.</p> : null}
               </div>
             </article>
           </div>

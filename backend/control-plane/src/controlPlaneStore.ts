@@ -2754,7 +2754,7 @@ export function createFileBackedControlPlaneStore(
             roles: ["read_only"],
             enabled: false,
             createdAt: item.createdAt,
-            updatedAt: item.updatedAt
+            updatedAt: item.createdAt
           }
         );
       });
