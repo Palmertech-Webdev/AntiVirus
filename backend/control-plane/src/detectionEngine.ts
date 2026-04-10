@@ -235,6 +235,115 @@ const riskyFileRules = new Map<string, RiskyFileRule>([
   ]
 ]);
 
+function tacticIdForTechnique(technique: string | undefined) {
+  switch (technique) {
+    case "T1059.001":
+    case "T1059.003":
+    case "T1059":
+    case "T1218.005":
+    case "T1218.010":
+    case "T1218.011":
+    case "T1204.001":
+    case "T1204.002":
+      return "TA0002";
+    case "T1490":
+    case "T1486":
+      return "TA0040";
+    case "T1021.001":
+      return "TA0008";
+    case "T1071":
+    case "T1041":
+      return "TA0011";
+    default:
+      return undefined;
+  }
+}
+
+
+function readStringValue(payload: ParsedPayload | null, key: string) {
+  const value = payload?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function buildProcessContextSummary(record: TelemetryRecord) {
+  const parts: string[] = [];
+
+  if (record.processCommandLine) {
+    parts.push(`Command line: ${truncateText(record.processCommandLine, 120)}`);
+  }
+
+  if (record.processImagePath) {
+    parts.push(`Image path: ${record.processImagePath}`);
+  }
+
+  if (record.parentProcessImageName || record.parentProcessImagePath) {
+    parts.push(`Parent: ${record.parentProcessImageName ?? record.parentProcessImagePath}`);
+  }
+
+  if (record.processIntegrityLevel) {
+    parts.push(`Integrity: ${record.processIntegrityLevel}`);
+  }
+
+  if (record.processSigner) {
+    parts.push(`Signer: ${record.processSigner}`);
+  }
+
+  return parts.join(". ");
+}
+
+function classifyAmsiSubject(appName: string | undefined, contentName: string | undefined) {
+  const haystack = `${appName ?? ""} ${contentName ?? ""}`.toLowerCase();
+  if (haystack.includes("powershell") || haystack.includes("pwsh") || haystack.includes(".ps1")) {
+    return "PowerShell";
+  }
+
+  if (haystack.includes("wscript") || haystack.includes("cscript") || haystack.includes(".vbs") ||
+      haystack.includes(".vbe") || haystack.includes(".js") || haystack.includes(".jse")) {
+    return "WSH";
+  }
+
+  if (haystack.includes("winword") || haystack.includes("excel") || haystack.includes("powerpoint") ||
+      haystack.includes(".docm") || haystack.includes(".xlsm") || haystack.includes(".pptm")) {
+    return "Office";
+  }
+
+  if (haystack.includes("mshta") || haystack.includes(".hta")) {
+    return "HTA";
+  }
+
+  if (haystack.includes("cmd.exe") || haystack.includes(".bat") || haystack.includes(".cmd")) {
+    return "Command shell";
+  }
+
+  return appName?.trim() || contentName?.trim() || "";
+}
+
+function buildAmsiContextSummary(appName: string | undefined, contentName: string | undefined,
+                                 sourceType: string | undefined, preview: string | undefined) {
+  const parts: string[] = [];
+  if (appName) {
+    parts.push(`AMSI app: ${appName}`);
+  }
+  if (contentName) {
+    parts.push(`Content: ${contentName}`);
+  }
+  if (sourceType) {
+    parts.push(`Source type: ${sourceType}`);
+  }
+  if (preview) {
+    parts.push(`Preview: ${truncateText(preview, 120)}`);
+  }
+
+  return parts.join(". ");
+}
 const severityWeight: Record<AlertSeverity, number> = {
   low: 1,
   medium: 2,
@@ -281,6 +390,8 @@ function buildProcessAlert(record: TelemetryRecord): GeneratedAlertCandidate | n
     return null;
   }
 
+  const contextSummary = buildProcessContextSummary(record);
+
   return {
     id: randomUUID(),
     deviceId: record.deviceId,
@@ -290,8 +401,9 @@ function buildProcessAlert(record: TelemetryRecord): GeneratedAlertCandidate | n
     status: "new",
     hostname: record.hostname,
     detectedAt: record.occurredAt,
+    tacticId: tacticIdForTechnique(rule.technique),
     technique: rule.technique,
-    summary: `${record.summary} ${rule.detail}`
+    summary: contextSummary ? `${record.summary} ${rule.detail} ${contextSummary}` : `${record.summary} ${rule.detail}`
   };
 }
 
@@ -326,6 +438,7 @@ function buildFileAlert(record: TelemetryRecord): GeneratedAlertCandidate | null
     status: "new",
     hostname: record.hostname,
     detectedAt: record.occurredAt,
+    tacticId: tacticIdForTechnique(rule.technique),
     technique: rule.technique,
     summary: `${record.summary} ${fileName} has a monitored ${extension} extension. ${rule.detail}`
   };
@@ -338,6 +451,10 @@ function buildScanFindingAlert(record: TelemetryRecord): GeneratedAlertCandidate
 
   const payload = parsePayload(record.payloadJson);
   const rawPath = readString(payload, "path");
+  const appName = readStringValue(payload, "appName");
+  const contentName = readStringValue(payload, "contentName");
+  const sourceType = readStringValue(payload, "source");
+  const preview = readStringValue(payload, "preview");
   const disposition = readString(payload, "disposition")?.toLowerCase();
   const remediationStatus = readString(payload, "remediationStatus")?.toLowerCase();
   const techniqueId = readString(payload, "techniqueId");
@@ -348,11 +465,20 @@ function buildScanFindingAlert(record: TelemetryRecord): GeneratedAlertCandidate
     return null;
   }
 
-  const fileName = win32.basename(rawPath);
   const fingerprintBasis = sha256 && sha256.length > 0 ? sha256 : normalizeWindowsPath(rawPath);
+  const amsiSubject = record.source === "amsi-provider" ? classifyAmsiSubject(appName, contentName) : "";
+  const fileName = record.source === "amsi-provider"
+    ? (contentName && !contentName.toLowerCase().startsWith("memory://")
+        ? win32.basename(contentName)
+        : amsiSubject || win32.basename(rawPath))
+    : win32.basename(rawPath);
 
   let severity: AlertSeverity = "high";
   let title = "Suspicious file detected by on-demand scan";
+
+  if (record.source === "amsi-provider") {
+    title = `Suspicious ${amsiSubject || "script"} content detected after AMSI inspection`;
+  }
 
   if (techniqueId === "T1490") {
     severity = "critical";
@@ -370,20 +496,34 @@ function buildScanFindingAlert(record: TelemetryRecord): GeneratedAlertCandidate
       ? "Ransomware recovery-inhibition detected but remediation failed"
       : techniqueId === "T1486"
         ? "Possible ransomware artifact detected but quarantine failed"
-        : "Suspicious file detected but quarantine failed";
+        : record.source === "amsi-provider"
+          ? `Suspicious ${amsiSubject || "script"} content detected but AMSI remediation failed`
+          : "Suspicious file detected but quarantine failed";
   } else if ((remediationStatus === "quarantined" || disposition === "quarantine") &&
              techniqueId !== "T1490" &&
              techniqueId !== "T1486") {
     severity = "high";
-    title = techniqueId === "T1486" ? "Possible ransomware artifact quarantined" : "Suspicious file quarantined after on-demand scan";
+    title = record.source === "amsi-provider"
+      ? `Suspicious ${amsiSubject || "script"} content quarantined after AMSI inspection`
+      : techniqueId === "T1486"
+        ? "Possible ransomware artifact quarantined"
+        : "Suspicious file quarantined after on-demand scan";
   } else if (disposition === "block" && techniqueId !== "T1490" && techniqueId !== "T1486") {
     severity = "high";
-    title = "Suspicious file blocked by on-demand scan policy";
+    title = record.source === "amsi-provider"
+      ? `Suspicious ${amsiSubject || "script"} content blocked after AMSI inspection`
+      : "Suspicious file blocked by on-demand scan policy";
   }
 
-  let summary = `${record.summary} File: ${fileName}.`;
+  let summary = `${record.summary} ${record.source === "amsi-provider" ? "Subject" : "File"}: ${fileName}.`;
   if (sha256) {
     summary += ` SHA-256: ${sha256}.`;
+  }
+  if (record.source === "amsi-provider") {
+    const amsiSummary = buildAmsiContextSummary(appName, contentName, sourceType, preview);
+    if (amsiSummary) {
+      summary += ` ${amsiSummary}.`;
+    }
   }
   if (remediationStatus === "quarantined") {
     summary += " Local quarantine completed successfully.";
@@ -405,6 +545,7 @@ function buildScanFindingAlert(record: TelemetryRecord): GeneratedAlertCandidate
     status: "new",
     hostname: record.hostname,
     detectedAt: record.occurredAt,
+    tacticId: techniqueId ? tacticIdForTechnique(techniqueId) : undefined,
     technique: techniqueId && techniqueId !== "unknown" ? techniqueId : undefined,
     summary
   };

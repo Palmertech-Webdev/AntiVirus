@@ -62,13 +62,18 @@ export default function AlertsView() {
                 </div>
               </dl>
             </section>
-            {selectedAlert.deviceId ? (
-              <section className="drawer-panel">
-                <Link href={`/devices/${selectedAlert.deviceId}`} className="primary-link">
-                  Open device detail
+            <section className="drawer-panel">
+              <div className="action-stack">
+                <Link href={`/alerts/${selectedAlert.id}`} className="primary-link">
+                  Open alert detail
                 </Link>
-              </section>
-            ) : null}
+                {selectedAlert.deviceId ? (
+                  <Link href={`/devices/${selectedAlert.deviceId}`} className="secondary-link">
+                    Open device detail
+                  </Link>
+                ) : null}
+              </div>
+            </section>
           </div>
         ) : null
       }
@@ -98,10 +103,10 @@ export default function AlertsView() {
               {alerts.map((alert) => (
                 <tr key={alert.id}>
                   <td>
-                    <div className="table-primary">
+                    <Link href={`/alerts/${alert.id}`} className="table-primary">
                       <strong>{alert.title}</strong>
                       <span>{alert.summary}</span>
-                    </div>
+                    </Link>
                   </td>
                   <td>
                     <span className={`state-chip tone-${alert.severity}`}>{alert.severity}</span>

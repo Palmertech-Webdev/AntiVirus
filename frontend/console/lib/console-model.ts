@@ -25,6 +25,24 @@ export type NavigationKey =
   | "reports"
   | "administration";
 
+export type FenrirEdition = "free" | "standard" | "email_addon" | "identity_addon" | "full_admin";
+
+export interface FenrirFeatureSet {
+  edition: FenrirEdition;
+  showIncidents: boolean;
+  showEmail: boolean;
+  showIdentities: boolean;
+  showReports: boolean;
+  showAdministration: boolean;
+  showScripts: boolean;
+  showConnectors: boolean;
+  showAccess: boolean;
+  showDeployment: boolean;
+  showRetention: boolean;
+  showApiKeys: boolean;
+  showAudit: boolean;
+}
+
 export type IncidentStatus = "new" | "investigating" | "contained" | "resolved";
 export type TimelineCategory =
   | "alert"
@@ -138,20 +156,235 @@ interface IncidentSeed {
   timeline: IncidentTimelineEntry[];
 }
 
-const navItems: Array<{ key: NavigationKey; label: string; href: string; icon: NavigationIconName }> = [
-  { key: "dashboard", label: "Dashboard", href: "/", icon: "dashboard" },
-  { key: "incidents", label: "Incidents", href: "/incidents", icon: "incidents" },
-  { key: "devices", label: "Devices", href: "/devices", icon: "devices" },
-  { key: "identities", label: "Identities", href: "/identities", icon: "identities" },
-  { key: "email", label: "Email", href: "/email", icon: "email" },
-  { key: "alerts", label: "Alerts", href: "/alerts", icon: "alerts" },
-  { key: "policies", label: "Policies", href: "/policies", icon: "policies" },
-  { key: "reports", label: "Reports", href: "/reports", icon: "reports" },
-  { key: "administration", label: "Administration", href: "/administration", icon: "administration" }
+function parseEdition(rawValue: string | undefined | null): FenrirEdition {
+  const normalized = (rawValue ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "standard":
+      return "standard";
+    case "email_addon":
+      return "email_addon";
+    case "identity_addon":
+      return "identity_addon";
+    case "full_admin":
+      return "full_admin";
+    case "free":
+    default:
+      return "free";
+  }
+}
+
+export function getFenrirFeatureSet(edition: FenrirEdition = parseEdition(process.env.NEXT_PUBLIC_FENRIR_EDITION)) {
+  switch (edition) {
+    case "standard":
+      return {
+        edition,
+        showIncidents: true,
+        showEmail: false,
+        showIdentities: false,
+        showReports: true,
+        showAdministration: true,
+        showScripts: true,
+        showConnectors: false,
+        showAccess: false,
+        showDeployment: true,
+        showRetention: true,
+        showApiKeys: false,
+        showAudit: true
+      } satisfies FenrirFeatureSet;
+    case "email_addon":
+      return {
+        edition,
+        showIncidents: true,
+        showEmail: true,
+        showIdentities: false,
+        showReports: true,
+        showAdministration: true,
+        showScripts: true,
+        showConnectors: false,
+        showAccess: false,
+        showDeployment: true,
+        showRetention: true,
+        showApiKeys: false,
+        showAudit: true
+      } satisfies FenrirFeatureSet;
+    case "identity_addon":
+      return {
+        edition,
+        showIncidents: true,
+        showEmail: false,
+        showIdentities: true,
+        showReports: true,
+        showAdministration: true,
+        showScripts: true,
+        showConnectors: false,
+        showAccess: false,
+        showDeployment: true,
+        showRetention: true,
+        showApiKeys: false,
+        showAudit: true
+      } satisfies FenrirFeatureSet;
+    case "full_admin":
+      return {
+        edition,
+        showIncidents: true,
+        showEmail: true,
+        showIdentities: true,
+        showReports: true,
+        showAdministration: true,
+        showScripts: true,
+        showConnectors: true,
+        showAccess: true,
+        showDeployment: true,
+        showRetention: true,
+        showApiKeys: true,
+        showAudit: true
+      } satisfies FenrirFeatureSet;
+    case "free":
+    default:
+      return {
+        edition: "free",
+        showIncidents: false,
+        showEmail: false,
+        showIdentities: false,
+        showReports: false,
+        showAdministration: true,
+        showScripts: false,
+        showConnectors: false,
+        showAccess: false,
+        showDeployment: true,
+        showRetention: false,
+        showApiKeys: false,
+        showAudit: false
+      } satisfies FenrirFeatureSet;
+  }
+}
+
+const navItems: Array<{
+  key: NavigationKey;
+  label: (features: FenrirFeatureSet) => string;
+  href: string;
+  icon: NavigationIconName;
+  visible: (features: FenrirFeatureSet) => boolean;
+}> = [
+  { key: "dashboard", label: () => "Dashboard", href: "/", icon: "dashboard", visible: () => true },
+  {
+    key: "incidents",
+    label: () => "Incidents",
+    href: "/incidents",
+    icon: "incidents",
+    visible: (features) => features.showIncidents
+  },
+  { key: "devices", label: () => "Devices", href: "/devices", icon: "devices", visible: () => true },
+  {
+    key: "identities",
+    label: () => "Identities",
+    href: "/identities",
+    icon: "identities",
+    visible: (features) => features.showIdentities
+  },
+  { key: "email", label: () => "Email", href: "/email", icon: "email", visible: (features) => features.showEmail },
+  { key: "alerts", label: () => "Alerts", href: "/alerts", icon: "alerts", visible: () => true },
+  { key: "policies", label: () => "Policies", href: "/policies", icon: "policies", visible: () => true },
+  { key: "reports", label: () => "Reports", href: "/reports", icon: "reports", visible: (features) => features.showReports },
+  {
+    key: "administration",
+    label: (features) => (features.showAccess || features.showConnectors || features.showApiKeys ? "Administration" : "Settings"),
+    href: "/administration",
+    icon: "administration",
+    visible: (features) => features.showAdministration
+  }
 ];
 
-export function getNavigationItems() {
-  return navItems;
+export function getNavigationItems(features: FenrirFeatureSet = getFenrirFeatureSet()) {
+  return navItems.filter((item) => item.visible(features)).map((item) => ({
+    key: item.key,
+    label: item.label(features),
+    href: item.href,
+    icon: item.icon
+  }));
+}
+
+export interface AdministrationTabDefinition {
+  key: string;
+  label: string;
+  description: string;
+}
+
+const administrationTabs: Array<
+  AdministrationTabDefinition & { visible: (features: FenrirFeatureSet) => boolean; labelFor: (features: FenrirFeatureSet) => string; descriptionFor: (features: FenrirFeatureSet) => string }
+> = [
+  {
+    key: "connectors",
+    label: "Connectors",
+    description: "Identity, mail, and external signal sources.",
+    visible: (features) => features.showConnectors,
+    labelFor: () => "Connectors",
+    descriptionFor: () => "Identity, mail, and external signal sources."
+  },
+  {
+    key: "access",
+    label: "Access",
+    description: "SSO, MFA, RBAC, and operator sessions.",
+    visible: (features) => features.showAccess,
+    labelFor: () => "Access",
+    descriptionFor: () => "SSO, MFA, RBAC, and operator sessions."
+  },
+  {
+    key: "deployment",
+    label: "Deployment",
+    description: "Packages, rollout channels, and onboarding.",
+    visible: (features) => features.showDeployment,
+    labelFor: (features) => (features.edition === "free" ? "Settings" : "Deployment"),
+    descriptionFor: (features) =>
+      features.edition === "free"
+        ? "Basic protection settings, update posture, and install-time preferences."
+        : "Packages, rollout channels, and onboarding."
+  },
+  {
+    key: "scripts",
+    label: "Scripts",
+    description: "Stored endpoint scripts for remote response and maintenance.",
+    visible: (features) => features.showScripts,
+    labelFor: () => "Scripts",
+    descriptionFor: () => "Stored endpoint scripts for remote response and maintenance."
+  },
+  {
+    key: "retention",
+    label: "Retention",
+    description: "Telemetry, evidence, quarantine, and audit windows.",
+    visible: (features) => features.showRetention,
+    labelFor: (features) => (features.edition === "free" ? "Local Policies" : "Retention"),
+    descriptionFor: (features) =>
+      features.edition === "free"
+        ? "Local protection behavior and policy preferences."
+        : "Telemetry, evidence, quarantine, and audit windows."
+  },
+  {
+    key: "api",
+    label: "API Keys",
+    description: "Programmatic access and scope control.",
+    visible: (features) => features.showApiKeys,
+    labelFor: () => "API Keys",
+    descriptionFor: () => "Programmatic access and scope control."
+  },
+  {
+    key: "audit",
+    label: "Audit",
+    description: "Recent platform and operator activity.",
+    visible: (features) => features.showAudit,
+    labelFor: () => "Audit",
+    descriptionFor: () => "Recent platform and operator activity."
+  }
+];
+
+export function getAdministrationTabs(features: FenrirFeatureSet = getFenrirFeatureSet()) {
+  return administrationTabs
+    .filter((tab) => tab.visible(features))
+    .map((tab) => ({
+      key: tab.key,
+      label: tab.labelFor(features),
+      description: tab.descriptionFor(features)
+    }));
 }
 
 function severityWeight(value: AlertSeverity) {
@@ -534,6 +767,7 @@ function createAlertIncident(
 
   const tactics = new Set<string>(
     [
+      alert.tacticId,
       ...relatedEvidence.map((item) => item.tacticId),
       ...relatedScanHistory.map((item) => item.tacticId)
     ].filter((value): value is string => Boolean(value))

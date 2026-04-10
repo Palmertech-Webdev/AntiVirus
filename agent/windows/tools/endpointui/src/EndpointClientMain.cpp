@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <dwmapi.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -30,7 +31,7 @@ using antivirus::agent::EndpointClientSnapshot;
 using antivirus::agent::LocalServiceState;
 
 constexpr wchar_t kWindowClassName[] = L"FenrirEndpointClientWindow";
-constexpr wchar_t kWindowTitle[] = L"Fenrir Protection Center";
+constexpr wchar_t kWindowTitle[] = L"Fenrir Protection Centre";
 constexpr wchar_t kInstanceMutexName[] = L"Local\\FenrirEndpointClientSingleton";
 constexpr wchar_t kRestoreWindowMessageName[] = L"FenrirEndpointClient.RestoreWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
@@ -85,6 +86,16 @@ enum class ScanPreset {
   Full,
   Folder
 };
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
 
 enum class ClientPage : int {
   Dashboard = 0,
@@ -234,6 +245,10 @@ bool IsWindowInteractive(const UiContext& context) {
   return IsWindowVisible(context.hwnd) != FALSE;
 }
 
+bool HasSelectedItem(HWND listView) {
+  return listView != nullptr && ListView_GetNextItem(listView, -1, LVNI_SELECTED) >= 0;
+}
+
 std::wstring ProtectionHeadline(const EndpointClientSnapshot& snapshot) {
   if (snapshot.openThreatCount != 0) {
     return L"Threats need attention";
@@ -275,21 +290,60 @@ std::wstring ProtectionGuidance(const EndpointClientSnapshot& snapshot) {
   return L"Background protection is running and no unresolved local threats are currently recorded.";
 }
 
+bool IsScanSessionRecord(const antivirus::agent::ScanHistoryRecord& record);
+
 std::wstring BuildSummaryCardText(const EndpointClientSnapshot& snapshot) {
   std::wstringstream stream;
-  stream << ProtectionHeadline(snapshot) << L"\r\n\r\n" << ProtectionGuidance(snapshot);
+  stream << L"Protection status\r\n"
+         << ProtectionHeadline(snapshot) << L"\r\n\r\n"
+         << (snapshot.openThreatCount == 0
+                 ? (snapshot.activeQuarantineCount == 0 ? L"No unresolved threats are recorded."
+                                                       : std::to_wstring(snapshot.activeQuarantineCount) + L" quarantined item(s) are contained.")
+                 : std::to_wstring(snapshot.openThreatCount) + L" unresolved threat(s) need review.")
+         << L"\r\nNext action: ";
+  if (snapshot.serviceState == LocalServiceState::NotInstalled) {
+    stream << L"Install the protection service";
+  } else if (snapshot.serviceState == LocalServiceState::Stopped) {
+    stream << L"Start the protection service";
+  } else if (snapshot.openThreatCount != 0) {
+    stream << L"Review threats and quarantine";
+  } else if (_wcsicmp(snapshot.agentState.healthState.c_str(), L"healthy") != 0) {
+    stream << L"Review runtime health";
+  } else {
+    stream << L"Keep protection running";
+  }
   return stream.str();
 }
 
 std::wstring BuildDetailsCardText(const EndpointClientSnapshot& snapshot) {
+  std::wstring lastScan = L"(never)";
+  for (const auto& record : snapshot.recentFindings) {
+    if (IsScanSessionRecord(record)) {
+      lastScan = NullableText(record.recordedAt, L"(never)");
+      break;
+    }
+  }
+
   std::wstringstream stream;
-  stream << L"Device: " << NullableText(snapshot.agentState.hostname) << L"\r\n"
-         << L"Service: " << antivirus::agent::LocalServiceStateToString(snapshot.serviceState) << L"\r\n"
-         << L"Policy: " << NullableText(snapshot.agentState.policy.policyName) << L" ("
-         << NullableText(snapshot.agentState.policy.revision, L"n/a") << L")\r\n"
-         << L"Last heartbeat: " << NullableText(snapshot.agentState.lastHeartbeatAt, L"(never)") << L"\r\n"
-         << L"Last policy sync: " << NullableText(snapshot.agentState.lastPolicySyncAt, L"(never)") << L"\r\n"
-         << L"Queued uploads: " << snapshot.queuedTelemetryCount;
+  stream << L"Recent activity\r\n";
+  if (snapshot.recentFindings.empty()) {
+    stream << L"No recent events are recorded on this device.";
+    return stream.str();
+  }
+
+  const auto maxItems = std::min<std::size_t>(snapshot.recentFindings.size(), 3);
+  for (std::size_t index = 0; index < maxItems; ++index) {
+    const auto& record = snapshot.recentFindings[index];
+    const auto displayPath = record.subjectPath.empty() ? std::wstring(L"(memory or script content)")
+                                                        : record.subjectPath.wstring();
+    stream << L"\r\n";
+    stream << record.recordedAt << L" • "
+           << (record.disposition.empty() ? std::wstring(L"(unknown)") : record.disposition)
+           << L" • " << displayPath;
+    if (!record.source.empty()) {
+      stream << L"\r\n" << record.source;
+    }
+  }
   return stream.str();
 }
 
@@ -303,11 +357,15 @@ std::wstring BuildMetricCardText(const std::wstring& label, const std::wstring& 
 }
 
 std::wstring BuildSubtitleText() {
-  return L"Local threat response, quarantine, and on-demand scanning for this device.";
+  return L"Minimal protection for this device with clear status, review, and response actions.";
 }
 
 bool IsScanSessionRecord(const antivirus::agent::ScanHistoryRecord& record) {
   return _wcsicmp(record.contentType.c_str(), L"scan-session") == 0;
+}
+
+bool DashboardDetailVisible(const UiContext& context) {
+  return context.currentPage == ClientPage::Dashboard && HasSelectedItem(context.historyList);
 }
 
 std::wstring OverallStatusChip(const EndpointClientSnapshot& snapshot) {
@@ -322,7 +380,7 @@ std::wstring OverallStatusChip(const EndpointClientSnapshot& snapshot) {
 
 std::wstring BuildBrandCardText(const EndpointClientSnapshot& snapshot) {
   std::wstringstream stream;
-  stream << L"FENRIR ENDPOINT\r\n"
+  stream << L"Fenrir\r\n"
          << NullableText(snapshot.agentState.hostname, L"Local device") << L"\r\n"
          << OverallStatusChip(snapshot) << L"\r\n"
          << L"Policy " << NullableText(snapshot.agentState.policy.revision, L"n/a");
@@ -345,7 +403,7 @@ std::wstring PageTitle(const ClientPage page) {
       return L"Settings";
     case ClientPage::Dashboard:
     default:
-      return L"Dashboard";
+      return L"Protection Centre";
   }
 }
 
@@ -368,7 +426,7 @@ std::wstring PageSubtitle(const ClientPage page, const EndpointClientSnapshot& s
       if (snapshot.serviceState == LocalServiceState::NotInstalled) {
         return L"Background protection is off because the endpoint service is not installed. Local scans are still available.";
       }
-      return L"See protection status, recent activity, and the next action to take on this endpoint.";
+      return L"See protection status, recent activity, and the next best action for this endpoint.";
   }
 }
 
@@ -403,6 +461,7 @@ std::wstring SecondarySectionTitle(const ClientPage page) {
     case ClientPage::Settings:
       return L"Configuration detail";
     case ClientPage::Dashboard:
+      return L"Selected event";
     case ClientPage::Scans:
     case ClientPage::History:
     default:
@@ -502,23 +561,23 @@ COLORREF AccentAmber() { return RGB(224, 151, 39); }
 COLORREF AccentAmberDark() { return RGB(255, 218, 158); }
 COLORREF AccentRed() { return RGB(214, 72, 112); }
 COLORREF AccentRedDark() { return RGB(255, 193, 206); }
-COLORREF WindowBackgroundColor() { return RGB(6, 11, 22); }
-COLORREF SurfaceColor() { return RGB(13, 22, 40); }
-COLORREF SummarySafeColor() { return RGB(12, 40, 33); }
-COLORREF SummaryWarningColor() { return RGB(48, 36, 12); }
-COLORREF SummaryDangerColor() { return RGB(52, 20, 29); }
-COLORREF DetailsCardColor() { return RGB(18, 29, 52); }
-COLORREF MetricInfoColor() { return RGB(16, 27, 48); }
-COLORREF MetricSuccessColor() { return RGB(12, 38, 31); }
-COLORREF MetricWarningColor() { return RGB(48, 36, 12); }
-COLORREF MetricDangerColor() { return RGB(52, 20, 29); }
-COLORREF DetailColor() { return RGB(9, 17, 32); }
-COLORREF ListBackColor() { return RGB(11, 19, 35); }
-COLORREF ListAltBackColor() { return RGB(8, 15, 28); }
-COLORREF BrandBaseColor() { return RGB(11, 22, 39); }
-COLORREF BrandFrameColor() { return RGB(72, 122, 185); }
-COLORREF BrandShieldColor() { return RGB(236, 243, 255); }
-COLORREF BrandNeutralColor() { return RGB(104, 193, 255); }
+COLORREF WindowBackgroundColor() { return RGB(8, 12, 18); }
+COLORREF SurfaceColor() { return RGB(14, 18, 26); }
+COLORREF SummarySafeColor() { return RGB(16, 20, 28); }
+COLORREF SummaryWarningColor() { return RGB(16, 20, 28); }
+COLORREF SummaryDangerColor() { return RGB(18, 22, 30); }
+COLORREF DetailsCardColor() { return RGB(14, 18, 25); }
+COLORREF MetricInfoColor() { return RGB(15, 19, 27); }
+COLORREF MetricSuccessColor() { return RGB(15, 19, 27); }
+COLORREF MetricWarningColor() { return RGB(15, 19, 27); }
+COLORREF MetricDangerColor() { return RGB(15, 19, 27); }
+COLORREF DetailColor() { return RGB(12, 16, 23); }
+COLORREF ListBackColor() { return RGB(12, 16, 23); }
+COLORREF ListAltBackColor() { return RGB(10, 14, 20); }
+COLORREF BrandBaseColor() { return RGB(12, 16, 23); }
+COLORREF BrandFrameColor() { return RGB(101, 132, 170); }
+COLORREF BrandShieldColor() { return RGB(236, 241, 248); }
+COLORREF BrandNeutralColor() { return RGB(150, 175, 205); }
 
 COLORREF AdjustColor(const COLORREF color, const int delta) {
   const auto clampChannel = [delta](const BYTE channel) {
@@ -1172,6 +1231,19 @@ void UpdateTrayIcon(UiContext& context) {
   SendMessageW(context.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(SelectWindowIcon(context, true)));
 }
 
+void ApplyDarkWindowChrome(HWND hwnd) {
+  const BOOL darkMode = TRUE;
+  DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
+#if defined(DWMWA_CAPTION_COLOR)
+  const COLORREF captionColor = WindowBackgroundColor();
+  DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &captionColor, sizeof(captionColor));
+#endif
+#if defined(DWMWA_TEXT_COLOR)
+  const COLORREF textColor = DarkTextColor();
+  DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
+#endif
+}
+
 void UpdatePageChrome(UiContext& context) {
   SetWindowTextSafe(context.brandCard, BuildBrandCardText(context.snapshot));
   SetWindowTextSafe(context.titleLabel, PageTitle(context.currentPage));
@@ -1180,9 +1252,9 @@ void UpdatePageChrome(UiContext& context) {
   SetWindowTextSafe(context.primarySectionTitle, PrimarySectionTitle(context.currentPage));
   SetWindowTextSafe(context.secondarySectionTitle, SecondarySectionTitle(context.currentPage));
 
-  const std::array<HWND, 7> navButtons{
-      context.navDashboardButton, context.navThreatsButton,  context.navQuarantineButton, context.navScansButton,
-      context.navServiceButton,   context.navHistoryButton,  context.navSettingsButton};
+  const std::array<HWND, 6> navButtons{
+      context.navDashboardButton, context.navThreatsButton, context.navQuarantineButton,
+      context.navScansButton,      context.navHistoryButton, context.navSettingsButton};
   for (const auto button : navButtons) {
     if (button != nullptr) {
       InvalidateRect(button, nullptr, TRUE);
@@ -1327,7 +1399,7 @@ COLORREF ResolveStaticTextColor(UiContext& context, HWND control) {
   }
 
   if (control == context.titleLabel) {
-    return AccentBlueDark();
+    return DarkTextColor();
   }
 
   return DarkTextColor();
@@ -1341,46 +1413,46 @@ COLORREF ResolveButtonFill(const UiContext& context, const int controlId, const 
     const auto selectedPage = PageForNavButtonId(controlId);
     const auto selected = selectedPage.has_value() && selectedPage.value() == context.currentPage;
     if (disabled) {
-      return RGB(25, 36, 57);
+      return RGB(18, 24, 35);
     }
     if (selected) {
-      return pressed ? RGB(31, 52, 88) : RGB(22, 42, 76);
+      return pressed ? RGB(25, 34, 48) : RGB(20, 28, 40);
     }
-    return pressed ? RGB(18, 28, 46) : WindowBackgroundColor();
+    return pressed ? RGB(17, 23, 34) : WindowBackgroundColor();
   }
 
-  COLORREF base = AccentBlue();
+  COLORREF base = RGB(36, 52, 74);
   switch (controlId) {
     case IDC_BUTTON_QUICKSCAN:
-      base = AccentBlue();
+      base = RGB(47, 102, 184);
       break;
     case IDC_BUTTON_FULLSCAN:
-      base = RGB(88, 91, 214);
+      base = RGB(69, 82, 166);
       break;
     case IDC_BUTTON_CUSTOMSCAN:
-      base = RGB(74, 159, 192);
+      base = RGB(54, 123, 162);
       break;
     case IDC_BUTTON_REFRESH:
-      base = RGB(124, 136, 160);
+      base = RGB(43, 52, 68);
       break;
     case IDC_BUTTON_STARTSERVICE:
-      base = AccentGreen();
+      base = RGB(34, 119, 94);
       break;
     case IDC_BUTTON_OPENQUARANTINE:
-      base = AccentAmber();
+      base = RGB(160, 112, 43);
       break;
     case IDC_BUTTON_RESTORE:
-      base = AccentGreen();
+      base = RGB(34, 119, 94);
       break;
     case IDC_BUTTON_DELETE:
-      base = AccentRed();
+      base = RGB(168, 63, 92);
       break;
     default:
       break;
   }
 
   if (disabled) {
-    return RGB(203, 212, 226);
+    return RGB(31, 37, 48);
   }
 
   if (pressed) {
@@ -1406,54 +1478,34 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* draw, UiContext& context) {
 
     const auto selectedPage = PageForNavButtonId(static_cast<int>(draw->CtlID));
     const auto selected = selectedPage.has_value() && selectedPage.value() == context.currentPage;
-    if (selected) {
-      RECT accentRect{rect.left + 2, rect.top + 8, rect.left + 7, rect.bottom - 8};
-      HBRUSH accentBrush = CreateSolidBrush(AccentBlue());
-      FillRect(draw->hDC, &accentRect, accentBrush);
-      DeleteObject(accentBrush);
-    }
-
     wchar_t text[128]{};
     GetWindowTextW(draw->hwndItem, text, static_cast<int>(std::size(text)));
     SetBkMode(draw->hDC, TRANSPARENT);
     SetTextColor(draw->hDC, selected ? DarkTextColor() : MutedTextColor());
     SelectObject(draw->hDC, context.bodyFont);
     RECT textRect = rect;
-    textRect.left += 18;
-    DrawTextW(draw->hDC, text, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (selected) {
+      RECT underline{rect.left + 12, rect.bottom - 3, rect.right - 12, rect.bottom - 1};
+      HBRUSH underlineBrush = CreateSolidBrush(AccentBlue());
+      FillRect(draw->hDC, &underline, underlineBrush);
+      DeleteObject(underlineBrush);
+    }
+    DrawTextW(draw->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     return;
   }
 
   const auto fillColor = ResolveButtonFill(context, static_cast<int>(draw->CtlID), draw->itemState);
-  const auto borderColor = AdjustColor(fillColor, 26);
-  const auto highlightColor = AdjustColor(fillColor, 18);
-  const auto shadowColor = AdjustColor(fillColor, -22);
+  const auto borderColor = AdjustColor(fillColor, 16);
 
   HBRUSH brush = CreateSolidBrush(fillColor);
   HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
   HGDIOBJ oldPen = SelectObject(draw->hDC, pen);
   HGDIOBJ oldBrush = SelectObject(draw->hDC, brush);
-  RoundRect(draw->hDC, rect.left, rect.top, rect.right, rect.bottom, 14, 14);
+  RoundRect(draw->hDC, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
   SelectObject(draw->hDC, oldBrush);
   SelectObject(draw->hDC, oldPen);
   DeleteObject(brush);
   DeleteObject(pen);
-
-  RECT highlightRect = rect;
-  highlightRect.left += 2;
-  highlightRect.top += 2;
-  highlightRect.right -= 2;
-  highlightRect.bottom = rect.top + ((rect.bottom - rect.top) / 2);
-  HBRUSH highlightBrush = CreateSolidBrush(highlightColor);
-  FillRect(draw->hDC, &highlightRect, highlightBrush);
-  DeleteObject(highlightBrush);
-
-  HPEN shadowPen = CreatePen(PS_SOLID, 1, shadowColor);
-  oldPen = SelectObject(draw->hDC, shadowPen);
-  MoveToEx(draw->hDC, rect.left + 8, rect.bottom - 2, nullptr);
-  LineTo(draw->hDC, rect.right - 8, rect.bottom - 2);
-  SelectObject(draw->hDC, oldPen);
-  DeleteObject(shadowPen);
 
   RECT accentRect{
       rect.left + 10,
@@ -1461,7 +1513,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* draw, UiContext& context) {
       rect.left + 16,
       rect.bottom - 9,
   };
-  HBRUSH accentBrush = CreateSolidBrush(AdjustColor(fillColor, 34));
+  HBRUSH accentBrush = CreateSolidBrush(AdjustColor(fillColor, 22));
   FillRect(draw->hDC, &accentRect, accentBrush);
   DeleteObject(accentBrush);
 
@@ -1482,22 +1534,23 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* draw, UiContext& context) {
 }
 
 void UpdateActionButtons(UiContext& context) {
-  EnableWindow(context.startServiceButton, context.snapshot.serviceState == LocalServiceState::Stopped);
+  const bool needsServiceStart =
+      context.snapshot.serviceState == LocalServiceState::NotInstalled || context.snapshot.serviceState == LocalServiceState::Stopped;
+  EnableWindow(context.startServiceButton, needsServiceStart);
   const auto dashboardMode = context.currentPage == ClientPage::Dashboard;
   const auto threatsMode = context.currentPage == ClientPage::Threats;
   const auto quarantineMode = context.currentPage == ClientPage::Quarantine;
   const auto scansMode = context.currentPage == ClientPage::Scans;
-  const auto serviceMode = context.currentPage == ClientPage::Service;
   const auto historyMode = context.currentPage == ClientPage::History;
+  const auto settingsMode = context.currentPage == ClientPage::Settings;
 
-  ShowWindow(context.quickScanButton, (dashboardMode || threatsMode || scansMode || historyMode) ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.fullScanButton, (dashboardMode || threatsMode || scansMode || historyMode) ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.customScanButton, (dashboardMode || threatsMode || scansMode || historyMode) ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.refreshButton, (dashboardMode || threatsMode || quarantineMode || scansMode || serviceMode || historyMode ||
-                                     context.currentPage == ClientPage::Settings)
+  ShowWindow(context.quickScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.fullScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.customScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.refreshButton, (dashboardMode || threatsMode || quarantineMode || scansMode || historyMode || settingsMode)
                                         ? SW_SHOW
                                         : SW_HIDE);
-  ShowWindow(context.startServiceButton, (dashboardMode || serviceMode) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.startServiceButton, needsServiceStart ? SW_SHOW : SW_HIDE);
   ShowWindow(context.openQuarantineButton, (dashboardMode || quarantineMode || threatsMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.restoreButton, quarantineMode ? SW_SHOW : SW_HIDE);
   ShowWindow(context.deleteButton, quarantineMode ? SW_SHOW : SW_HIDE);
@@ -1688,17 +1741,18 @@ void RunScanAsync(HWND hwnd, UiContext& context, const ScanPreset preset, const 
             auto* progressPayload = new ScanProgressPayload{};
             std::wstringstream status;
             if (progress.totalTargets == 0) {
-              status << scanLabel << L": no scannable files were discovered.";
+              status << scanLabel << L" complete • no scannable files were discovered.";
             } else if (progress.completedTargets >= progress.totalTargets) {
-              status << scanLabel << L": finalizing results...";
+              status << scanLabel << L" finalizing results...";
             } else {
-              status << scanLabel << L": scanning " << (progress.completedTargets + 1) << L" of " << progress.totalTargets;
+              status << scanLabel << L" in progress • " << (progress.completedTargets + 1) << L" of "
+                     << progress.totalTargets << L" checked";
               const auto displayTarget = CompactPathForStatus(progress.currentTarget);
               if (!displayTarget.empty()) {
-                status << L"  " << displayTarget;
+                status << L" • " << displayTarget;
               }
               if (progress.findingCount != 0) {
-                status << L"  " << progress.findingCount << L" finding(s)";
+                status << L" • " << progress.findingCount << L" finding(s)";
               }
             }
 
@@ -1771,8 +1825,6 @@ void ShowTrayMenu(UiContext& context) {
   AppendMenuW(menu, MF_STRING, IDM_TRAY_QUARANTINE, L"Open quarantine");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit Fenrir");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit Fenrir");
 
   POINT cursor{};
   GetCursorPos(&cursor);
@@ -1794,33 +1846,37 @@ void LayoutControls(UiContext& context) {
   const int padding = 20;
   const int width = client.right - client.left;
   const int height = client.bottom - client.top;
-  const int railWidth = 236;
-  const int railGap = 22;
+  const int railWidth = 176;
+  const int railGap = 20;
   const int railX = padding;
   const int railY = padding;
   const int railHeight = height - (padding * 2);
   const int contentX = railX + railWidth + railGap;
   const int contentWidth = width - contentX - padding;
 
-  const int brandHeight = 116;
-  const int navButtonHeight = 42;
-  const int navGap = 8;
-  const int navTop = railY + brandHeight + 18;
+  const int brandHeight = 92;
+  const int navButtonHeight = 34;
+  const int navGap = 5;
+  const int navTop = railY + brandHeight + 16;
 
   MoveWindow(context.brandCard, railX, railY, railWidth, brandHeight, TRUE);
-  MoveWindow(context.navDashboardButton, railX, navTop, railWidth, navButtonHeight, TRUE);
-  MoveWindow(context.navThreatsButton, railX, navTop + (navButtonHeight + navGap) * 1, railWidth, navButtonHeight, TRUE);
-  MoveWindow(context.navQuarantineButton, railX, navTop + (navButtonHeight + navGap) * 2, railWidth, navButtonHeight, TRUE);
-  MoveWindow(context.navScansButton, railX, navTop + (navButtonHeight + navGap) * 3, railWidth, navButtonHeight, TRUE);
-  MoveWindow(context.navServiceButton, railX, navTop + (navButtonHeight + navGap) * 4, railWidth, navButtonHeight, TRUE);
-  MoveWindow(context.navHistoryButton, railX, navTop + (navButtonHeight + navGap) * 5, railWidth, navButtonHeight, TRUE);
-  MoveWindow(context.navSettingsButton, railX, navTop + (navButtonHeight + navGap) * 6, railWidth, navButtonHeight, TRUE);
 
   const int titleHeight = 42;
-  const int subtitleHeight = 26;
+  const int subtitleHeight = 24;
   MoveWindow(context.titleLabel, contentX, padding, contentWidth - 170, titleHeight, TRUE);
-  MoveWindow(context.subtitleLabel, contentX, padding + titleHeight + 2, contentWidth - 200, subtitleHeight, TRUE);
+  MoveWindow(context.subtitleLabel, contentX, padding + titleHeight + 2, contentWidth - 220, subtitleHeight, TRUE);
   MoveWindow(context.statusBadge, contentX + contentWidth - 164, padding + 8, 164, 36, TRUE);
+
+  const int navY = padding + titleHeight + subtitleHeight + 18;
+  const int navTabGap = 8;
+  const int navTabCount = 6;
+  const int navTabWidth = (contentWidth - (navTabGap * (navTabCount - 1))) / navTabCount;
+  MoveWindow(context.navDashboardButton, contentX, navY, navTabWidth, navButtonHeight, TRUE);
+  MoveWindow(context.navThreatsButton, contentX + (navTabWidth + navTabGap) * 1, navY, navTabWidth, navButtonHeight, TRUE);
+  MoveWindow(context.navQuarantineButton, contentX + (navTabWidth + navTabGap) * 2, navY, navTabWidth, navButtonHeight, TRUE);
+  MoveWindow(context.navScansButton, contentX + (navTabWidth + navTabGap) * 3, navY, navTabWidth, navButtonHeight, TRUE);
+  MoveWindow(context.navHistoryButton, contentX + (navTabWidth + navTabGap) * 4, navY, navTabWidth, navButtonHeight, TRUE);
+  MoveWindow(context.navSettingsButton, contentX + (navTabWidth + navTabGap) * 5, navY, navTabWidth, navButtonHeight, TRUE);
 
   const bool dashboardPage = context.currentPage == ClientPage::Dashboard;
   const bool threatsPage = context.currentPage == ClientPage::Threats;
@@ -1830,28 +1886,26 @@ void LayoutControls(UiContext& context) {
   const bool historyPage = context.currentPage == ClientPage::History;
   const bool settingsPage = context.currentPage == ClientPage::Settings;
 
-  const bool showHero = dashboardPage || scansPage || servicePage || settingsPage;
-  const bool showMetrics = dashboardPage || scansPage || servicePage;
-  const bool showSummary = showHero;
-  const bool showDetails = showHero;
-  const bool showLists = dashboardPage || threatsPage || quarantinePage || scansPage || historyPage;
-  const bool showPrimaryList = threatsPage || quarantinePage || historyPage || scansPage || dashboardPage;
+  const bool showHero = dashboardPage;
+  const bool showMetrics = dashboardPage;
+  const bool showLists = threatsPage || quarantinePage || scansPage || historyPage;
+  const bool showPrimaryList = showLists;
   const bool showDetailPane = showLists || servicePage || settingsPage;
 
-  ShowWindow(context.summaryCard, showSummary ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.detailsCard, showDetails ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.summaryCard, showHero ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.detailsCard, showHero ? SW_SHOW : SW_HIDE);
   ShowWindow(context.metricThreats, showMetrics ? SW_SHOW : SW_HIDE);
   ShowWindow(context.metricQuarantine, showMetrics ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.metricService, showMetrics ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.metricService, SW_HIDE);
   ShowWindow(context.metricSync, showMetrics ? SW_SHOW : SW_HIDE);
   ShowWindow(context.primarySectionTitle, showPrimaryList ? SW_SHOW : SW_HIDE);
   ShowWindow(context.secondarySectionTitle, showDetailPane ? SW_SHOW : SW_HIDE);
 
-  int currentTop = padding + titleHeight + subtitleHeight + 24;
+  int currentTop = navY + navButtonHeight + 18;
   const int heroGap = 16;
-  const int heroHeight = showHero ? (dashboardPage ? 132 : 120) : 0;
+  const int heroHeight = showHero ? 132 : 0;
   if (showHero) {
-    const int heroLeftWidth = dashboardPage ? static_cast<int>(contentWidth * 0.58) : static_cast<int>(contentWidth * 0.52);
+    const int heroLeftWidth = static_cast<int>(contentWidth * 0.61);
     const int heroRightWidth = contentWidth - heroLeftWidth - heroGap;
     MoveWindow(context.summaryCard, contentX, currentTop, heroLeftWidth, heroHeight, TRUE);
     MoveWindow(context.detailsCard, contentX + heroLeftWidth + heroGap, currentTop, heroRightWidth, heroHeight, TRUE);
@@ -1860,17 +1914,16 @@ void LayoutControls(UiContext& context) {
 
   if (showMetrics) {
     const int metricGap = 12;
-    const int metricHeight = 84;
-    const int metricWidth = (contentWidth - (metricGap * 3)) / 4;
+    const int metricHeight = 76;
+    const int metricWidth = (contentWidth - (metricGap * 2)) / 3;
     MoveWindow(context.metricThreats, contentX, currentTop, metricWidth, metricHeight, TRUE);
     MoveWindow(context.metricQuarantine, contentX + metricWidth + metricGap, currentTop, metricWidth, metricHeight, TRUE);
-    MoveWindow(context.metricService, contentX + ((metricWidth + metricGap) * 2), currentTop, metricWidth, metricHeight, TRUE);
-    MoveWindow(context.metricSync, contentX + ((metricWidth + metricGap) * 3), currentTop, metricWidth, metricHeight, TRUE);
+    MoveWindow(context.metricSync, contentX + ((metricWidth + metricGap) * 2), currentTop, metricWidth, metricHeight, TRUE);
     currentTop += metricHeight + 16;
   }
 
-  const int buttonWidth = 138;
-  const int buttonHeight = 40;
+  const int buttonWidth = 132;
+  const int buttonHeight = 38;
   const int actionGap = 10;
   const int rightActionWidth = 196;
   MoveWindow(context.quickScanButton, contentX, currentTop, buttonWidth, buttonHeight, TRUE);
@@ -1888,6 +1941,18 @@ void LayoutControls(UiContext& context) {
   const bool showProgressArea = dashboardPage || scansPage || context.scanRunning;
   ShowWindow(context.scanStatusLabel, showProgressArea ? SW_SHOW : SW_HIDE);
   ShowWindow(context.progressBar, showProgressArea ? SW_SHOW : SW_HIDE);
+
+  if (dashboardPage) {
+    ShowWindow(context.primarySectionTitle, SW_HIDE);
+    ShowWindow(context.secondarySectionTitle, SW_HIDE);
+    ShowWindow(context.threatsList, SW_HIDE);
+    ShowWindow(context.quarantineList, SW_HIDE);
+    ShowWindow(context.historyList, SW_HIDE);
+    ShowWindow(context.detailEdit, SW_HIDE);
+    ShowWindow(context.restoreButton, SW_HIDE);
+    ShowWindow(context.deleteButton, SW_HIDE);
+    return;
+  }
 
   if (showLists) {
     const int panelGap = 18;
@@ -1916,8 +1981,11 @@ void LayoutControls(UiContext& context) {
     ShowWindow(context.quarantineList, SW_HIDE);
     ShowWindow(context.historyList, SW_HIDE);
     if (showDetailPane) {
+      ShowWindow(context.detailEdit, SW_SHOW);
       MoveWindow(context.secondarySectionTitle, contentX, currentTop, contentWidth, 22, TRUE);
       MoveWindow(context.detailEdit, contentX, currentTop + 30, contentWidth, height - (currentTop + 30) - padding, TRUE);
+    } else {
+      ShowWindow(context.detailEdit, SW_HIDE);
     }
   }
 }
@@ -1968,7 +2036,8 @@ LRESULT HandleListCustomDraw(const NMLVCUSTOMDRAW* customDraw) {
       auto* mutableDraw = const_cast<NMLVCUSTOMDRAW*>(customDraw);
       const bool selected = (customDraw->nmcd.uItemState & CDIS_SELECTED) != 0;
       mutableDraw->clrText = selected ? RGB(255, 255, 255) : DarkTextColor();
-      mutableDraw->clrTextBk = selected ? AccentBlue() : ((customDraw->nmcd.dwItemSpec % 2 == 0) ? ListBackColor() : ListAltBackColor());
+      mutableDraw->clrTextBk = selected ? RGB(25, 34, 48)
+                                        : ((customDraw->nmcd.dwItemSpec % 2 == 0) ? ListBackColor() : ListAltBackColor());
       return CDRF_NEWFONT;
     }
     default:
@@ -2082,21 +2151,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       const auto* launchOptions = create != nullptr ? reinterpret_cast<LaunchOptions*>(create->lpCreateParams) : nullptr;
       context->backgroundMode = launchOptions != nullptr && launchOptions->backgroundMode;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
+      ApplyDarkWindowChrome(hwnd);
 
       NONCLIENTMETRICSW metrics{};
       metrics.cbSize = sizeof(metrics);
       SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0);
-      wcscpy_s(metrics.lfMessageFont.lfFaceName, L"Segoe UI");
+      wcscpy_s(metrics.lfMessageFont.lfFaceName, L"Segoe UI Variable Text");
       context->bodyFont = CreateFontIndirectW(&metrics.lfMessageFont);
       auto titleFont = metrics.lfMessageFont;
-      titleFont.lfHeight = 30;
+      titleFont.lfHeight = 32;
       titleFont.lfWeight = FW_BOLD;
-      wcscpy_s(titleFont.lfFaceName, L"Segoe UI Semibold");
+      wcscpy_s(titleFont.lfFaceName, L"Segoe UI Variable");
       context->titleFont = CreateFontIndirectW(&titleFont);
       auto headingFont = metrics.lfMessageFont;
-      headingFont.lfHeight = 18;
+      headingFont.lfHeight = 17;
       headingFont.lfWeight = FW_SEMIBOLD;
-      wcscpy_s(headingFont.lfFaceName, L"Segoe UI Semibold");
+      wcscpy_s(headingFont.lfFaceName, L"Segoe UI Variable");
       context->headingFont = CreateFontIndirectW(&headingFont);
       CreateThemeResources(*context);
       CreateBrandIcons(*context);
@@ -2119,7 +2189,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       context->metricQuarantine = CreateCard(hwnd, IDC_METRIC_QUARANTINE);
       context->metricService = CreateCard(hwnd, IDC_METRIC_SERVICE);
       context->metricSync = CreateCard(hwnd, IDC_METRIC_SYNC);
-      context->navDashboardButton = CreateWindowW(L"BUTTON", L"Dashboard", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+      context->navDashboardButton = CreateWindowW(L"BUTTON", L"Home", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                   0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_DASHBOARD), nullptr, nullptr);
       context->navThreatsButton = CreateWindowW(L"BUTTON", L"Threats", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_THREATS), nullptr, nullptr);
@@ -2127,8 +2197,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                                                    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_QUARANTINE), nullptr, nullptr);
       context->navScansButton = CreateWindowW(L"BUTTON", L"Scans", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_SCANS), nullptr, nullptr);
-      context->navServiceButton = CreateWindowW(L"BUTTON", L"Service", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_SERVICE), nullptr, nullptr);
       context->navHistoryButton = CreateWindowW(L"BUTTON", L"History", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_HISTORY), nullptr, nullptr);
       context->navSettingsButton = CreateWindowW(L"BUTTON", L"Settings", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -2170,7 +2238,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
           context->brandCard,         context->subtitleLabel,    context->statusBadge,      context->primarySectionTitle,
           context->secondarySectionTitle, context->summaryCard,  context->detailsCard,      context->metricThreats,
           context->metricQuarantine,  context->metricService,    context->metricSync,       context->navDashboardButton,
-          context->navThreatsButton,  context->navQuarantineButton, context->navScansButton, context->navServiceButton,
+          context->navThreatsButton,  context->navQuarantineButton, context->navScansButton,
           context->navHistoryButton,  context->navSettingsButton, context->quickScanButton, context->fullScanButton,
           context->customScanButton,  context->refreshButton,    context->startServiceButton, context->openQuarantineButton,
           context->scanStatusLabel,   context->detailEdit,       context->restoreButton,    context->deleteButton};
@@ -2253,6 +2321,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
            header->hwndFrom == context->historyList) &&
           header->code == LVN_ITEMCHANGED) {
         UpdateDetailPane(*context);
+        if (context->currentPage == ClientPage::Dashboard) {
+          LayoutControls(*context);
+        }
         return 0;
       }
       break;

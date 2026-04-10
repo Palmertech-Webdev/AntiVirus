@@ -1,4 +1,4 @@
-import type { DeviceDetail, DevicePostureSummary, DashboardSnapshot } from "./types";
+import type { AlertDetail, DashboardSnapshot, DeviceDetail, DevicePostureSummary } from "./types";
 
 export const emptyDashboard: DashboardSnapshot = {
   generatedAt: "2026-04-08T00:00:00Z",
@@ -350,6 +350,45 @@ function buildFallbackPosture(deviceId: string, hostname: string): DevicePosture
     etwState: "unknown",
     wfpState: "unknown",
     isolationState: "unknown"
+  };
+}
+
+export function buildFallbackAlertDetail(alertId: string): AlertDetail | null {
+  const alert = fallbackDashboard.alerts.find((item) => item.id === alertId);
+  if (!alert) {
+    return null;
+  }
+
+  const normalizedHostname = alert.hostname.toLowerCase();
+  const relatedDevice =
+    fallbackDashboard.devices.find((item) => item.id === alert.deviceId || item.hostname.toLowerCase() === normalizedHostname) ??
+    null;
+  const relatedDeviceId = relatedDevice?.id ?? alert.deviceId ?? null;
+  const matchesContext = (item: { deviceId: string; hostname: string }) =>
+    item.deviceId === relatedDeviceId || item.hostname.toLowerCase() === normalizedHostname;
+
+  const telemetry = fallbackDashboard.recentTelemetry.filter(matchesContext);
+  const commands = fallbackDashboard.recentCommands.filter(matchesContext);
+  const evidence = fallbackDashboard.recentEvidence.filter(matchesContext);
+  const quarantineItems = fallbackDashboard.quarantineItems.filter(matchesContext);
+  const scanHistory = fallbackDashboard.recentScanHistory.filter(matchesContext);
+  const relatedAlerts = fallbackDashboard.alerts.filter(
+    (item) => item.id !== alert.id && (item.deviceId === relatedDeviceId || item.hostname.toLowerCase() === normalizedHostname)
+  );
+
+  return {
+    alert,
+    device: relatedDevice,
+    posture: relatedDevice ? fallbackDashboard.postureOverview.find((item) => item.deviceId === relatedDevice.id) ?? null : null,
+    behaviorChain: null,
+    playbook: null,
+    matchingTelemetry: telemetry,
+    telemetry,
+    commands,
+    evidence,
+    quarantineItems,
+    scanHistory,
+    relatedAlerts
   };
 }
 

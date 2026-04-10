@@ -106,7 +106,7 @@ add_executable(antivirus-endpoint-client WIN32
 )
 
 target_include_directories(antivirus-endpoint-client PRIVATE include)
-target_link_libraries(antivirus-endpoint-client PRIVATE antivirus-agent-core comctl32 ole32 uxtheme)
+target_link_libraries(antivirus-endpoint-client PRIVATE antivirus-agent-core comctl32 ole32 uxtheme dwmapi)
 target_compile_definitions(antivirus-endpoint-client PRIVATE UNICODE _UNICODE)
 target_link_options(antivirus-endpoint-client PRIVATE -municode)
 set_target_properties(antivirus-endpoint-client PROPERTIES OUTPUT_NAME "fenrir-endpoint-client")

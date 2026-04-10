@@ -34,7 +34,14 @@ import type {
   AdminPrincipalSummary,
   AdminSessionRecord,
   AdminSessionSummary,
+  AlertBehaviorChain,
+  AlertBehaviorChainStep,
+  AlertDetail,
+  AlertResponsePlaybook,
+  AlertResponsePlaybookAction,
   AlertSummary,
+  AlertSeverity,
+  CommandType,
   CommandStatus,
   CompleteCommandRequest,
   ControlPlaneState,
@@ -126,6 +133,7 @@ export interface ControlPlaneStore {
   getDeviceDetail(deviceId: string): Promise<DeviceDetail>;
   listDevices(): Promise<DeviceSummary[]>;
   listAlerts(): Promise<AlertSummary[]>;
+  getAlertDetail(alertId: string): Promise<AlertDetail>;
   listTelemetry(deviceId?: string, limit?: number): Promise<TelemetryRecord[]>;
   listEvidence(deviceId?: string, limit?: number): Promise<EvidenceSummary[]>;
   listScanHistory(deviceId?: string, limit?: number): Promise<ScanHistorySummary[]>;
@@ -174,6 +182,13 @@ export class DeviceNotFoundError extends Error {
   constructor(deviceId: string) {
     super(`Device not found: ${deviceId}`);
     this.name = "DeviceNotFoundError";
+  }
+}
+
+export class AlertNotFoundError extends Error {
+  constructor(alertId: string) {
+    super(`Alert not found: ${alertId}`);
+    this.name = "AlertNotFoundError";
   }
 }
 
@@ -272,6 +287,92 @@ function readOptionalStringArray(value: unknown) {
   }
 
   return value.filter((item): item is string => typeof item === "string");
+}
+
+function normalizeTelemetryProcessContext(record: Partial<TelemetryRecord>, payload: ParsedPayload | null) {
+  if (record.eventType === "process.started" || record.eventType === "process.exited") {
+    return {
+      processId: typeof record.processId === "number" ? record.processId : readNumber(payload, "pid"),
+      parentProcessId: typeof record.parentProcessId === "number" ? record.parentProcessId : readNumber(payload, "parentPid"),
+      processImageName:
+        typeof record.processImageName === "string" && record.processImageName.length > 0
+          ? record.processImageName
+          : readString(payload, "imageName"),
+      processImagePath:
+        typeof record.processImagePath === "string" && record.processImagePath.length > 0
+          ? record.processImagePath
+          : readString(payload, "imagePath"),
+      parentProcessImageName:
+        typeof record.parentProcessImageName === "string" && record.parentProcessImageName.length > 0
+          ? record.parentProcessImageName
+          : readString(payload, "parentImageName"),
+      parentProcessImagePath:
+        typeof record.parentProcessImagePath === "string" && record.parentProcessImagePath.length > 0
+          ? record.parentProcessImagePath
+          : readString(payload, "parentImagePath"),
+      processCommandLine:
+        typeof record.processCommandLine === "string" && record.processCommandLine.length > 0
+          ? record.processCommandLine
+          : readString(payload, "commandLine"),
+      processUserSid:
+        typeof record.processUserSid === "string" && record.processUserSid.length > 0
+          ? record.processUserSid
+          : readString(payload, "userSid"),
+      processIntegrityLevel:
+        typeof record.processIntegrityLevel === "string" && record.processIntegrityLevel.length > 0
+          ? record.processIntegrityLevel
+          : readString(payload, "integrityLevel"),
+      processSessionId:
+        typeof record.processSessionId === "string" && record.processSessionId.length > 0
+          ? record.processSessionId
+          : readString(payload, "sessionId"),
+      processSigner:
+        typeof record.processSigner === "string" && record.processSigner.length > 0
+          ? record.processSigner
+          : readString(payload, "signer"),
+      processExitCode: typeof record.processExitCode === "number" ? record.processExitCode : readNumber(payload, "exitCode")
+    };
+  }
+
+  if (record.eventType === "image.loaded") {
+    return {
+      processId: typeof record.processId === "number" ? record.processId : readNumber(payload, "pid"),
+      processImageName:
+        typeof record.processImageName === "string" && record.processImageName.length > 0
+          ? record.processImageName
+          : readString(payload, "processImageName"),
+      processImagePath:
+        typeof record.processImagePath === "string" && record.processImagePath.length > 0
+          ? record.processImagePath
+          : readString(payload, "processImagePath"),
+      processSessionId:
+        typeof record.processSessionId === "string" && record.processSessionId.length > 0
+          ? record.processSessionId
+          : readString(payload, "sessionId"),
+      processSigner:
+        typeof record.processSigner === "string" && record.processSigner.length > 0
+          ? record.processSigner
+          : readString(payload, "signer"),
+      moduleImageName:
+        typeof record.moduleImageName === "string" && record.moduleImageName.length > 0
+          ? record.moduleImageName
+          : readString(payload, "imageName"),
+      moduleImagePath:
+        typeof record.moduleImagePath === "string" && record.moduleImagePath.length > 0
+          ? record.moduleImagePath
+          : readString(payload, "imagePath"),
+      moduleImageBase:
+        typeof record.moduleImageBase === "string" && record.moduleImageBase.length > 0
+          ? record.moduleImageBase
+          : readString(payload, "imageBase"),
+      moduleImageSize:
+        typeof record.moduleImageSize === "string" && record.moduleImageSize.length > 0
+          ? record.moduleImageSize
+          : readString(payload, "imageSize")
+    };
+  }
+
+  return {};
 }
 
 function normalizeSoftwareUpdateState(value: unknown): SoftwareUpdateState {
@@ -1314,6 +1415,7 @@ function normalizeDeviceRecord(
 
 function normalizeTelemetryRecord(raw: unknown, hostnameByDeviceId: Map<string, string>, nowIso: string): TelemetryRecord {
   const record = (raw ?? {}) as Partial<TelemetryRecord>;
+  const payload = parsePayload(readOptionalString(record.payloadJson, "{}"));
   return {
     eventId: readOptionalString(record.eventId, randomUUID()),
     deviceId: readOptionalString(record.deviceId),
@@ -1323,7 +1425,8 @@ function normalizeTelemetryRecord(raw: unknown, hostnameByDeviceId: Map<string, 
     summary: readOptionalString(record.summary),
     occurredAt: readOptionalString(record.occurredAt, nowIso),
     ingestedAt: readOptionalString(record.ingestedAt, nowIso),
-    payloadJson: readOptionalString(record.payloadJson, "{}")
+    payloadJson: readOptionalString(record.payloadJson, "{}"),
+    ...normalizeTelemetryProcessContext(record, payload)
   };
 }
 
@@ -1340,6 +1443,7 @@ function normalizeAlert(raw: unknown): AlertSummary {
     status: alert.status === "triaged" || alert.status === "contained" ? alert.status : "new",
     hostname: readOptionalString(alert.hostname, "UNKNOWN-HOST"),
     detectedAt: readOptionalString(alert.detectedAt, new Date().toISOString()),
+    tacticId: typeof alert.tacticId === "string" ? alert.tacticId : undefined,
     technique: typeof alert.technique === "string" ? alert.technique : undefined,
     summary: readOptionalString(alert.summary, "No summary available."),
     fingerprint: typeof alert.fingerprint === "string" ? alert.fingerprint : undefined
@@ -1401,6 +1505,11 @@ function normalizeEvidence(raw: unknown, hostnameByDeviceId: Map<string, string>
     recordedAt: readOptionalString(item.recordedAt, nowIso),
     source: readOptionalString(item.source, "unknown"),
     subjectPath: readOptionalString(item.subjectPath, "unknown"),
+    appName: typeof item.appName === "string" ? item.appName : undefined,
+    contentName: typeof item.contentName === "string" ? item.contentName : undefined,
+    sourceType: typeof item.sourceType === "string" ? item.sourceType : undefined,
+    sessionId: typeof item.sessionId === "number" ? item.sessionId : undefined,
+    preview: typeof item.preview === "string" ? item.preview : undefined,
     sha256: readOptionalString(item.sha256, "unknown"),
     disposition: readOptionalString(item.disposition, "unknown"),
     tacticId: typeof item.tacticId === "string" ? item.tacticId : undefined,
@@ -1427,6 +1536,11 @@ function normalizeScanHistory(
     scannedAt: readOptionalString(item.scannedAt, nowIso),
     source: readOptionalString(item.source, "unknown"),
     subjectPath: readOptionalString(item.subjectPath, "unknown"),
+    appName: typeof item.appName === "string" ? item.appName : undefined,
+    contentName: typeof item.contentName === "string" ? item.contentName : undefined,
+    sourceType: typeof item.sourceType === "string" ? item.sourceType : undefined,
+    sessionId: typeof item.sessionId === "number" ? item.sessionId : undefined,
+    preview: typeof item.preview === "string" ? item.preview : undefined,
     sha256: readOptionalString(item.sha256, "unknown"),
     contentType: typeof item.contentType === "string" ? item.contentType : undefined,
     reputation: typeof item.reputation === "string" ? item.reputation : undefined,
@@ -1811,6 +1925,675 @@ function findDeviceOrThrow(state: ControlPlaneState, deviceId: string) {
   }
 
   return device;
+}
+
+function findAlertOrThrow(state: ControlPlaneState, alertId: string) {
+  const alert = state.alerts.find((item) => item.id === alertId);
+  if (!alert) {
+    throw new AlertNotFoundError(alertId);
+  }
+
+  return alert;
+}
+
+function findRelatedDeviceForAlert(state: ControlPlaneState, alert: AlertSummary) {
+  const normalizedHostname = alert.hostname.toLowerCase();
+
+  if (alert.deviceId) {
+    return (
+      state.devices.find((item) => item.id === alert.deviceId) ??
+      state.devices.find((item) => item.hostname.toLowerCase() === normalizedHostname) ??
+      null
+    );
+  }
+
+  return state.devices.find((item) => item.hostname.toLowerCase() === normalizedHostname) ?? null;
+}
+
+function matchesGeneratedAlert(alert: AlertSummary, candidate: AlertSummary) {
+  if (alert.fingerprint && candidate.fingerprint) {
+    return alert.fingerprint === candidate.fingerprint;
+  }
+
+  return (
+    alert.hostname.toLowerCase() === candidate.hostname.toLowerCase() &&
+    alert.title === candidate.title &&
+    (alert.technique ?? "") === (candidate.technique ?? "") &&
+    alert.summary === candidate.summary
+  );
+}
+
+function isWithinBehaviorWindow(referenceIso: string, candidateIso: string, windowMinutes = 30) {
+  const referenceTime = Date.parse(referenceIso);
+  const candidateTime = Date.parse(candidateIso);
+  if (Number.isNaN(referenceTime) || Number.isNaN(candidateTime)) {
+    return false;
+  }
+
+  return Math.abs(candidateTime - referenceTime) <= windowMinutes * 60 * 1000;
+}
+
+function truncateBehaviorText(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function normalizeBehaviorPath(value: string | undefined) {
+  return value?.replaceAll("/", "\\").toLowerCase() ?? "";
+}
+
+function looksLikeScriptPath(value: string | undefined) {
+  return /\.(ps1|bat|cmd|js|jse|vbs|vbe|hta)$/i.test(normalizeBehaviorPath(value));
+}
+
+function looksLikeExecutablePath(value: string | undefined) {
+  return /\.(exe|dll|scr|msi)$/i.test(normalizeBehaviorPath(value));
+}
+
+function isUserWritablePath(value: string | undefined) {
+  const normalized = normalizeBehaviorPath(value);
+  return normalized.includes("\\users\\") || normalized.includes("\\downloads\\") || normalized.includes("\\desktop\\") || normalized.includes("\\appdata\\");
+}
+
+function buildAlertBehaviorChain(
+  alert: AlertSummary,
+  matchingTelemetry: TelemetryRecord[],
+  telemetry: TelemetryRecord[],
+  commands: DeviceCommandSummary[],
+  evidence: EvidenceSummary[],
+  quarantineItems: QuarantineItemSummary[],
+  scanHistory: ScanHistorySummary[]
+): AlertBehaviorChain {
+  const alertTime = alert.detectedAt;
+  const uniqueSteps = new Map<string, AlertBehaviorChainStep>();
+  const addStep = (step: AlertBehaviorChainStep | null | undefined) => {
+    if (!step) {
+      return;
+    }
+
+    const key = `${step.category}|${step.occurredAt}|${step.title}|${step.summary}`;
+    if (!uniqueSteps.has(key)) {
+      uniqueSteps.set(key, step);
+    }
+  };
+
+  const commandLineSuspicion = (value: string | undefined) =>
+    value && /encodedcommand|frombase64string|downloadstring|invoke-webrequest|\biwr\b|bitsadmin|certutil|mshta|wscript|cscript|rundll32|regsvr32/i.test(value)
+      ? "The command line contains staged or obfuscated execution markers."
+      : undefined;
+
+  addStep({
+    id: `alert-${alert.id}`,
+    occurredAt: alert.detectedAt,
+    category: "alert",
+    title: alert.title,
+    summary: alert.summary,
+    source: "endpoint-alert",
+    severity: alert.severity,
+    tacticId: alert.tacticId,
+    techniqueId: alert.technique,
+    atRisk: "This alert anchors the chain but does not, by itself, explain the full execution path."
+  });
+
+  const orderedTelemetry = [...matchingTelemetry, ...telemetry.filter((record) => !matchingTelemetry.some((candidate) => candidate.eventId === record.eventId) && isWithinBehaviorWindow(alertTime, record.occurredAt))].sort(
+    (left, right) => left.occurredAt.localeCompare(right.occurredAt)
+  );
+
+  for (const record of orderedTelemetry) {
+    const payload = parsePayload(record.payloadJson);
+    const processImageName = record.processImageName ?? readString(payload, "processImageName") ?? readString(payload, "imageName") ?? undefined;
+    const processImagePath = record.processImagePath ?? readString(payload, "processImagePath") ?? readString(payload, "imagePath") ?? undefined;
+    const parentProcessImageName = record.parentProcessImageName ?? readString(payload, "parentImageName") ?? undefined;
+    const parentProcessImagePath = record.parentProcessImagePath ?? readString(payload, "parentImagePath") ?? undefined;
+    const moduleImageName = record.moduleImageName ?? readString(payload, "imageName") ?? undefined;
+    const moduleImagePath = record.moduleImagePath ?? readString(payload, "imagePath") ?? undefined;
+    const remoteAddress = readString(payload, "remoteAddress");
+    const remotePort = readNumber(payload, "remotePort");
+    const localAddress = readString(payload, "localAddress");
+    const localPort = readNumber(payload, "localPort");
+    const commandLine = record.processCommandLine ?? readString(payload, "commandLine") ?? undefined;
+    const summaryParts: string[] = [record.summary];
+
+    if (record.eventType === "image.loaded") {
+      summaryParts.push(`Module: ${moduleImageName ?? "unknown"}`);
+      if (processImageName) {
+        summaryParts.push(`Process: ${processImageName}`);
+      }
+      if (moduleImagePath) {
+        summaryParts.push(`Module path: ${moduleImagePath}`);
+      }
+
+      addStep({
+        id: record.eventId,
+        occurredAt: record.occurredAt,
+        category: "module",
+        title: `${moduleImageName ?? "Module"} loaded into ${processImageName ?? "process"}`,
+        summary: summaryParts.join(". "),
+        source: record.source,
+        severity: alert.severity,
+        tacticId: alert.tacticId,
+        techniqueId: alert.technique,
+        atRisk: processImageName ? `The loader chain now runs inside ${processImageName}.` : undefined,
+        linkedEventIds: record.processId != null ? [`process-${record.processId}`] : undefined
+      });
+      continue;
+    }
+
+    if (record.eventType.startsWith("process.")) {
+      summaryParts.push(`Process: ${processImageName ?? "unknown"}`);
+      if (processImagePath) {
+        summaryParts.push(`Image path: ${processImagePath}`);
+      }
+      if (parentProcessImageName || parentProcessImagePath) {
+        summaryParts.push(`Parent: ${parentProcessImageName ?? parentProcessImagePath}`);
+      }
+      if (record.processIntegrityLevel) {
+        summaryParts.push(`Integrity: ${record.processIntegrityLevel}`);
+      }
+      if (record.processSigner) {
+        summaryParts.push(`Signer: ${record.processSigner}`);
+      }
+      if (commandLine) {
+        summaryParts.push(`Command line: ${truncateBehaviorText(commandLine, 120)}`);
+      }
+
+      addStep({
+        id: record.eventId,
+        occurredAt: record.occurredAt,
+        category: "process",
+        title: `${processImageName ?? "Process"} ${record.eventType === "process.exited" ? "exited" : "started"}`,
+        summary: summaryParts.join(". "),
+        source: record.source,
+        severity: alert.severity,
+        tacticId: alert.tacticId,
+        techniqueId: alert.technique,
+        atRisk: commandLineSuspicion(commandLine),
+        linkedEventIds:
+          record.processId != null
+            ? [`process-${record.processId}`]
+            : parentProcessImageName
+              ? [`process-parent-${parentProcessImageName}`]
+              : undefined
+      });
+      continue;
+    }
+
+    if (record.eventType.startsWith("network.")) {
+      summaryParts.push(
+        `Connection: ${localAddress ?? "unknown"}:${localPort ?? "?"} -> ${remoteAddress ?? "unknown"}:${remotePort ?? "?"}`
+      );
+      if (processImageName) {
+        summaryParts.push(`Process: ${processImageName}`);
+      }
+      if (processImagePath) {
+        summaryParts.push(`Process path: ${processImagePath}`);
+      }
+
+      const externalDestination = remoteAddress && !isPrivateAddress(remoteAddress);
+
+      addStep({
+        id: record.eventId,
+        occurredAt: record.occurredAt,
+        category: "network",
+        title: `${processImageName ?? "Process"} network connection`,
+        summary: summaryParts.join(". "),
+        source: record.source,
+        severity: alert.severity,
+        tacticId: externalDestination ? "TA0011" : alert.tacticId,
+        techniqueId: alert.technique,
+        atRisk: externalDestination
+          ? `${processImageName ?? "The process"} still has outbound network access to ${remoteAddress}${remotePort != null ? `:${remotePort}` : ""}.`
+          : undefined,
+        linkedEventIds: record.processId != null ? [`process-${record.processId}`] : undefined
+      });
+      continue;
+    }
+
+    if (record.eventType.startsWith("file.")) {
+      const filePath = readString(payload, "path") ?? readString(payload, "filePath") ?? undefined;
+      const lowerPath = normalizeBehaviorPath(filePath);
+      const fileName = filePath ? filePath.split(/[/\\]/).filter(Boolean).at(-1) ?? filePath : "file";
+      const suspiciousFile = isUserWritablePath(filePath) && (looksLikeExecutablePath(filePath) || looksLikeScriptPath(filePath));
+
+      if (filePath) {
+        summaryParts.push(`File: ${filePath}`);
+      }
+      if (readNumber(payload, "sizeBytes") != null) {
+        summaryParts.push(`Size: ${readNumber(payload, "sizeBytes")}`);
+      }
+      if (lowerPath) {
+        summaryParts.push(`Path: ${lowerPath}`);
+      }
+
+      addStep({
+        id: record.eventId,
+        occurredAt: record.occurredAt,
+        category: "file",
+        title: `${fileName} ${record.eventType.replace("file.", "")}`,
+        summary: summaryParts.join(". "),
+        source: record.source,
+        severity: alert.severity,
+        tacticId: alert.tacticId,
+        techniqueId: alert.technique,
+        blocked: false,
+        atRisk: suspiciousFile ? `The staged file remains in a user-accessible location and can still be launched.` : undefined
+      });
+      continue;
+    }
+
+    if (record.eventType === "scan.finding") {
+      const appName = readString(payload, "appName") ?? undefined;
+      const contentName = readString(payload, "contentName") ?? readString(payload, "path") ?? undefined;
+      const sourceType = readString(payload, "source") ?? undefined;
+      const preview = readString(payload, "preview") ?? undefined;
+      const techniqueId = readString(payload, "techniqueId") ?? undefined;
+      const tacticId = readString(payload, "tacticId") ?? undefined;
+      const disposition = readString(payload, "disposition") ?? readString(payload, "remediationStatus") ?? undefined;
+      const blocked = disposition === "block" || disposition === "quarantine" || disposition === "quarantined";
+      const scriptLike = record.source === "amsi-provider" || looksLikeScriptPath(contentName) || (contentName ? /powershell|wscript|cscript|hta/i.test(contentName) : false);
+
+      if (appName) {
+        summaryParts.push(`AMSI app: ${appName}`);
+      }
+      if (contentName) {
+        summaryParts.push(`Content: ${contentName}`);
+      }
+      if (sourceType) {
+        summaryParts.push(`Source: ${sourceType}`);
+      }
+      if (preview) {
+        summaryParts.push(`Preview: ${truncateBehaviorText(preview, 120)}`);
+      }
+      if (disposition) {
+        summaryParts.push(`Disposition: ${disposition}`);
+      }
+
+      addStep({
+        id: record.eventId,
+        occurredAt: record.occurredAt,
+        category: scriptLike ? "script" : "file",
+        title: blocked
+          ? `${scriptLike ? "Script" : "File"} content blocked`
+          : `${scriptLike ? "Script" : "File"} content inspected`,
+        summary: summaryParts.join(". "),
+        source: record.source,
+        severity: blocked ? (alert.severity === "critical" ? "critical" : "high") : alert.severity,
+        tacticId: tacticId ?? alert.tacticId,
+        techniqueId: techniqueId ?? alert.technique,
+        blocked,
+        atRisk: blocked
+          ? undefined
+          : scriptLike
+            ? "The script is still available for execution or reuse."
+            : "The staged file remains available on disk."
+      });
+      continue;
+    }
+  }
+
+  const hasTelemetryScanFinding = uniqueSteps.size > 0 && Array.from(uniqueSteps.values()).some((step) => step.category === "script" || step.category === "file");
+
+  if (!hasTelemetryScanFinding) {
+    for (const item of scanHistory) {
+      if (!isWithinBehaviorWindow(alertTime, item.scannedAt)) {
+        continue;
+      }
+
+      const contentName = item.contentName ?? item.subjectPath;
+      const scriptLike = item.source === "amsi-provider" || looksLikeScriptPath(contentName) || (contentName ? /powershell|wscript|cscript|hta/i.test(contentName) : false);
+      const blocked = item.disposition === "block" || item.disposition === "quarantine" || item.disposition === "quarantined";
+
+      addStep({
+        id: item.eventId,
+        occurredAt: item.scannedAt,
+        category: scriptLike ? "script" : "file",
+        title: blocked ? `${scriptLike ? "Script" : "File"} content blocked` : `${scriptLike ? "Script" : "File"} content inspected`,
+        summary: item.summary,
+        source: item.source,
+        severity: blocked ? (alert.severity === "critical" ? "critical" : "high") : alert.severity,
+        tacticId: item.tacticId ?? alert.tacticId,
+        techniqueId: item.techniqueId ?? alert.technique,
+        blocked,
+        atRisk: blocked ? undefined : scriptLike ? "The script is still available for execution or reuse." : "The staged file remains available on disk."
+      });
+    }
+
+    for (const item of evidence) {
+      if (!isWithinBehaviorWindow(alertTime, item.recordedAt)) {
+        continue;
+      }
+
+      const contentName = item.contentName ?? item.subjectPath;
+      const scriptLike = item.source === "amsi-provider" || looksLikeScriptPath(contentName) || (contentName ? /powershell|wscript|cscript|hta/i.test(contentName) : false);
+      const blocked = item.disposition === "block" || item.disposition === "quarantine" || item.disposition === "quarantined";
+
+      addStep({
+        id: item.recordId,
+        occurredAt: item.recordedAt,
+        category: scriptLike ? "script" : "file",
+        title: blocked ? `${scriptLike ? "Script" : "File"} content blocked` : `${scriptLike ? "Script" : "File"} content inspected`,
+        summary: item.summary,
+        source: item.source,
+        severity: blocked ? (alert.severity === "critical" ? "critical" : "high") : alert.severity,
+        tacticId: item.tacticId ?? alert.tacticId,
+        techniqueId: item.techniqueId ?? alert.technique,
+        blocked,
+        atRisk: blocked ? undefined : scriptLike ? "The script is still available for execution or reuse." : "The staged file remains available on disk."
+      });
+    }
+  }
+
+  for (const item of quarantineItems) {
+    if (!isWithinBehaviorWindow(alertTime, item.lastUpdatedAt) && !isWithinBehaviorWindow(alertTime, item.capturedAt)) {
+      continue;
+    }
+
+    addStep({
+      id: item.recordId,
+      occurredAt: item.lastUpdatedAt,
+      category: "quarantine",
+      title: `${item.status} ${item.originalPath}`,
+      summary: `${item.originalPath} -> ${item.quarantinedPath}`,
+      source: "quarantine",
+      severity: item.status === "quarantined" ? alert.severity : "medium",
+      tacticId: item.technique ? alert.tacticId : undefined,
+      techniqueId: item.technique,
+      blocked: item.status === "quarantined",
+      atRisk: item.status === "restored" ? "The file was restored and remains present on the endpoint." : undefined,
+      linkedEventIds: item.evidenceRecordId ? [item.evidenceRecordId] : undefined
+    });
+  }
+
+  for (const item of commands) {
+    if (!isWithinBehaviorWindow(alertTime, item.updatedAt)) {
+      continue;
+    }
+
+    addStep({
+      id: item.id,
+      occurredAt: item.updatedAt,
+      category: "response",
+      title: item.type.replaceAll(".", " "),
+      summary: `${item.status.replaceAll("_", " ")} by ${item.issuedBy}${item.targetPath ? ` on ${item.targetPath}` : ""}`,
+      source: "response",
+      severity: alert.severity,
+      blocked: item.status === "completed" && (item.type === "device.isolate" || item.type === "process.tree.terminate" || item.type === "quarantine.delete"),
+      atRisk: item.status === "pending" || item.status === "in_progress" ? "The response action is still pending." : undefined,
+      linkedEventIds: item.recordId ? [item.recordId] : undefined
+    });
+  }
+
+  const steps = Array.from(uniqueSteps.values()).sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
+  const tacticIds = [...new Set([alert.tacticId, ...steps.map((item) => item.tacticId)].filter((value): value is string => Boolean(value)))];
+  const techniqueIds = [...new Set([alert.technique, ...steps.map((item) => item.techniqueId)].filter((value): value is string => Boolean(value)))];
+  const chainSteps = steps.filter((item) => item.category !== "alert");
+  const blockedSteps = chainSteps.filter((item) => item.blocked);
+  const atRiskSteps = chainSteps.filter((item) => Boolean(item.atRisk));
+  const sequenceCategories = new Set(steps.map((item) => item.category));
+  const severityBase: Record<AlertSeverity, number> = { low: 28, medium: 38, high: 50, critical: 62 };
+  const score = Math.min(
+    100,
+    severityBase[alert.severity] + sequenceCategories.size * 6 + blockedSteps.length * 10 + tacticIds.length * 4 + techniqueIds.length * 5 + (sequenceCategories.has("network") ? 8 : 0) + (sequenceCategories.has("module") ? 6 : 0) + (sequenceCategories.has("script") ? 8 : 0)
+  );
+
+  const whatHappened = chainSteps.length > 0 ? chainSteps.slice(0, 4).map((item) => `${item.title}: ${truncateBehaviorText(item.summary, 80)}`).join(" -> ") : alert.summary;
+  const suspicionReasons = new Set<string>();
+
+  if (alert.technique) {
+    suspicionReasons.add(`ATT&CK ${alert.technique} is present in the alert mapping.`);
+  }
+  if (alert.tacticId) {
+    suspicionReasons.add(`The chain maps to ATT&CK tactic ${alert.tacticId}.`);
+  }
+  if (chainSteps.some((item) => item.category === "process" && commandLineSuspicion(item.summary))) {
+    suspicionReasons.add("The process command line includes staged or obfuscated execution markers.");
+  }
+  if (chainSteps.some((item) => item.category === "module")) {
+    suspicionReasons.add("A module loaded into an executing process, which is consistent with loader chaining.");
+  }
+  if (chainSteps.some((item) => item.category === "network" && item.atRisk)) {
+    suspicionReasons.add("The same process lineage retained outbound network reach.");
+  }
+  if (chainSteps.some((item) => item.category === "script" && item.blocked)) {
+    suspicionReasons.add("Script content was blocked before the execution chain could advance.");
+  }
+  if (chainSteps.some((item) => item.category === "quarantine" && item.blocked)) {
+    suspicionReasons.add("Quarantine interrupted the chain and preserved the artefact for review.");
+  }
+
+  const whySuspicious = suspicionReasons.size > 0 ? Array.from(suspicionReasons).join(" ") : "The sequence is suspicious because the alert correlates execution, payload staging, and follow-on activity rather than a single isolated event.";
+  const blocked = blockedSteps.length > 0 ? Array.from(new Set(blockedSteps.map((item) => item.title))).join("; ") : "No block or containment action is recorded in this sequence.";
+  const atRisk = atRiskSteps.length > 0 ? Array.from(new Set(atRiskSteps.map((item) => item.atRisk).filter((value): value is string => Boolean(value)))).join(" ") : "No obvious residual activity remains in the current snapshot.";
+
+  return {
+    score,
+    narrative: `Sequence score ${score}/100. ${whatHappened}. ${whySuspicious} ${blocked} ${atRisk}`.trim(),
+    whatHappened,
+    whySuspicious,
+    blocked,
+    atRisk,
+    tacticIds,
+    techniqueIds,
+    steps
+  };
+}
+
+function buildAlertResponsePlaybook(
+  alert: AlertSummary,
+  relatedDevice: DeviceRecord | null,
+  behaviorChain: AlertBehaviorChain,
+  matchingTelemetry: TelemetryRecord[],
+  evidence: EvidenceSummary[],
+  quarantineItems: QuarantineItemSummary[],
+  scanHistory: ScanHistorySummary[]
+): AlertResponsePlaybook {
+  const uniqueEvidencePaths = new Set<string>();
+  const evidenceToPreserve: string[] = [];
+  const addEvidenceNote = (value: string | undefined) => {
+    if (!value || uniqueEvidencePaths.has(value)) {
+      return;
+    }
+
+    uniqueEvidencePaths.add(value);
+    evidenceToPreserve.push(value);
+  };
+
+  const processTelemetry = matchingTelemetry.find((record) => Boolean(record.processImagePath || record.processImageName));
+  const networkTelemetry = matchingTelemetry.find((record) => record.eventType.startsWith("network."));
+  const getArtifactId = (item: EvidenceSummary | ScanHistorySummary) => ("recordId" in item ? item.recordId : item.eventId);
+
+  const processPath = processTelemetry?.processImagePath;
+  const processName = processTelemetry?.processImageName ?? processTelemetry?.moduleImageName ?? processTelemetry?.eventType;
+  const processLineageId = processTelemetry?.eventId;
+
+  const alertArtifacts = [...scanHistory, ...evidence].map((item) => ({
+    item,
+    path: item.contentName ?? item.subjectPath
+  }));
+
+  const scriptArtifact = alertArtifacts.find(({ item, path }) => Boolean(path) && (item.source === "amsi-provider" || looksLikeScriptPath(path)));
+  const fileArtifact = alertArtifacts.find(({ path }) => Boolean(path));
+  const targetedScanPath = scriptArtifact?.path ?? fileArtifact?.path ?? processPath;
+  const cleanupPath =
+    scriptArtifact && scriptArtifact.path && isUserWritablePath(scriptArtifact.path)
+      ? scriptArtifact.path
+      : fileArtifact && fileArtifact.path && isUserWritablePath(fileArtifact.path)
+        ? fileArtifact.path
+        : undefined;
+
+  addEvidenceNote("Alert detail, behavior chain, and linked telemetry");
+
+  if (processTelemetry) {
+    addEvidenceNote(
+      processPath
+        ? `Process lineage and command-line context for ${processName ?? processPath}`
+        : `Process lineage and command-line context for ${processName ?? "the active process"}`
+    );
+  }
+
+  if (networkTelemetry) {
+    const payload = parsePayload(networkTelemetry.payloadJson);
+    const remoteAddress = readString(payload, "remoteAddress");
+    const remotePort = readNumber(payload, "remotePort");
+    addEvidenceNote(
+      remoteAddress
+        ? `Network flow and remote endpoint details for ${remoteAddress}${remotePort != null ? `:${remotePort}` : ""}`
+        : "Network flow and socket context"
+    );
+  }
+
+  if (scriptArtifact?.path) {
+    addEvidenceNote(`Script content and preview for ${scriptArtifact.path}`);
+  }
+
+  if (fileArtifact?.path && fileArtifact.path !== scriptArtifact?.path) {
+    addEvidenceNote(`File artifact and hash for ${fileArtifact.path}`);
+  }
+
+  if (quarantineItems.length > 0) {
+    addEvidenceNote("Quarantine records and restore/delete history");
+  }
+
+  if (scanHistory.length > 0) {
+    addEvidenceNote("Scan verdict history and remediation status");
+  }
+
+  if (evidence.length > 0) {
+    addEvidenceNote("Evidence record hashes and disposition history");
+  }
+
+  const hasExternalNetwork = Boolean(
+    networkTelemetry &&
+      (() => {
+        const payload = parsePayload(networkTelemetry.payloadJson);
+        const remoteAddress = readString(payload, "remoteAddress");
+        return remoteAddress ? !isPrivateAddress(remoteAddress) : false;
+      })()
+  );
+  const hasLiveProcessChain = Boolean(processTelemetry && processPath);
+  const hasScriptOrFileArtifact = Boolean(targetedScanPath);
+  const hasCleanupTarget = Boolean(cleanupPath);
+  const suspiciousProcessStep = behaviorChain.steps.some(
+    (step) =>
+      step.category === "process" &&
+      /encodedcommand|frombase64string|downloadstring|invoke-webrequest|\biwr\b|bitsadmin|certutil|mshta|wscript|cscript|rundll32|regsvr32/i.test(step.summary)
+  );
+  const suspiciousModuleStep = behaviorChain.steps.some(
+    (step) => step.category === "module" && /powershell|pwsh|cmd|mshta|wscript|rundll32|regsvr32/i.test(step.summary)
+  );
+  const shouldContainmentFirst = alert.severity === "critical" || hasExternalNetwork || suspiciousProcessStep || suspiciousModuleStep;
+  const playbookMode: AlertResponsePlaybook["mode"] = hasCleanupTarget && !shouldContainmentFirst ? "cleanup" : shouldContainmentFirst ? "containment" : "investigation";
+
+  const actions: AlertResponsePlaybookAction[] = [];
+  const addAction = (action: AlertResponsePlaybookAction) => {
+    actions.push(action);
+  };
+
+  if (relatedDevice && !relatedDevice.isolated && shouldContainmentFirst) {
+    addAction({
+      id: `isolate-${alert.id}`,
+      category: "containment",
+      title: "Isolate the host",
+      detail: "Use central containment to stop the chain from expanding while you preserve the artefact trail.",
+      reason: hasExternalNetwork
+        ? "The chain still has outbound reach, so host containment reduces blast radius before deeper remediation."
+        : "The chain shows active process or loader behavior that is easier to stop with network containment first.",
+      commandType: "device.isolate",
+      automationEligible: false,
+      approvalRequired: true,
+        linkedEventIds: [alert.id, ...(processLineageId ? [processLineageId] : [])]
+    });
+  }
+
+  if (processTelemetry && processPath) {
+    addAction({
+      id: `terminate-${alert.id}`,
+      category: "containment",
+      title: "Terminate the suspicious process tree",
+      detail: `Queue a process-tree termination for ${processPath} so the lineage cannot keep staging or beaconing.`,
+      reason: "The alert includes process lineage that should be stopped once evidence is preserved and containment is in place.",
+      commandType: "process.tree.terminate",
+      targetPath: processPath,
+      automationEligible: false,
+      approvalRequired: true,
+      linkedEventIds: [processTelemetry.eventId]
+    });
+  }
+
+  if (hasScriptOrFileArtifact && targetedScanPath) {
+    const path = targetedScanPath;
+    addAction({
+      id: `scan-${alert.id}`,
+      category: "investigation",
+      title: "Queue a targeted scan",
+      detail: `Run a targeted scan against ${path} to validate whether sibling artefacts or secondary payloads are still present.`,
+      reason: "Targeted scans are repeatable and low-risk, so they are a good automated validation step after a suspicious drop or script event.",
+      commandType: "scan.targeted",
+      targetPath: path,
+      automationEligible: true,
+      approvalRequired: false,
+      linkedEventIds: [
+        ...(scriptArtifact ? [getArtifactId(scriptArtifact.item)] : []),
+        ...(fileArtifact && fileArtifact !== scriptArtifact ? [getArtifactId(fileArtifact.item)] : [])
+      ]
+    });
+  }
+
+  if (hasCleanupTarget && cleanupPath) {
+    addAction({
+      id: `cleanup-${alert.id}`,
+      category: "cleanup",
+      title: "Clean up the drop location",
+      detail: `Remove or clean up ${cleanupPath} and nearby user-writable artefacts after the evidence copy is secured.`,
+      reason: "The artefact lives in a user-writable location, which is where persistence and re-execution commonly hide.",
+      commandType: "persistence.cleanup",
+      targetPath: cleanupPath,
+      automationEligible: false,
+      approvalRequired: true,
+      linkedEventIds: [
+        ...(scriptArtifact ? [getArtifactId(scriptArtifact.item)] : []),
+        ...(fileArtifact && fileArtifact !== scriptArtifact ? [getArtifactId(fileArtifact.item)] : [])
+      ]
+    });
+  }
+
+  addAction({
+    id: `bundle-${alert.id}`,
+    category: "investigation",
+    title: "Preserve an investigation bundle",
+    detail: "Capture the alert detail, timeline, telemetry, evidence, quarantine, and command history before the working set changes.",
+    reason: "The investigation bundle keeps the sequence explainable even if the endpoint state changes while the analyst is working.",
+    automationEligible: false,
+    approvalRequired: false,
+    linkedEventIds: [alert.id]
+  });
+
+  const title =
+    playbookMode === "containment"
+      ? "Containment-first response playbook"
+      : playbookMode === "cleanup"
+        ? "Cleanup and validation playbook"
+        : "Investigation playbook";
+
+  const summary =
+    playbookMode === "containment"
+      ? relatedDevice?.isolated
+        ? "The host is already isolated; keep it contained, preserve evidence, and validate whether the suspicious process chain is still active."
+        : "The alert still shows live execution or network reach, so contain the host and stop the process chain before performing deeper cleanup."
+      : playbookMode === "cleanup"
+        ? "The suspicious artefact is in a user-writable location, so validate the drop, secure the evidence, and clean up the path once approved."
+        : "The alert looks more like a focused validation problem than an active spread, so preserve the evidence bundle and run low-risk confirmation steps.";
+
+  return {
+    mode: playbookMode,
+    title,
+    summary,
+    evidenceToPreserve,
+    actions
+  };
 }
 
 function findCommandOrThrow(state: ControlPlaneState, deviceId: string, commandId: string) {
@@ -2431,6 +3214,11 @@ function updateEvidenceInventory(state: ControlPlaneState, record: TelemetryReco
     recordedAt: record.occurredAt,
     source: record.source,
     subjectPath: readString(payload, "path") ?? "unknown",
+    appName: readString(payload, "appName"),
+    contentName: readString(payload, "contentName"),
+    sourceType: readString(payload, "source"),
+    sessionId: readNumber(payload, "sessionId"),
+    preview: readString(payload, "preview"),
     sha256: readString(payload, "sha256") ?? "unknown",
     disposition: readString(payload, "disposition") ?? readString(payload, "remediationStatus") ?? "unknown",
     tacticId: readString(payload, "tacticId"),
@@ -2463,6 +3251,11 @@ function updateScanHistory(state: ControlPlaneState, record: TelemetryRecord) {
     scannedAt: record.occurredAt,
     source: record.source,
     subjectPath: readString(payload, "path") ?? "unknown",
+    appName: readString(payload, "appName"),
+    contentName: readString(payload, "contentName"),
+    sourceType: readString(payload, "source"),
+    sessionId: readNumber(payload, "sessionId"),
+    preview: readString(payload, "preview"),
     sha256: readString(payload, "sha256") ?? "unknown",
     contentType: readString(payload, "contentType"),
     reputation: readString(payload, "reputation"),
@@ -3079,6 +3872,58 @@ export function createFileBackedControlPlaneStore(
       return sortAlerts(state.alerts);
     },
 
+    async getAlertDetail(alertId: string) {
+      const state = await loadState();
+      const alert = findAlertOrThrow(state, alertId);
+      const relatedDevice = findRelatedDeviceForAlert(state, alert);
+      const normalizedHostname = alert.hostname.toLowerCase();
+      const relatedDeviceIds = new Set(
+        [alert.deviceId, relatedDevice?.id].filter((value): value is string => Boolean(value))
+      );
+
+      const matchesAlertContext = (item: { deviceId?: string; hostname: string }) => {
+        if (item.deviceId && relatedDeviceIds.has(item.deviceId)) {
+          return true;
+        }
+
+        return item.hostname.toLowerCase() === normalizedHostname;
+      };
+
+      const telemetry = sortTelemetry(state.telemetry.filter(matchesAlertContext)).slice(0, 200);
+      const matchingTelemetry = telemetry
+        .filter((record) => generateAlertsFromTelemetry([record]).some((candidate) => matchesGeneratedAlert(alert, candidate)))
+        .slice(0, 50);
+      const behaviorChain = buildAlertBehaviorChain(
+        alert,
+        matchingTelemetry,
+        telemetry,
+        sortCommands(state.commands.filter(matchesAlertContext)).slice(0, 50),
+        sortEvidence(state.evidence.filter(matchesAlertContext)).slice(0, 50),
+        sortQuarantineItems(state.quarantineItems.filter(matchesAlertContext)).slice(0, 50),
+        sortScanHistory(state.scanHistory.filter(matchesAlertContext)).slice(0, 50)
+      );
+      const commands = sortCommands(state.commands.filter(matchesAlertContext)).slice(0, 50);
+      const evidence = sortEvidence(state.evidence.filter(matchesAlertContext)).slice(0, 50);
+      const quarantineItems = sortQuarantineItems(state.quarantineItems.filter(matchesAlertContext)).slice(0, 50);
+      const scanHistory = sortScanHistory(state.scanHistory.filter(matchesAlertContext)).slice(0, 50);
+      const playbook = buildAlertResponsePlaybook(alert, relatedDevice, behaviorChain, matchingTelemetry, evidence, quarantineItems, scanHistory);
+
+      return {
+        alert,
+        device: relatedDevice ? toDeviceSummary(state, relatedDevice) : null,
+        posture: relatedDevice ? state.devicePosture.find((item) => item.deviceId === relatedDevice.id) ?? null : null,
+        behaviorChain,
+        playbook,
+        matchingTelemetry,
+        telemetry,
+        commands,
+        evidence,
+        quarantineItems,
+        scanHistory,
+        relatedAlerts: sortAlerts(state.alerts.filter((item) => item.id !== alert.id && matchesAlertContext(item))).slice(0, 20)
+      };
+    },
+
     async listTelemetry(deviceId, limit = 50) {
       const state = await loadState();
       const filtered = deviceId ? state.telemetry.filter((item) => item.deviceId === deviceId) : state.telemetry;
@@ -3666,12 +4511,16 @@ export function createFileBackedControlPlaneStore(
             continue;
           }
 
-          const record: TelemetryRecord = {
-            ...event,
-            deviceId,
-            hostname: device.hostname,
-            ingestedAt: receivedAt
-          };
+          const record = normalizeTelemetryRecord(
+            {
+              ...event,
+              deviceId,
+              hostname: device.hostname,
+              ingestedAt: receivedAt
+            },
+            new Map([[device.id, device.hostname]]),
+            receivedAt
+          );
           acceptedRecords.push(record);
           state.telemetry.push(record);
           updateQuarantineInventory(state, record);

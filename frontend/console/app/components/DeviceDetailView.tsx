@@ -24,7 +24,7 @@ import {
   restoreQuarantineItem,
   type DataSource
 } from "../../lib/api";
-import type { DeviceCommandSummary, DeviceDetail, InstalledSoftwareSummary, PrivilegeEventSummary, ScriptSummary } from "../../lib/types";
+import type { DeviceCommandSummary, DeviceDetail, InstalledSoftwareSummary, PrivilegeEventSummary, ScriptSummary, TelemetryRecord } from "../../lib/types";
 
 type DeviceTabKey = "overview" | "response" | "software" | "quarantine" | "telemetry" | "privilege";
 
@@ -72,6 +72,133 @@ function matchesQuery(query: string, values: Array<string | undefined | null>) {
 
 function splitReputation(value: string | null | undefined) {
   return value?.split(";").map((segment) => segment.trim()).filter(Boolean) ?? [];
+}
+
+function amsiContextTerms(item: {
+  appName?: string;
+  contentName?: string;
+  sourceType?: string;
+  sessionId?: number;
+  preview?: string;
+}) {
+  return [
+    item.appName,
+    item.contentName,
+    item.sourceType,
+    typeof item.sessionId === "number" ? `session ${item.sessionId}` : undefined,
+    item.preview
+  ].filter((value): value is string => Boolean(value));
+}
+
+function amsiContextChips(item: {
+  appName?: string;
+  contentName?: string;
+  sourceType?: string;
+  sessionId?: number;
+}) {
+  return [
+    item.appName ? `app: ${item.appName}` : undefined,
+    item.contentName ? `content: ${item.contentName}` : undefined,
+    item.sourceType ? `source: ${item.sourceType}` : undefined,
+    typeof item.sessionId === "number" ? `session ${item.sessionId}` : undefined
+  ].filter((value): value is string => Boolean(value));
+}
+
+function processTelemetryTerms(item: Pick<
+  TelemetryRecord,
+  | "processId"
+  | "parentProcessId"
+  | "processImageName"
+  | "processImagePath"
+  | "parentProcessImageName"
+  | "parentProcessImagePath"
+  | "processCommandLine"
+  | "processUserSid"
+  | "processIntegrityLevel"
+  | "processSessionId"
+  | "processSigner"
+  | "processExitCode"
+  | "moduleImageName"
+  | "moduleImagePath"
+  | "moduleImageBase"
+  | "moduleImageSize"
+>) {
+  return [
+    typeof item.processId === "number" ? item.processId.toString() : undefined,
+    typeof item.parentProcessId === "number" ? item.parentProcessId.toString() : undefined,
+    item.processImageName,
+    item.processImagePath,
+    item.parentProcessImageName,
+    item.parentProcessImagePath,
+    item.processCommandLine,
+    item.processUserSid,
+    item.processIntegrityLevel,
+    item.processSessionId,
+    item.processSigner,
+    typeof item.processExitCode === "number" ? item.processExitCode.toString() : undefined,
+    item.moduleImageName,
+    item.moduleImagePath,
+    item.moduleImageBase,
+    item.moduleImageSize
+  ].filter((value): value is string => Boolean(value));
+}
+
+function processTelemetryChips(item: Pick<
+  TelemetryRecord,
+  | "processId"
+  | "parentProcessId"
+  | "processImageName"
+  | "processImagePath"
+  | "parentProcessImageName"
+  | "parentProcessImagePath"
+  | "processCommandLine"
+  | "processUserSid"
+  | "processIntegrityLevel"
+  | "processSessionId"
+  | "processSigner"
+  | "processExitCode"
+  | "moduleImageName"
+  | "moduleImagePath"
+  | "moduleImageBase"
+  | "moduleImageSize"
+>) {
+  return [
+    typeof item.processId === "number" ? `pid ${item.processId}` : undefined,
+    typeof item.parentProcessId === "number" ? `parent ${item.parentProcessId}` : undefined,
+    item.processImageName ? `process: ${item.processImageName}` : undefined,
+    item.parentProcessImageName ? `parent image: ${item.parentProcessImageName}` : undefined,
+    item.processSessionId ? `session ${item.processSessionId}` : undefined,
+    item.processIntegrityLevel ? `integrity: ${item.processIntegrityLevel}` : undefined,
+    item.processSigner ? `signer: ${item.processSigner}` : undefined,
+    typeof item.processExitCode === "number" ? `exit ${item.processExitCode}` : undefined,
+    item.moduleImageName ? `module: ${item.moduleImageName}` : undefined
+  ].filter((value): value is string => Boolean(value));
+}
+
+function processTelemetryTitle(item: Pick<TelemetryRecord, "eventType" | "processImageName" | "moduleImageName">) {
+  return item.processImageName ?? item.moduleImageName ?? item.eventType;
+}
+
+function processTelemetrySummary(
+  item: Pick<TelemetryRecord, "processCommandLine" | "moduleImagePath" | "processImagePath" | "parentProcessImagePath">
+) {
+  if (item.processCommandLine) {
+    return `Command line: ${item.processCommandLine}`;
+  }
+
+  if (item.moduleImagePath) {
+    return `Module path: ${item.moduleImagePath}`;
+  }
+
+  if (item.processImagePath) {
+    return `Image path: ${item.processImagePath}`;
+  }
+
+  if (item.parentProcessImagePath) {
+    return `Parent path: ${item.parentProcessImagePath}`;
+  }
+
+  return undefined;
 }
 
 function reputationTone(value: string) {
@@ -946,10 +1073,23 @@ function renderQuarantineTab({ actionBusy, device, evidence, quarantineItems, ru
             evidence.map((item) => (
               <article key={item.recordId} className="mini-card">
                 <div className="row-between">
-                  <strong>{item.subjectPath}</strong>
+                  <strong>{item.contentName ?? item.subjectPath}</strong>
                   <span className="state-chip tone-default">{item.disposition}</span>
                 </div>
                 <p>{item.summary}</p>
+                {item.contentName && item.contentName !== item.subjectPath ? (
+                  <p className="muted-copy">Subject: {item.subjectPath}</p>
+                ) : null}
+                {amsiContextChips(item).length > 0 ? (
+                  <div className="tag-row">
+                    {amsiContextChips(item).map((chip) => (
+                      <span key={`${item.recordId}-${chip}`} className="state-chip tone-default">
+                        {chip}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {item.preview ? <pre className="payload-block">{item.preview}</pre> : null}
                 {splitReputation(item.reputation).length > 0 ? (
                   <div className="tag-row">
                     {splitReputation(item.reputation).map((segment) => (
@@ -971,7 +1111,7 @@ function renderQuarantineTab({ actionBusy, device, evidence, quarantineItems, ru
 
 function renderTelemetryTab(
   commands: DeviceDetail["commands"],
-  detail: DeviceDetail | null,
+  scanHistory: DeviceDetail["scanHistory"],
   telemetry: DeviceDetail["telemetry"]
 ) {
   return (
@@ -991,10 +1131,20 @@ function renderTelemetryTab(
             telemetry.slice(0, 12).map((record) => (
               <article key={record.eventId} className="mini-card">
                 <div className="row-between">
-                  <strong>{record.eventType}</strong>
+                  <strong>{processTelemetryTitle(record)}</strong>
                   <span className="state-chip tone-default">{record.source}</span>
                 </div>
                 <p>{record.summary}</p>
+                {processTelemetrySummary(record) ? <p className="muted-copy">{processTelemetrySummary(record)}</p> : null}
+                {processTelemetryChips(record).length > 0 ? (
+                  <div className="tag-row">
+                    {processTelemetryChips(record).map((chip) => (
+                      <span key={`${record.eventId}-${chip}`} className="state-chip tone-default">
+                        {chip}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <pre className="payload-block">{prettyPayload(record.payloadJson)}</pre>
               </article>
             ))
@@ -1028,16 +1178,29 @@ function renderTelemetryTab(
         </div>
 
         <MiniCardList>
-          {(detail?.scanHistory.length ?? 0) === 0 ? (
+          {scanHistory.length === 0 ? (
             <p className="empty-state">No scan findings are recorded for this device.</p>
           ) : (
-            detail?.scanHistory.slice(0, 12).map((item) => (
+            scanHistory.slice(0, 12).map((item) => (
               <article key={item.eventId} className="mini-card">
                 <div className="row-between">
-                  <strong>{item.subjectPath}</strong>
+                  <strong>{item.contentName ?? item.subjectPath}</strong>
                   <span className={`state-chip tone-${item.disposition}`}>{item.disposition}</span>
                 </div>
                 <p>{item.summary}</p>
+                {item.contentName && item.contentName !== item.subjectPath ? (
+                  <p className="muted-copy">Subject: {item.subjectPath}</p>
+                ) : null}
+                {amsiContextChips(item).length > 0 ? (
+                  <div className="tag-row">
+                    {amsiContextChips(item).map((chip) => (
+                      <span key={`${item.eventId}-${chip}`} className="state-chip tone-default">
+                        {chip}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {item.preview ? <pre className="payload-block">{item.preview}</pre> : null}
                 {splitReputation(item.reputation).length > 0 ? (
                   <div className="tag-row">
                     {splitReputation(item.reputation).map((segment) => (
@@ -1212,7 +1375,7 @@ export default function DeviceDetailView({ deviceId }: { deviceId: string }) {
     ) ?? [];
   const telemetry =
     detail?.telemetry.filter((item) =>
-      matchesQuery(query, [item.eventType, item.summary, item.source, item.payloadJson])
+      matchesQuery(query, [item.eventType, item.summary, item.source, item.payloadJson, ...processTelemetryTerms(item)])
     ) ?? [];
   const commands =
     detail?.commands.filter((item) =>
@@ -1220,7 +1383,20 @@ export default function DeviceDetailView({ deviceId }: { deviceId: string }) {
     ) ?? [];
   const evidence =
     detail?.evidence.filter((item) =>
-      matchesQuery(query, [item.subjectPath, item.summary, item.techniqueId, item.reputation, item.signer, item.sha256])
+      matchesQuery(query, [
+        item.subjectPath,
+        ...amsiContextTerms(item),
+        item.summary,
+        item.techniqueId,
+        item.reputation,
+        item.signer,
+        item.sha256,
+        item.sessionId?.toString()
+      ])
+    ) ?? [];
+  const scanHistory =
+    detail?.scanHistory.filter((item) =>
+      matchesQuery(query, [item.subjectPath, ...amsiContextTerms(item), item.source, item.disposition, item.scannedAt])
     ) ?? [];
   const quarantineItems =
     detail?.quarantineItems.filter((item) =>
@@ -1481,7 +1657,7 @@ export default function DeviceDetailView({ deviceId }: { deviceId: string }) {
             runAction
           })
         : null}
-      {activeTab === "telemetry" ? renderTelemetryTab(commands, detail, telemetry) : null}
+      {activeTab === "telemetry" ? renderTelemetryTab(commands, scanHistory, telemetry) : null}
     </ConsoleShell>
   );
 }

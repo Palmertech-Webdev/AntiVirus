@@ -15,6 +15,7 @@ import {
   AdminAuthenticationError,
   AdminAuthorizationError,
   createFileBackedControlPlaneStore,
+  AlertNotFoundError,
   DeviceNotFoundError,
   PolicyNotFoundError,
   ScriptNotFoundError,
@@ -30,6 +31,10 @@ const enrollmentRequestSchema = z.object({
 
 const deviceParamsSchema = z.object({
   deviceId: z.string().min(1)
+});
+
+const alertParamsSchema = z.object({
+  alertId: z.string().min(1)
 });
 
 const heartbeatRequestSchema = z.object({
@@ -356,6 +361,13 @@ function sendNotFound(reply: { code: (statusCode: number) => { send: (payload: u
   return reply.code(404).send({
     error: "device_not_found",
     deviceId
+  });
+}
+
+function sendAlertNotFound(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, alertId: string) {
+  return reply.code(404).send({
+    error: "alert_not_found",
+    alertId
   });
 }
 
@@ -1013,6 +1025,24 @@ export function buildServer(options: BuildServerOptions = {}) {
   app.get("/api/v1/alerts", async () => ({
     items: await store.listAlerts()
   }));
+
+  app.get("/api/v1/alerts/:alertId", async (request, reply) => {
+    const params = alertParamsSchema.safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    try {
+      return await store.getAlertDetail(params.data.alertId);
+    } catch (error) {
+      if (error instanceof AlertNotFoundError) {
+        return sendAlertNotFound(reply, params.data.alertId);
+      }
+
+      throw error;
+    }
+  });
 
   app.get("/api/v1/commands", async (request, reply) => {
     const parsed = commandsQuerySchema.safeParse(request.query);

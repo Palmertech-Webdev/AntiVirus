@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -56,6 +57,7 @@ struct FileData {
   std::wstring sha256;
   std::wstring textLower;
   std::wstring asciiLower;
+  std::wstring zipEntryNamesLower;
   std::vector<unsigned char> bytes;
   bool userPath{false};
   bool trustedPath{false};
@@ -95,8 +97,37 @@ bool ContainsAny(std::wstring_view haystack, std::initializer_list<std::wstring_
 bool UserPath(const std::filesystem::path& path) {
   const auto lower = ToLowerCopy(path.wstring());
   return Contains(lower, L"\\users\\") || Contains(lower, L"\\downloads\\") || Contains(lower, L"\\desktop\\") ||
-         Contains(lower, L"\\temp\\") || Contains(lower, L"\\programdata\\") ||
+         Contains(lower, L"\\temp\\") ||
          Contains(lower, L"\\appdata\\local\\temp\\") || Contains(lower, L"\\startup\\");
+}
+
+bool IsNoisyCachePath(const std::filesystem::path& path) {
+  const auto lower = ToLowerCopy(path.wstring());
+  return ContainsAny(lower, {L"\\node-compile-cache\\", L"\\v8-compile-cache\\", L"\\npm-cache\\",
+                             L"\\pnpm-store\\", L"\\yarn\\cache\\", L"\\.cache\\",
+                             L"\\appdata\\local\\temp\\node-compile-cache\\"});
+}
+
+bool ExecutableExt(const std::wstring& ext);
+bool ScriptExt(const std::wstring& ext);
+
+bool IsHighRiskExecutionSurface(const FileData& file) {
+  return file.pe || file.zip || file.ole || file.lnk || ExecutableExt(file.extension) ||
+         ScriptExt(file.extension) || file.extension == L".hta" || file.extension == L".url";
+}
+
+bool ContainsEicarMarker(const FileData& file) {
+  return ContainsAny(file.fileNameLower, {L"eicar"}) ||
+         ContainsAny(file.textLower, {L"eicar-standard-antivirus-test-file"}) ||
+         ContainsAny(file.zipEntryNamesLower, {L"eicar"});
+}
+
+bool ShouldSuppressNoisyCacheFile(const FileData& file) {
+  if (!IsNoisyCachePath(file.path) || ContainsEicarMarker(file)) {
+    return false;
+  }
+
+  return !IsHighRiskExecutionSurface(file);
 }
 
 bool TrustedPath(const std::filesystem::path& path) {
@@ -330,6 +361,43 @@ std::uint32_t CountZipEntries(const std::vector<unsigned char>& bytes) {
     }
   }
   return count;
+}
+
+std::wstring ExtractZipEntryNamesLower(const std::vector<unsigned char>& bytes) {
+  std::wstring entryNames;
+  for (std::size_t index = 0; index + 46 <= bytes.size(); ++index) {
+    if (bytes[index] != 'P' || bytes[index + 1] != 'K' || bytes[index + 2] != 0x01 || bytes[index + 3] != 0x02) {
+      continue;
+    }
+
+    const auto fileNameLength = static_cast<std::uint16_t>(bytes[index + 28] | (bytes[index + 29] << 8));
+    const auto extraFieldLength = static_cast<std::uint16_t>(bytes[index + 30] | (bytes[index + 31] << 8));
+    const auto commentLength = static_cast<std::uint16_t>(bytes[index + 32] | (bytes[index + 33] << 8));
+
+    const auto fileNameOffset = index + 46;
+    const auto fileNameEnd = fileNameOffset + fileNameLength;
+    if (fileNameEnd > bytes.size()) {
+      continue;
+    }
+
+    const auto decodedName = Utf8ToWide(std::string(reinterpret_cast<const char*>(bytes.data() + fileNameOffset),
+                                                    fileNameLength));
+    if (decodedName.empty()) {
+      continue;
+    }
+
+    if (!entryNames.empty()) {
+      entryNames.push_back(L' ');
+    }
+    entryNames += ToLowerCopy(decodedName);
+
+    const auto skipTo = fileNameEnd + extraFieldLength + commentLength;
+    if (skipTo > index) {
+      index = skipTo > 0 ? skipTo - 1 : index;
+    }
+  }
+
+  return entryNames;
 }
 
 bool LongBase64(std::wstring_view text) {
@@ -579,6 +647,7 @@ std::optional<FileData> LoadFileData(const std::filesystem::path& path) {
   file.trustedPath = TrustedPath(path);
   file.textLower = ToLowerCopy(DecodeText(file.bytes));
   file.asciiLower = ExtractAsciiLower(file.bytes);
+  file.zipEntryNamesLower = file.zip ? ExtractZipEntryNamesLower(file.bytes) : std::wstring{};
   file.entropy = Entropy(file.bytes);
   file.archiveEntryCount = file.zip ? CountZipEntries(file.bytes) : 0;
   file.contentType = file.pe ? L"portable-executable" : file.zip ? L"zip-archive" : file.ole ? L"ole-document"
@@ -636,7 +705,19 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   }
 
   const auto& file = *loaded;
+  if (ShouldSuppressNoisyCacheFile(file)) {
+    return std::nullopt;
+  }
+
   std::vector<Hit> hits;
+  const auto archiveText = file.zipEntryNamesLower.empty() ? file.asciiLower : file.zipEntryNamesLower + L" " + file.asciiLower;
+
+  if (ContainsAny(file.fileNameLower, {L"eicar"}) ||
+      ContainsAny(file.textLower, {L"eicar-standard-antivirus-test-file"}) ||
+      ContainsAny(archiveText, {L"eicar-standard-antivirus-test-file", L"x5o!p%@ap", L"eicar.com", L"eicar.txt"})) {
+    AddHit(hits, Hit{L"EICAR_TEST_SIGNATURE", L"A standard antivirus test signature was detected.", L"TA0002",
+                     L"T1204.002", 99});
+  }
 
   if ((file.pe || ExecutableExt(file.extension)) && file.userPath) {
     AddHit(hits, Hit{file.signer.empty() ? L"USER_PATH_UNSIGNED_EXECUTABLE" : L"USER_PATH_EXECUTABLE",
@@ -764,28 +845,28 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                      L"T1486", 52});
   }
 
-  if (file.zip && (Contains(file.asciiLower, L".exe") || Contains(file.asciiLower, L".dll") ||
-                   Contains(file.asciiLower, L".scr") || Contains(file.asciiLower, L".msi"))) {
+  if (file.zip && (Contains(archiveText, L".exe") || Contains(archiveText, L".dll") ||
+                   Contains(archiveText, L".scr") || Contains(archiveText, L".msi"))) {
     AddHit(hits, Hit{L"ARCHIVE_EXECUTABLE_PAYLOAD", L"Archive contains executable payload content.", L"TA0002",
                      L"T1204.002", 48});
   }
-  if (file.zip && (Contains(file.asciiLower, L".ps1") || Contains(file.asciiLower, L".js") ||
-                   Contains(file.asciiLower, L".vbs") || Contains(file.asciiLower, L".hta") ||
-                   Contains(file.asciiLower, L".bat") || Contains(file.asciiLower, L".cmd"))) {
+  if (file.zip && (Contains(archiveText, L".ps1") || Contains(archiveText, L".js") ||
+                   Contains(archiveText, L".vbs") || Contains(archiveText, L".hta") ||
+                   Contains(archiveText, L".bat") || Contains(archiveText, L".cmd"))) {
     AddHit(hits, Hit{L"ARCHIVE_SCRIPT_PAYLOAD", L"Archive contains script payload content.", L"TA0002", L"T1059",
                      45});
   }
-  if (file.zip && Contains(file.asciiLower, L".lnk")) {
+  if (file.zip && Contains(archiveText, L".lnk")) {
     AddHit(hits, Hit{L"ARCHIVE_SHORTCUT_PAYLOAD", L"Archive contains shortcut content that can proxy execution.",
                      L"TA0002", L"T1204.001", 42});
   }
-  if (file.zip && (Contains(file.asciiLower, L".pdf.exe") || Contains(file.asciiLower, L".doc.exe") ||
-                   Contains(file.asciiLower, L".jpg.exe"))) {
+  if (file.zip && (Contains(archiveText, L".pdf.exe") || Contains(archiveText, L".doc.exe") ||
+                   Contains(archiveText, L".jpg.exe"))) {
     AddHit(hits, Hit{L"ARCHIVE_DOUBLE_EXTENSION", L"Archive contains a deceptive double-extension lure.", L"TA0001",
                      L"T1566", 40});
   }
-  if (file.zip && (Contains(file.asciiLower, L".docm") || Contains(file.asciiLower, L".xlsm") ||
-                   Contains(file.asciiLower, L".pptm"))) {
+  if (file.zip && (Contains(archiveText, L".docm") || Contains(archiveText, L".xlsm") ||
+                   Contains(archiveText, L".pptm"))) {
     AddHit(hits, Hit{L"ARCHIVE_MACRO_DOCUMENT", L"Archive contains macro-capable Office content.", L"TA0002",
                      L"T1204.002", 36});
   }

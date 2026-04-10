@@ -1,5 +1,5 @@
 import { emptyMailDashboard, fallbackMailDashboard } from "./mail-mock-data";
-import { buildFallbackDeviceDetail, fallbackDashboard } from "./mock-data";
+import { buildFallbackAlertDetail, buildFallbackDeviceDetail, fallbackDashboard } from "./mock-data";
 import type {
   AdminApiKeyCreateRequest,
   AdminApiKeyCreateResponse,
@@ -8,9 +8,11 @@ import type {
   AdminLoginRequest,
   AdminLoginResponse,
   AdminSessionStateResponse,
+  AlertDetail,
   CreatePolicyRequest,
   CreateScriptRequest,
   DashboardSnapshot,
+  CommandType,
   DeviceCommandSummary,
   DeviceDetail,
   PrivilegeBaselineSnapshot,
@@ -162,6 +164,31 @@ export async function loadDeviceDetail(deviceId: string): Promise<LoadResult<Dev
 
     return {
       data: buildFallbackDeviceDetail(deviceId),
+      source: "fallback"
+    };
+  }
+}
+
+export async function loadAlertDetail(alertId: string): Promise<LoadResult<AlertDetail | null>> {
+  try {
+    return {
+      data: await requestJson<AlertDetail>(`/alerts/${alertId}`),
+      source: "live"
+    };
+  } catch (error) {
+    if (error instanceof HttpRequestError) {
+      if (error.status === 404) {
+        return {
+          data: null,
+          source: "live"
+        };
+      }
+
+      throw error;
+    }
+
+    return {
+      data: buildFallbackAlertDetail(alertId),
       source: "fallback"
     };
   }
@@ -330,6 +357,19 @@ export async function isolateDevice(deviceId: string, issuedBy = "console"): Pro
 
 export async function releaseDevice(deviceId: string, issuedBy = "console"): Promise<DeviceCommandSummary> {
   return requestJsonWithBody<DeviceCommandSummary>(`/devices/${deviceId}/release`, "POST", { issuedBy });
+}
+
+export async function queueDeviceCommand(
+  deviceId: string,
+  request: {
+    type: CommandType;
+    issuedBy?: string;
+    targetPath?: string;
+    recordId?: string;
+    payloadJson?: string;
+  }
+): Promise<DeviceCommandSummary> {
+  return requestJsonWithBody<DeviceCommandSummary>(`/devices/${deviceId}/commands`, "POST", request);
 }
 
 export async function restoreQuarantineItem(

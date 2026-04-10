@@ -1,171 +1,155 @@
 "use client";
 
 import Link from "next/link";
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import ConsoleShell from "./ConsoleShell";
+import { useConsoleData } from "./useConsoleData";
 import {
+  deleteQuarantineItem,
   isolateDevice,
   listScripts,
+  loadDeviceDetail,
+  queueAgentUpdate,
   queueProcessTreeTerminate,
   queueRemediatePath,
   queueRunScript,
-  releaseDevice
+  releaseDevice,
+  restoreQuarantineItem
 } from "../../lib/api";
 import { buildConsoleViewModel } from "../../lib/console-model";
-import type { DeviceSummary, ScriptSummary } from "../../lib/types";
-import ConsoleShell from "./ConsoleShell";
-import { useConsoleData } from "./useConsoleData";
+import type { DeviceDetail, ScriptSummary } from "../../lib/types";
 
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString();
-}
-
-function matchesQuery(query: string, values: Array<string | undefined | null>) {
-  if (!query.trim()) {
-    return true;
-  }
-
-  const normalized = query.trim().toLowerCase();
-  return values.some((value) => value?.toLowerCase().includes(normalized));
+function formatDateTime(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleString() : "Awaiting first activity";
 }
 
 function riskTone(value: string | null | undefined) {
   switch (value) {
     case "critical":
+      return "critical";
     case "high":
-      return "danger";
+      return "high";
     case "elevated":
       return "warning";
-    case "guarded":
-      return "default";
-    case "low":
-      return "low";
     default:
-      return "unknown";
+      return "default";
   }
 }
 
-function confidenceTone(value: number | null | undefined) {
-  if (value == null) {
-    return "unknown";
-  }
-
-  if (value >= 85) {
-    return "ready";
-  }
-
-  if (value >= 65) {
-    return "warning";
-  }
-
-  return "failed";
+function compactHash(value: string) {
+  return value.length > 24 ? `${value.slice(0, 16)}...${value.slice(-8)}` : value;
 }
 
-function priorityTone(value: number) {
-  if (value >= 350) {
-    return "danger";
-  }
-
-  if (value >= 240) {
-    return "warning";
-  }
-
-  return "default";
+function initialPath(detail: DeviceDetail | null) {
+  return (
+    detail?.quarantineItems.find((item) => item.status === "quarantined")?.originalPath ??
+    detail?.evidence[0]?.subjectPath ??
+    detail?.scanHistory[0]?.subjectPath ??
+    ""
+  );
 }
 
 export default function IncidentDetailView({ incidentId }: { incidentId: string }) {
-  const { snapshot, source, refreshing, refreshSnapshot } = useConsoleData();
+  const { snapshot, source, loading, refreshing, refreshSnapshot } = useConsoleData();
   const [query, setQuery] = useState("");
-  const [selectedDeviceId, setSelectedDeviceId] = useState("");
-  const [targetPath, setTargetPath] = useState("");
-  const [selectedScriptId, setSelectedScriptId] = useState("");
+  const [relatedDetails, setRelatedDetails] = useState<DeviceDetail[]>([]);
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [selectedScriptId, setSelectedScriptId] = useState("");
+  const [remediationPath, setRemediationPath] = useState("");
+  const [updatePackagePath, setUpdatePackagePath] = useState("");
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const scriptRequestInFlightRef = useRef<Promise<void> | null>(null);
 
   const model = buildConsoleViewModel(snapshot);
-  const incident = model.incidents.find((item) => item.id === incidentId);
-  const devicesById = new Map(snapshot.devices.map((device) => [device.id, device]));
-  const incidentDevices = incident
-    ? incident.deviceIds
-        .map((deviceId) => devicesById.get(deviceId))
-        .filter((device): device is DeviceSummary => Boolean(device))
-        .sort((left, right) => {
-          const riskDelta = (right.riskScore ?? -1) - (left.riskScore ?? -1);
-          if (riskDelta !== 0) {
-            return riskDelta;
-          }
-
-          return left.hostname.localeCompare(right.hostname);
-        })
-    : [];
-  const selectedDevice = incidentDevices.find((device) => device.id === selectedDeviceId) ?? incidentDevices[0] ?? null;
-  const selectedScript = scripts.find((item) => item.id === selectedScriptId) ?? scripts[0] ?? null;
+  const incident = model.incidents.find((item) => item.id === incidentId) ?? null;
   const incidentDeviceKey = incident?.deviceIds.join("|") ?? "";
-  const defaultDeviceId =
-    incident?.primaryDeviceId && incidentDevices.some((device) => device.id === incident.primaryDeviceId)
-      ? incident.primaryDeviceId
-      : incidentDevices[0]?.id ?? "";
 
-  useEffect(() => {
-    if (incidentDevices.length === 0) {
-      if (selectedDeviceId) {
-        setSelectedDeviceId("");
-      }
+  const refreshIncidentContext = useCallback(async () => {
+    if (!incident) {
+      setRelatedDetails([]);
+      setScripts([]);
       return;
     }
 
-    if (!selectedDeviceId || !incidentDevices.some((device) => device.id === selectedDeviceId)) {
-      setSelectedDeviceId(defaultDeviceId);
+    try {
+      const [detailResults, nextScripts] = await Promise.all([
+        Promise.all(incident.deviceIds.map((deviceId) => loadDeviceDetail(deviceId))),
+        listScripts().catch(() => [] as ScriptSummary[])
+      ]);
+
+      const nextDetails = detailResults.map((item) => item.data).filter((item): item is DeviceDetail => item !== null);
+      setRelatedDetails(nextDetails);
+      setScripts(nextScripts);
+      setSelectedDeviceId((current) => current || incident.primaryDeviceId || nextDetails[0]?.device.id || "");
+      setSelectedScriptId((current) => current || nextScripts[0]?.id || "");
+      setRemediationPath((current) => current || initialPath(nextDetails[0] ?? null));
+    } catch {
+      setRelatedDetails([]);
+      setScripts([]);
     }
-  }, [defaultDeviceId, incidentDeviceKey, selectedDeviceId]);
-
-  const refreshScripts = useCallback(async () => {
-    if (scriptRequestInFlightRef.current) {
-      return scriptRequestInFlightRef.current;
-    }
-
-    const request = (async () => {
-      try {
-        const nextScripts = await listScripts();
-
-        startTransition(() => {
-          setScripts(nextScripts);
-          setSelectedScriptId((current) => current || nextScripts[0]?.id || "");
-        });
-      } catch {
-        // Keep the last known script list if the backend snapshot is unavailable.
-      } finally {
-        scriptRequestInFlightRef.current = null;
-      }
-    })();
-
-    scriptRequestInFlightRef.current = request;
-    return request;
-  }, []);
+  }, [incident, incidentDeviceKey]);
 
   useEffect(() => {
-    void refreshScripts();
-  }, [refreshScripts]);
+    void refreshIncidentContext();
+  }, [refreshIncidentContext]);
+
+  const selectedDeviceDetail =
+    relatedDetails.find((item) => item.device.id === selectedDeviceId) ?? relatedDetails[0] ?? null;
+  const selectedDevice = selectedDeviceDetail?.device ?? null;
+  const selectedScore = selectedDeviceDetail?.latestScore ?? null;
+  const selectedScript = scripts.find((item) => item.id === selectedScriptId) ?? scripts[0] ?? null;
+
+  const impactedDevices = useMemo(
+    () =>
+      incident?.deviceIds.map((deviceId) => {
+        const detail = relatedDetails.find((item) => item.device.id === deviceId);
+        const device = detail?.device ?? snapshot.devices.find((item) => item.id === deviceId) ?? null;
+        return { id: deviceId, device, score: detail?.latestScore ?? null };
+      }) ?? [],
+    [incident, relatedDetails, snapshot.devices]
+  );
 
   const runAction = useCallback(
     async (label: string, action: () => Promise<unknown>) => {
       setActionBusy(label);
       setActionMessage(null);
-
       try {
         await action();
-        setActionMessage(`${label} queued successfully for ${selectedDevice?.hostname ?? "the selected device"}.`);
-        await Promise.all([refreshSnapshot("manual"), refreshScripts()]);
+        setActionMessage(`${label} queued successfully.`);
+        await Promise.all([refreshSnapshot("manual"), refreshIncidentContext()]);
       } catch (error) {
         setActionMessage(`${label} failed: ${error instanceof Error ? error.message : "Request failed"}`);
       } finally {
         setActionBusy(null);
       }
     },
-    [refreshScripts, refreshSnapshot, selectedDevice?.hostname]
+    [refreshIncidentContext, refreshSnapshot]
   );
+
+  if (!incident && loading) {
+    return (
+      <ConsoleShell
+        activeNav="incidents"
+        title="Loading incident"
+        subtitle="Fenrir is loading the latest incident queue and device context."
+        searchValue={query}
+        searchPlaceholder="Search incidents, devices, techniques, or owners..."
+        onSearchChange={setQuery}
+        onRefresh={() => void refreshSnapshot("manual")}
+        refreshing={refreshing}
+        source={source}
+        generatedAt={snapshot.generatedAt}
+        policyRevision={snapshot.defaultPolicy.revision}
+      >
+        <section className="surface-card">
+          <p className="section-kicker">Incident detail</p>
+          <h3>Loading the latest Fenrir incident context.</h3>
+        </section>
+      </ConsoleShell>
+    );
+  }
 
   if (!incident) {
     return (
@@ -174,11 +158,9 @@ export default function IncidentDetailView({ incidentId }: { incidentId: string 
         title="Incident not found"
         subtitle="The current control-plane snapshot does not contain a matching incident."
         searchValue={query}
-        searchPlaceholder="Search incidents, devices, techniques, or response actions..."
+        searchPlaceholder="Search incidents, devices, techniques, or owners..."
         onSearchChange={setQuery}
-        onRefresh={() => {
-          void Promise.all([refreshSnapshot("manual"), refreshScripts()]);
-        }}
+        onRefresh={() => void refreshSnapshot("manual")}
         refreshing={refreshing}
         source={source}
         generatedAt={snapshot.generatedAt}
@@ -199,223 +181,124 @@ export default function IncidentDetailView({ incidentId }: { incidentId: string 
     );
   }
 
-  const timeline = incident.timeline.filter((item) =>
-    matchesQuery(query, [item.title, item.summary, item.source, item.category])
-  );
-
-  const drawer = (
-    <div className="drawer-stack">
-      <section className="drawer-panel">
-        <p className="section-kicker">Analyst actions</p>
-        <p className="muted-copy">
-          Use the highest-risk impacted device as the default target, then queue containment or cleanup directly from this
-          incident.
-        </p>
-
-        <div className="field-grid">
-          <label className="field-group">
-            <span>Target device</span>
-            <select
-              className="admin-input"
-              value={selectedDeviceId}
-              onChange={(event) => setSelectedDeviceId(event.target.value)}
-              disabled={incidentDevices.length === 0 || Boolean(actionBusy)}
-            >
-              {incidentDevices.length === 0 ? (
-                <option value="">No impacted device available</option>
-              ) : (
-                incidentDevices.map((device) => (
-                  <option key={device.id} value={device.id}>
-                    {device.hostname} · {device.riskScore != null ? `${device.riskScore}/100` : "score pending"} ·{' '}
-                    {device.riskBand ?? "pending"}
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
-
-          <label className="field-group">
-            <span>Target path</span>
-            <input
-              className="admin-input"
-              value={targetPath}
-              onChange={(event) => setTargetPath(event.target.value)}
-              placeholder="C:\\Users\\Public\\Downloads\\payload.exe"
-            />
-          </label>
-
-          <label className="field-group">
-            <span>Stored script</span>
-            <select
-              className="admin-input"
-              value={selectedScript?.id ?? ""}
-              onChange={(event) => setSelectedScriptId(event.target.value)}
-              disabled={scripts.length === 0 || Boolean(actionBusy)}
-            >
-              {scripts.length === 0 ? (
-                <option value="">No stored scripts available</option>
-              ) : (
-                scripts.map((script) => (
-                  <option key={script.id} value={script.id}>
-                    {script.name} ({script.language})
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
-        </div>
-
-        <dl className="definition-grid">
-          <div>
-            <dt>Hostname</dt>
-            <dd>{selectedDevice?.hostname ?? "Awaiting selection"}</dd>
-          </div>
-          <div>
-            <dt>Risk score</dt>
-            <dd>{selectedDevice?.riskScore ?? "--"}</dd>
-          </div>
-          <div>
-            <dt>Risk band</dt>
-            <dd>{selectedDevice?.riskBand ?? "pending"}</dd>
-          </div>
-          <div>
-            <dt>Confidence</dt>
-            <dd>{selectedDevice?.confidenceScore != null ? `${selectedDevice.confidenceScore}%` : "--"}</dd>
-          </div>
-          <div>
-            <dt>Last seen</dt>
-            <dd>{selectedDevice ? formatDateTime(selectedDevice.lastSeenAt) : "--"}</dd>
-          </div>
-          <div>
-            <dt>Isolation</dt>
-            <dd>{selectedDevice ? (selectedDevice.isolated ? "contained" : "connected") : "--"}</dd>
-          </div>
-        </dl>
-
-        <div className="tag-row">
-          <span className={`state-chip tone-${riskTone(selectedDevice?.riskBand)}`}>
-            {selectedDevice != null
-              ? `${selectedDevice.riskScore != null ? `${selectedDevice.riskScore}/100` : "score pending"} ${
-                  selectedDevice.riskBand ?? "pending"
-                }`
-              : "device missing"}
-          </span>
-          <span className={`state-chip ${selectedDevice?.isolated ? "tone-contained" : "tone-default"}`}>
-            {selectedDevice?.isolated ? "contained" : "connected"}
-          </span>
-          {selectedDevice?.confidenceScore != null ? (
-            <span className={`state-chip tone-${confidenceTone(selectedDevice.confidenceScore)}`}>
-              {selectedDevice.confidenceScore}% confidence
-            </span>
-          ) : null}
-        </div>
-
-        {incidentDevices.length === 0 ? (
-          <p className="empty-state">No impacted device is currently available in the snapshot, so direct actions are disabled.</p>
-        ) : null}
-
-        <div className="form-actions">
-          <button
-            type="button"
-            className="primary-link"
-            disabled={Boolean(actionBusy) || !selectedDevice}
-            onClick={() =>
-              selectedDevice &&
-              void runAction(selectedDevice.isolated ? "Release device" : "Isolate device", () =>
-                selectedDevice.isolated ? releaseDevice(selectedDevice.id) : isolateDevice(selectedDevice.id)
-              )
-            }
-          >
-            {selectedDevice?.isolated ? "Release device" : "Isolate device"}
-          </button>
-          <button
-            type="button"
-            className="secondary-link"
-            disabled={Boolean(actionBusy) || !selectedDevice || !targetPath.trim()}
-            onClick={() =>
-              selectedDevice &&
-              targetPath.trim() &&
-              void runAction("Remediate path", () => queueRemediatePath(selectedDevice.id, targetPath.trim()))
-            }
-          >
-            Remediate path
-          </button>
-          <button
-            type="button"
-            className="secondary-link"
-            disabled={Boolean(actionBusy) || !selectedDevice || !targetPath.trim()}
-            onClick={() =>
-              selectedDevice &&
-              targetPath.trim() &&
-              void runAction("Terminate process tree", () =>
-                queueProcessTreeTerminate(selectedDevice.id, targetPath.trim())
-              )
-            }
-          >
-            Kill process tree
-          </button>
-          <button
-            type="button"
-            className="secondary-link"
-            disabled={Boolean(actionBusy) || !selectedDevice || !selectedScript}
-            onClick={() =>
-              selectedDevice &&
-              selectedScript &&
-              void runAction("Run script", () => queueRunScript(selectedDevice.id, selectedScript.id))
-            }
-          >
-            Run script
-          </button>
-        </div>
-
-        {actionMessage ? <p className="muted-copy">{actionMessage}</p> : <p className="muted-copy">{incident.recommendedAction}</p>}
-      </section>
-
-      <section className="drawer-panel">
-        <p className="section-kicker">Risk context</p>
-        <h3>Why this incident is at the top</h3>
-        <p className="muted-copy">{incident.deviceRiskSummary}</p>
-        <div className="tag-row">
-          <span className={`state-chip tone-${priorityTone(incident.priorityScore)}`}>priority {incident.priorityScore}</span>
-          <span className={`state-chip tone-${riskTone(incident.highestDeviceRiskBand)}`}>
-            {incident.highestDeviceRiskScore != null
-              ? `${incident.highestDeviceRiskScore}/100 ${incident.highestDeviceRiskBand ?? "pending"}`
-              : "risk pending"}
-          </span>
-        </div>
-        <p className="muted-copy">{incident.recommendedAction}</p>
-      </section>
-
-      <section className="drawer-panel">
-        <p className="section-kicker">Latest event</p>
-        <p className="muted-copy">{incident.latestEvent}</p>
-        <span className="drawer-timestamp">{formatDateTime(incident.lastActivityAt)}</span>
-      </section>
-    </div>
-  );
-
   return (
     <ConsoleShell
       activeNav="incidents"
       title={incident.title}
-      subtitle="Correlated evidence, attack timeline, and response choices for this incident."
+      subtitle="Correlated evidence, device risk, and direct response actions for this incident."
       searchValue={query}
-      searchPlaceholder="Search the incident timeline, entities, techniques, or action text..."
+      searchPlaceholder="Search the timeline, impacted devices, quarantine paths, evidence, or action text..."
       onSearchChange={setQuery}
-      onRefresh={() => {
-        void Promise.all([refreshSnapshot("manual"), refreshScripts()]);
-      }}
+      onRefresh={() => void refreshSnapshot("manual")}
       refreshing={refreshing}
       source={source}
       generatedAt={snapshot.generatedAt}
       policyRevision={snapshot.defaultPolicy.revision}
       statusItems={[
         { label: incident.severity, tone: incident.severity === "critical" ? "danger" : "warning" },
-        { label: `priority ${incident.priorityScore}`, tone: priorityTone(incident.priorityScore) },
-        { label: incident.status }
+        { label: incident.status },
+        {
+          label:
+            incident.highestDeviceRiskScore != null
+              ? `${incident.highestDeviceRiskScore}/100 ${incident.highestDeviceRiskBand ?? "pending"}`
+              : "risk pending",
+          tone: incident.highestDeviceRiskBand === "critical" || incident.highestDeviceRiskBand === "high" ? "danger" : "default"
+        }
       ]}
-      drawer={drawer}
+      drawer={
+        <div className="drawer-stack">
+          <section className="drawer-panel">
+            <p className="section-kicker">Target device</p>
+            <h3>{selectedDevice?.hostname ?? incident.primaryDeviceName ?? "No target device"}</h3>
+            <dl className="definition-grid">
+              <div>
+                <dt>Priority</dt>
+                <dd>{incident.priorityScore}</dd>
+              </div>
+              <div>
+                <dt>Open alerts</dt>
+                <dd>{selectedDevice?.openAlertCount ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Risk</dt>
+                <dd>{selectedScore ? `${selectedScore.overallScore}/100 ${selectedScore.riskBand}` : "pending"}</dd>
+              </div>
+              <div>
+                <dt>Confidence</dt>
+                <dd>{selectedScore ? `${selectedScore.confidenceScore}%` : "pending"}</dd>
+              </div>
+            </dl>
+            <p className="muted-copy">{selectedScore?.analystSummary ?? incident.deviceRiskSummary}</p>
+          </section>
+
+          <section className="drawer-panel">
+            <p className="section-kicker">Quick actions</p>
+            <div className="action-stack">
+              {selectedDevice ? (
+                <button
+                  type="button"
+                  className="primary-link"
+                  disabled={Boolean(actionBusy)}
+                  onClick={() =>
+                    void runAction(selectedDevice.isolated ? "Release device" : "Isolate device", () =>
+                      selectedDevice.isolated ? releaseDevice(selectedDevice.id) : isolateDevice(selectedDevice.id)
+                    )
+                  }
+                >
+                  {selectedDevice.isolated ? "Release device" : "Isolate device"}
+                </button>
+              ) : null}
+              {selectedDevice ? (
+                <Link href={`/devices/${selectedDevice.id}`} className="secondary-link">
+                  Open device
+                </Link>
+              ) : null}
+            </div>
+            {actionMessage ? <p className="muted-copy">{actionMessage}</p> : null}
+          </section>
+        </div>
+      }
     >
+      {actionMessage ? (
+        <section className="surface-card">
+          <p className="section-kicker">Action status</p>
+          <h3>{actionMessage}</h3>
+        </section>
+      ) : null}
+
+      <section className="grid grid-6">
+        <article className="metric-surface">
+          <span className="metric-label">Priority</span>
+          <strong className="metric-number">{incident.priorityScore}</strong>
+          <p className="muted-copy">Fenrir’s triage rank for this incident.</p>
+        </article>
+        <article className="metric-surface">
+          <span className="metric-label">Affected assets</span>
+          <strong className="metric-number">{incident.affectedAssetCount}</strong>
+          <p className="muted-copy">Devices currently linked to this incident.</p>
+        </article>
+        <article className="metric-surface">
+          <span className="metric-label">Device risk</span>
+          <strong className="metric-number">{incident.highestDeviceRiskScore ?? "--"}</strong>
+          <p className="muted-copy">{incident.highestDeviceRiskBand ?? "pending"}.</p>
+        </article>
+        <article className="metric-surface">
+          <span className="metric-label">Confidence</span>
+          <strong className="metric-number">{incident.confidenceScore}%</strong>
+          <p className="muted-copy">Incident confidence from the current snapshot.</p>
+        </article>
+        <article className="metric-surface">
+          <span className="metric-label">Evidence</span>
+          <strong className="metric-number">{incident.evidenceCount}</strong>
+          <p className="muted-copy">Evidence records currently tied to this incident.</p>
+        </article>
+        <article className="metric-surface">
+          <span className="metric-label">Queued actions</span>
+          <strong className="metric-number">{incident.commandCount}</strong>
+          <p className="muted-copy">Response actions already associated with this workflow.</p>
+        </article>
+      </section>
+
       <section className="incident-detail-grid">
         <article className="surface-card">
           <p className="section-kicker">Summary</p>
@@ -427,48 +310,44 @@ export default function IncidentDetailView({ incidentId }: { incidentId: string 
               <dd>{incident.severity}</dd>
             </div>
             <div>
-              <dt>Priority</dt>
-              <dd>{incident.priorityScore}</dd>
-            </div>
-            <div>
               <dt>Status</dt>
               <dd>{incident.status}</dd>
-            </div>
-            <div>
-              <dt>Confidence</dt>
-              <dd>{incident.confidenceScore}%</dd>
             </div>
             <div>
               <dt>Owner</dt>
               <dd>{incident.owner}</dd>
             </div>
             <div>
-              <dt>Primary device</dt>
-              <dd>{incident.primaryDeviceName ?? "Unknown"}</dd>
-            </div>
-            <div>
-              <dt>Affected assets</dt>
-              <dd>{incident.affectedAssetCount}</dd>
+              <dt>First seen</dt>
+              <dd>{formatDateTime(incident.firstSeenAt)}</dd>
             </div>
             <div>
               <dt>Last seen</dt>
               <dd>{formatDateTime(incident.lastActivityAt)}</dd>
             </div>
+            <div>
+              <dt>Primary device</dt>
+              <dd>{incident.primaryDeviceName ?? "Not available"}</dd>
+            </div>
           </dl>
-
           <div className="tag-row">
-            <span className={`state-chip tone-${riskTone(incident.highestDeviceRiskBand)}`}>
-              {incident.highestDeviceRiskScore != null
-                ? `${incident.highestDeviceRiskScore}/100 ${incident.highestDeviceRiskBand ?? "pending"}`
-                : "risk pending"}
-            </span>
-            <span className={`state-chip tone-${priorityTone(incident.priorityScore)}`}>priority {incident.priorityScore}</span>
-            <span className="state-chip tone-default">{incident.sourceMix.join(" · ")}</span>
+            {incident.tactics.map((item) => (
+              <span key={item} className="state-chip tone-default">
+                {item}
+              </span>
+            ))}
+            {incident.techniques.map((item) => (
+              <span key={item} className="state-chip tone-warning">
+                {item}
+              </span>
+            ))}
           </div>
-
           <div className="surface-subsection">
-            <p className="section-kicker">Correlation</p>
+            <p className="section-kicker">Risk context</p>
             <p className="muted-copy">{incident.deviceRiskSummary}</p>
+          </div>
+          <div className="surface-subsection">
+            <p className="section-kicker">Recommended next action</p>
             <p className="muted-copy">{incident.recommendedAction}</p>
           </div>
         </article>
@@ -477,10 +356,15 @@ export default function IncidentDetailView({ incidentId }: { incidentId: string 
           <p className="section-kicker">Timeline</p>
           <h3>Attack and response sequence</h3>
           <div className="timeline">
-            {timeline.length === 0 ? (
-              <p className="empty-state">No timeline entries match the current search.</p>
-            ) : (
-              timeline.map((item) => (
+            {incident.timeline
+              .filter((item) =>
+                query
+                  ? [item.title, item.summary, item.source, item.category].some((value) =>
+                      value.toLowerCase().includes(query.trim().toLowerCase())
+                    )
+                  : true
+              )
+              .map((item) => (
                 <article key={item.id} className="timeline-entry">
                   <span className={`timeline-dot tone-${item.severity}`} />
                   <div>
@@ -494,53 +378,290 @@ export default function IncidentDetailView({ incidentId }: { incidentId: string 
                     </span>
                   </div>
                 </article>
-              ))
-            )}
+              ))}
           </div>
         </article>
 
         <article className="surface-card">
-          <p className="section-kicker">Entities and scope</p>
-          <h3>Impacted assets</h3>
-          <div className="stack-section">
-            <div className="entity-group">
-              <h4>Devices</h4>
-              <ul className="key-list">
-                {incident.deviceIds.map((deviceId, index) => {
-                  const device = devicesById.get(deviceId);
-                  return (
-                    <li key={deviceId}>
-                      <div className="row-between">
-                        <Link href={`/devices/${deviceId}`}>{incident.deviceNames[index] ?? deviceId}</Link>
-                        <span className={`state-chip tone-${riskTone(device?.riskBand)}`}>
-                          {device?.riskScore != null
-                            ? `${device.riskScore}/100 ${device.riskBand ?? "pending"}`
-                            : "score pending"}
-                        </span>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+          <div className="section-heading">
+            <div>
+              <p className="section-kicker">Response workspace</p>
+              <h3>Act on the incident from here</h3>
             </div>
-            <div className="entity-group">
-              <h4>Source mix</h4>
-              <ul className="key-list">
-                {incident.sourceMix.map((item) => (
-                  <li key={item}>{item}</li>
+          </div>
+
+          <div className="field-grid">
+            <label className="field-group field-span-2">
+              <span>Target device</span>
+              <select className="admin-input" value={selectedDeviceId} onChange={(event) => setSelectedDeviceId(event.target.value)}>
+                {impactedDevices.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.device?.hostname ?? item.id}
+                    {item.score ? ` · ${item.score.overallScore}/100 ${item.score.riskBand}` : " · score pending"}
+                  </option>
                 ))}
-              </ul>
-            </div>
-            <div className="entity-group">
-              <h4>Evidence coverage</h4>
-              <ul className="key-list">
-                <li>{incident.alertCount} alert-backed detection(s)</li>
-                <li>{incident.evidenceCount} evidence record(s)</li>
-                <li>{incident.commandCount} response action(s)</li>
-              </ul>
+              </select>
+            </label>
+            <label className="field-group">
+              <span>Stored script</span>
+              <select className="admin-input" value={selectedScript?.id ?? ""} onChange={(event) => setSelectedScriptId(event.target.value)}>
+                {scripts.map((script) => (
+                  <option key={script.id} value={script.id}>
+                    {script.name} ({script.language})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field-group">
+              <span>Update package path</span>
+              <input
+                className="admin-input"
+                value={updatePackagePath}
+                onChange={(event) => setUpdatePackagePath(event.target.value)}
+                placeholder="C:\\Packages\\fenrir-update.pkg"
+              />
+            </label>
+            <label className="field-group field-span-2">
+              <span>Target path</span>
+              <input
+                className="admin-input"
+                value={remediationPath}
+                onChange={(event) => setRemediationPath(event.target.value)}
+                placeholder="C:\\Users\\Public\\Downloads\\payload.exe"
+              />
+            </label>
+          </div>
+
+          <div className="form-actions">
+            <button
+              type="button"
+              className="primary-link"
+              disabled={Boolean(actionBusy) || !selectedDevice}
+              onClick={() =>
+                selectedDevice &&
+                void runAction(selectedDevice.isolated ? "Release device" : "Isolate device", () =>
+                  selectedDevice.isolated ? releaseDevice(selectedDevice.id) : isolateDevice(selectedDevice.id)
+                )
+              }
+            >
+              {selectedDevice?.isolated ? "Release device" : "Isolate device"}
+            </button>
+            <button
+              type="button"
+              className="secondary-link"
+              disabled={Boolean(actionBusy) || !selectedDevice || !selectedScript}
+              onClick={() =>
+                selectedDevice &&
+                selectedScript &&
+                void runAction("Run script", () => queueRunScript(selectedDevice.id, selectedScript.id))
+              }
+            >
+              Run script
+            </button>
+            <button
+              type="button"
+              className="secondary-link"
+              disabled={Boolean(actionBusy) || !selectedDevice || !updatePackagePath.trim()}
+              onClick={() =>
+                selectedDevice &&
+                updatePackagePath.trim() &&
+                void runAction("Queue update", () => queueAgentUpdate(selectedDevice.id, updatePackagePath.trim()))
+              }
+            >
+              Queue update
+            </button>
+            <button
+              type="button"
+              className="secondary-link"
+              disabled={Boolean(actionBusy) || !selectedDevice || !remediationPath.trim()}
+              onClick={() =>
+                selectedDevice &&
+                remediationPath.trim() &&
+                void runAction("Remediate path", () => queueRemediatePath(selectedDevice.id, remediationPath.trim()))
+              }
+            >
+              Remediate path
+            </button>
+            <button
+              type="button"
+              className="secondary-link"
+              disabled={Boolean(actionBusy) || !selectedDevice || !remediationPath.trim()}
+              onClick={() =>
+                selectedDevice &&
+                remediationPath.trim() &&
+                void runAction("Kill process tree", () => queueProcessTreeTerminate(selectedDevice.id, remediationPath.trim()))
+              }
+            >
+              Kill process tree
+            </button>
+          </div>
+        </article>
+      </section>
+
+      <section className="grid grid-2">
+        <article className="surface-card">
+          <p className="section-kicker">Selected device score</p>
+          <h3>Why this asset is risky</h3>
+          {selectedScore ? (
+            <>
+              <div className="tag-row">
+                <span className={`state-chip tone-${riskTone(selectedScore.riskBand)}`}>
+                  {selectedScore.overallScore}/100 {selectedScore.riskBand}
+                </span>
+                <span className="state-chip tone-default">{selectedScore.confidenceScore}% confidence</span>
+                <span className="state-chip tone-default">{formatDateTime(selectedScore.calculatedAt)}</span>
+              </div>
+              <p className="muted-copy">{selectedScore.analystSummary}</p>
+              <div className="mini-card-list">
+                {selectedScore.topRiskDrivers.map((driver) => (
+                  <article key={driver.id} className="mini-card">
+                    <div className="row-between">
+                      <strong>{driver.title}</strong>
+                      <span className={`state-chip tone-${driver.severity}`}>{driver.severity}</span>
+                    </div>
+                    <p>{driver.detail}</p>
+                  </article>
+                ))}
+              </div>
+              {selectedScore.overrideReasons.length > 0 ? (
+                <div className="surface-subsection">
+                  <p className="section-kicker">Override reasons</p>
+                  <div className="mini-card-list">
+                    {selectedScore.overrideReasons.map((reason) => (
+                      <article key={reason} className="mini-card">
+                        <strong>Critical floor applied</strong>
+                        <p>{reason}</p>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <p className="empty-state">Fenrir has not loaded a device score for the selected asset yet.</p>
+          )}
+        </article>
+
+        <article className="surface-card">
+          <p className="section-kicker">Quarantine workbench</p>
+          <h3>Contained artifacts and evidence</h3>
+          <div className="mini-card-list">
+            {(selectedDeviceDetail?.quarantineItems ?? []).length === 0 ? (
+              <p className="empty-state">No quarantined artifacts are available for this device.</p>
+            ) : (
+              selectedDeviceDetail!.quarantineItems.map((item) => (
+                <article key={item.recordId} className="mini-card">
+                  <div className="row-between">
+                    <strong>{item.originalPath}</strong>
+                    <span className={`state-chip tone-${item.status}`}>{item.status}</span>
+                  </div>
+                  <p>{item.quarantinedPath}</p>
+                  <code className="hash-line">{compactHash(item.sha256)}</code>
+                  <div className="action-stack">
+                    <button
+                      type="button"
+                      className="secondary-link"
+                      disabled={Boolean(actionBusy) || item.status !== "quarantined" || !selectedDevice}
+                      onClick={() =>
+                        selectedDevice &&
+                        void runAction("Restore quarantined item", () => restoreQuarantineItem(selectedDevice.id, item.recordId))
+                      }
+                    >
+                      Restore
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-link"
+                      disabled={Boolean(actionBusy) || item.status === "deleted" || !selectedDevice}
+                      onClick={() =>
+                        selectedDevice &&
+                        void runAction("Delete quarantined item", () => deleteQuarantineItem(selectedDevice.id, item.recordId))
+                      }
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+
+          <div className="surface-subsection">
+            <p className="section-kicker">Evidence preview</p>
+            <div className="mini-card-list">
+              {(selectedDeviceDetail?.evidence ?? []).length === 0 ? (
+                <p className="empty-state">No evidence items are available for this device.</p>
+              ) : (
+                selectedDeviceDetail!.evidence.map((item) => (
+                  <article key={item.recordId} className="mini-card">
+                    <div className="row-between">
+                      <strong>{item.subjectPath}</strong>
+                      <span className="state-chip tone-default">{item.disposition}</span>
+                    </div>
+                    <p>{item.summary}</p>
+                    <span className="mini-meta">
+                      {item.techniqueId ?? "Technique pending"} · {formatDateTime(item.recordedAt)}
+                    </span>
+                  </article>
+                ))
+              )}
             </div>
           </div>
         </article>
+      </section>
+
+      <section className="surface-card">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Impacted assets</p>
+            <h3>Devices in this incident</h3>
+          </div>
+        </div>
+        <div className="mini-card-list">
+          {impactedDevices.map((item) => (
+            <article key={item.id} className="mini-card">
+              <div className="row-between">
+                <strong>{item.device?.hostname ?? item.id}</strong>
+                <div className="tag-row">
+                  <span className={`state-chip tone-${item.device?.healthState ?? "default"}`}>
+                    {item.device?.healthState ?? "unknown"}
+                  </span>
+                  <span className={`state-chip tone-${riskTone(item.score?.riskBand ?? item.device?.riskBand ?? null)}`}>
+                    {item.score
+                      ? `${item.score.overallScore}/100 ${item.score.riskBand}`
+                      : item.device?.riskScore != null
+                        ? `${item.device.riskScore}/100 ${item.device.riskBand ?? "pending"}`
+                        : "risk pending"}
+                  </span>
+                </div>
+              </div>
+              <p>{item.score?.summary ?? item.device?.osVersion ?? "Awaiting device context."}</p>
+              <span className="mini-meta">
+                Last seen {formatDateTime(item.device?.lastSeenAt)} · {item.device?.openAlertCount ?? 0} open alert(s)
+              </span>
+              <div className="action-stack">
+                {item.device ? (
+                  <Link href={`/devices/${item.device.id}`} className="secondary-link">
+                    Open device
+                  </Link>
+                ) : null}
+                <button
+                  type="button"
+                  className="secondary-link"
+                  disabled={Boolean(actionBusy) || !item.device}
+                  onClick={() =>
+                    item.device &&
+                    void runAction(item.device.isolated ? "Release device" : "Isolate device", () =>
+                      item.device!.isolated ? releaseDevice(item.device!.id) : isolateDevice(item.device!.id)
+                    )
+                  }
+                >
+                  {item.device?.isolated ? "Release device" : "Isolate device"}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
       </section>
     </ConsoleShell>
   );

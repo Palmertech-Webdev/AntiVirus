@@ -391,9 +391,73 @@ export interface AlertSummary {
   status: AlertStatus;
   hostname: string;
   detectedAt: string;
+  tacticId?: string;
   technique?: string;
   summary: string;
   fingerprint?: string;
+}
+
+export interface AlertBehaviorChainStep {
+  id: string;
+  occurredAt: string;
+  category: "alert" | "process" | "module" | "script" | "file" | "network" | "evidence" | "quarantine" | "scan" | "response";
+  title: string;
+  summary: string;
+  source: string;
+  severity: AlertSeverity;
+  tacticId?: string;
+  techniqueId?: string;
+  blocked?: boolean;
+  atRisk?: string;
+  linkedEventIds?: string[];
+}
+
+export interface AlertBehaviorChain {
+  score: number;
+  narrative: string;
+  whatHappened: string;
+  whySuspicious: string;
+  blocked: string;
+  atRisk: string;
+  tacticIds: string[];
+  techniqueIds: string[];
+  steps: AlertBehaviorChainStep[];
+}
+
+export interface AlertResponsePlaybookAction {
+  id: string;
+  category: "containment" | "investigation" | "cleanup" | "monitoring";
+  title: string;
+  detail: string;
+  reason: string;
+  commandType?: CommandType;
+  targetPath?: string;
+  automationEligible: boolean;
+  approvalRequired: boolean;
+  linkedEventIds?: string[];
+}
+
+export interface AlertResponsePlaybook {
+  mode: "containment" | "investigation" | "cleanup";
+  title: string;
+  summary: string;
+  evidenceToPreserve: string[];
+  actions: AlertResponsePlaybookAction[];
+}
+
+export interface AlertDetail {
+  alert: AlertSummary;
+  device: DeviceSummary | null;
+  posture: DevicePostureSummary | null;
+  behaviorChain: AlertBehaviorChain | null;
+  playbook: AlertResponsePlaybook | null;
+  matchingTelemetry: TelemetryRecord[];
+  telemetry: TelemetryRecord[];
+  commands: DeviceCommandSummary[];
+  evidence: EvidenceSummary[];
+  quarantineItems: QuarantineItemSummary[];
+  scanHistory: ScanHistorySummary[];
+  relatedAlerts: AlertSummary[];
 }
 
 export interface DeviceCommandSummary {
@@ -436,6 +500,22 @@ export interface TelemetryRecord {
   occurredAt: string;
   ingestedAt: string;
   payloadJson: string;
+  processId?: number;
+  parentProcessId?: number;
+  processImageName?: string;
+  processImagePath?: string;
+  parentProcessImageName?: string;
+  parentProcessImagePath?: string;
+  processCommandLine?: string;
+  processUserSid?: string;
+  processIntegrityLevel?: string;
+  processSessionId?: string;
+  processSigner?: string;
+  processExitCode?: number;
+  moduleImageName?: string;
+  moduleImagePath?: string;
+  moduleImageBase?: string;
+  moduleImageSize?: string;
 }
 
 export interface EvidenceSummary {
@@ -445,6 +525,11 @@ export interface EvidenceSummary {
   recordedAt: string;
   source: string;
   subjectPath: string;
+  appName?: string;
+  contentName?: string;
+  sourceType?: string;
+  sessionId?: number;
+  preview?: string;
   sha256: string;
   disposition: string;
   tacticId?: string;
@@ -463,6 +548,11 @@ export interface ScanHistorySummary {
   scannedAt: string;
   source: string;
   subjectPath: string;
+  appName?: string;
+  contentName?: string;
+  sourceType?: string;
+  sessionId?: number;
+  preview?: string;
   sha256: string;
   contentType?: string;
   reputation?: string;

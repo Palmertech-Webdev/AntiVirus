@@ -20,20 +20,10 @@ import {
   revokeAdminApiKey,
   updateScript
 } from "../../lib/api";
-import { buildConsoleViewModel } from "../../lib/console-model";
+import { buildConsoleViewModel, getAdministrationTabs, getFenrirFeatureSet } from "../../lib/console-model";
 import type { AdminApiKeySummary, AdminAuditEventSummary, AdminSessionStateResponse } from "../../lib/types";
 
-type AdminTabKey = "connectors" | "access" | "deployment" | "scripts" | "retention" | "api" | "audit";
-
-const adminTabs: Array<{ key: AdminTabKey; label: string; description: string }> = [
-  { key: "connectors", label: "Connectors", description: "Identity, mail, and external signal sources." },
-  { key: "access", label: "Access", description: "SSO, MFA, RBAC, and operator sessions." },
-  { key: "deployment", label: "Deployment", description: "Packages, rollout channels, and onboarding." },
-  { key: "scripts", label: "Scripts", description: "Stored endpoint scripts for remote response and maintenance." },
-  { key: "retention", label: "Retention", description: "Telemetry, evidence, quarantine, and audit windows." },
-  { key: "api", label: "API Keys", description: "Programmatic access and scope control." },
-  { key: "audit", label: "Audit", description: "Recent platform and operator activity." }
-];
+type AdminTabKey = ReturnType<typeof getAdministrationTabs>[number]["key"];
 
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString();
@@ -54,6 +44,7 @@ function maskToken(seed: string) {
 
 export default function AdministrationView() {
   const { snapshot, source, refreshing, refreshSnapshot } = useConsoleData();
+  const featureSet = getFenrirFeatureSet();
   const [query, setQuery] = useState("");
   const [activeTab, setActiveTab] = useState<AdminTabKey>("connectors");
   const [lastAction, setLastAction] = useState("Administration now uses internal tabs. Save actions currently update the local UI draft.");
@@ -88,6 +79,7 @@ export default function AdministrationView() {
 
   const model = buildConsoleViewModel(snapshot);
   const selectedScript = snapshot.scripts.find((item) => item.id === selectedScriptId) ?? snapshot.scripts[0] ?? null;
+  const adminTabs = getAdministrationTabs(featureSet);
   const versionCoverage = useMemo(() => {
     const counts = new Map<string, number>();
     for (const device of snapshot.devices) {
@@ -313,8 +305,12 @@ export default function AdministrationView() {
   return (
     <ConsoleShell
       activeNav="administration"
-      title="Administration"
-      subtitle="Tenant settings, connectors, deployment posture, and operational configuration."
+      title={featureSet.showAccess || featureSet.showConnectors || featureSet.showApiKeys ? "Administration" : "Settings"}
+      subtitle={
+        featureSet.showAccess || featureSet.showConnectors || featureSet.showApiKeys
+          ? "Tenant settings, connectors, deployment posture, and operational configuration."
+          : "Basic settings, update posture, and local policy controls for this device."
+      }
       searchValue={query}
       searchPlaceholder="Search admin tabs, settings, versions, audit, or connector text..."
       onSearchChange={setQuery}
@@ -332,7 +328,7 @@ export default function AdministrationView() {
       drawer={
         <div className="drawer-stack">
           <section className="drawer-panel">
-            <p className="section-kicker">Environment</p>
+              <p className="section-kicker">Environment</p>
             <h3>{source === "live" ? "Live control plane connected" : "Console is using the demo fallback snapshot"}</h3>
             <p className="muted-copy">
               {source === "live"
@@ -340,11 +336,13 @@ export default function AdministrationView() {
                 : "The backend is offline, so the administration workspace is running against the offline demo snapshot."}
             </p>
           </section>
-          <section className="drawer-panel">
-            <p className="section-kicker">Selected tab</p>
-            <h3>{adminTabs.find((tab) => tab.key === currentTab)?.label}</h3>
-            <p className="muted-copy">{adminTabs.find((tab) => tab.key === currentTab)?.description}</p>
-          </section>
+          {adminTabs.length > 0 ? (
+            <section className="drawer-panel">
+              <p className="section-kicker">Selected tab</p>
+              <h3>{adminTabs.find((tab) => tab.key === currentTab)?.label}</h3>
+              <p className="muted-copy">{adminTabs.find((tab) => tab.key === currentTab)?.description}</p>
+            </section>
+          ) : null}
           <section className="drawer-panel">
             <p className="section-kicker">Last action</p>
             <p className="muted-copy">{lastAction}</p>
@@ -374,7 +372,7 @@ export default function AdministrationView() {
         <div className="section-heading">
           <div>
             <p className="section-kicker">Administration workspace</p>
-            <h3>Set the platform up here</h3>
+            <h3>{featureSet.showAccess || featureSet.showConnectors || featureSet.showApiKeys ? "Set the platform up here" : "Basic local settings"}</h3>
           </div>
         </div>
 
