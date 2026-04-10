@@ -35,6 +35,93 @@ export type MailQuarantineStatus = "quarantined" | "released" | "purged";
 export type MailAuthResult = "pass" | "fail" | "softfail" | "none";
 export type MailActionType = "quarantine.release" | "message.purge";
 export type MailActionStatus = "completed" | "failed";
+export type AdminRole = "admin" | "analyst" | "operator" | "read_only" | "automation";
+export type AdminActorType = "user" | "api_key" | "session" | "system" | "anonymous";
+
+export interface AdminPrincipalSummary {
+  id: string;
+  username: string;
+  displayName: string;
+  roles: AdminRole[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string;
+}
+
+export interface AdminSessionSummary {
+  id: string;
+  principalId: string;
+  principalUsername: string;
+  principalDisplayName: string;
+  principalRoles: AdminRole[];
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string;
+  revokedAt?: string;
+  sourceIp?: string;
+  userAgent?: string;
+}
+
+export interface AdminApiKeySummary {
+  id: string;
+  principalId: string;
+  principalUsername: string;
+  principalDisplayName: string;
+  name: string;
+  scopes: string[];
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+  lastUsedAt?: string;
+  sourceIp?: string;
+}
+
+export interface AdminAuditEventSummary {
+  id: string;
+  occurredAt: string;
+  actorId?: string;
+  actorName: string;
+  actorType: AdminActorType;
+  action: string;
+  resourceType?: string;
+  resourceId?: string;
+  outcome: "success" | "failure";
+  severity: AlertSeverity;
+  details: string;
+  source: string;
+  sessionId?: string;
+  ipAddress?: string;
+}
+
+export interface AdminLoginRequest {
+  username: string;
+  password: string;
+  mfaCode: string;
+  sessionMinutes?: number;
+}
+
+export interface AdminLoginResponse {
+  accessToken: string;
+  principal: AdminPrincipalSummary;
+  session: AdminSessionSummary;
+}
+
+export interface AdminSessionStateResponse {
+  principal: AdminPrincipalSummary;
+  session: AdminSessionSummary;
+}
+
+export interface AdminApiKeyCreateRequest {
+  name: string;
+  scopes: string[];
+  sessionMinutes?: number;
+}
+
+export interface AdminApiKeyCreateResponse {
+  accessKey: string;
+  apiKey: AdminApiKeySummary;
+}
 
 export interface PolicySummary {
   id: string;

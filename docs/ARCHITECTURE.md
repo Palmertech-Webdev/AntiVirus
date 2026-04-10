@@ -110,6 +110,18 @@ Start with a modular monolith plus dedicated data services:
 - Alerting, policy, and action workflows will change quickly during early product iterations.
 - A modular monolith keeps schema changes, auth, and deployment simpler while the domain settles.
 
+### 4.4 Production Transition Requirements
+
+- Keep the current file-backed control plane only as a local scaffold.
+- Move production admin state to PostgreSQL.
+- Move high-volume telemetry and timeline queries to a real analytics store.
+- Store investigation bundles, evidence, and uploaded samples in object storage.
+- Put ingest retries, queued actions, and delayed processing behind a durable queue or job system.
+- Keep short-lived cache, command state, and rate limiting in Redis or an equivalent managed cache.
+- Separate signed update metadata and payload distribution from the main admin API.
+- Require audit trails, RBAC, MFA, and API/session controls before pilot expansion.
+- Park email and identity expansion until endpoint enrollment, telemetry, alerting, quarantine, audit, and false-positive handling are stable.
+
 ## 5. Frontend Design
 
 ### 5.1 Recommended Stack
@@ -142,6 +154,7 @@ Start with a modular monolith plus dedicated data services:
 
 - Mutual authentication between agent and backend
 - Device identity minted at enrollment
+- Admin authentication with MFA, RBAC, API key controls, and session controls
 - Signed updates and signed policy bundles where appropriate
 - Audit log for all admin and response actions
 - Tenant and role isolation in the control plane

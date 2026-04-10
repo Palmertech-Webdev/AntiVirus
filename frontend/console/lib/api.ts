@@ -1,6 +1,12 @@
 import { emptyMailDashboard, fallbackMailDashboard } from "./mail-mock-data";
 import { buildFallbackDeviceDetail, fallbackDashboard } from "./mock-data";
 import type {
+  AdminApiKeyCreateRequest,
+  AdminApiKeyCreateResponse,
+  AdminApiKeySummary,
+  AdminAuditEventSummary,
+  AdminLoginRequest,
+  AdminLoginResponse,
   CreatePolicyRequest,
   CreateScriptRequest,
   DashboardSnapshot,
@@ -13,6 +19,7 @@ import type {
   MailDashboardSnapshot,
   MailMessageSummary,
   MailQuarantineItemSummary,
+  AdminSessionSummary,
   PolicyAssignmentRequest,
   PolicyProfile,
   QuarantineItemSummary,
@@ -26,6 +33,7 @@ import type {
 export type DataSource = "live" | "fallback";
 
 export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000/api/v1";
+const adminSessionStorageKey = "fenrir.admin.sessionToken";
 
 class HttpRequestError extends Error {
   constructor(
@@ -50,11 +58,21 @@ async function requestJson<T>(path: string): Promise<T> {
 async function requestJsonWithBody<T>(path: string, method: "GET" | "POST" | "PATCH", body?: object): Promise<T> {
   let response: Response;
 
+  const headers: Record<string, string> = {};
+  if (body) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const adminSessionToken = getStoredAdminSessionToken();
+  if (adminSessionToken) {
+    headers["x-admin-session-token"] = adminSessionToken;
+  }
+
   try {
     response = await fetch(`${apiBaseUrl}${path}`, {
       method,
       cache: "no-store",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
       body: body ? JSON.stringify(body) : undefined
     });
   } catch (error) {
@@ -67,6 +85,42 @@ async function requestJsonWithBody<T>(path: string, method: "GET" | "POST" | "PA
   }
 
   return (await response.json()) as T;
+}
+
+export function getStoredAdminSessionToken() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem(adminSessionStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredAdminSessionToken(token: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(adminSessionStorageKey, token);
+  } catch {
+    // Ignore storage failures in hardened browser contexts.
+  }
+}
+
+export function clearStoredAdminSessionToken() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(adminSessionStorageKey);
+  } catch {
+    // Ignore storage failures in hardened browser contexts.
+  }
 }
 
 export async function loadDashboard(): Promise<LoadResult<DashboardSnapshot>> {
@@ -182,6 +236,46 @@ export async function loadMailDashboard(): Promise<LoadResult<MailDashboardSnaps
       source: "fallback"
     };
   }
+}
+
+export async function loginAdmin(request: AdminLoginRequest): Promise<AdminLoginResponse> {
+  const response = await requestJsonWithBody<AdminLoginResponse>("/admin/auth/login", "POST", request);
+  setStoredAdminSessionToken(response.accessToken);
+  return response;
+}
+
+export async function loadAdminSession(): Promise<AdminLoginResponse> {
+  return requestJson<AdminLoginResponse>("/admin/auth/me");
+}
+
+export async function logoutAdmin(): Promise<{ revoked: boolean }> {
+  const response = await requestJsonWithBody<{ revoked: boolean }>("/admin/auth/logout", "POST");
+  clearStoredAdminSessionToken();
+  return response;
+}
+
+export async function listAdminSessions(): Promise<AdminSessionSummary[]> {
+  const response = await requestJson<{ items: AdminSessionSummary[] }>("/admin/sessions");
+  return response.items;
+}
+
+export async function listAdminAuditEvents(limit?: number): Promise<AdminAuditEventSummary[]> {
+  const suffix = typeof limit === "number" ? `?limit=${limit}` : "";
+  const response = await requestJson<{ items: AdminAuditEventSummary[] }>(`/admin/audit${suffix}`);
+  return response.items;
+}
+
+export async function listAdminApiKeys(): Promise<AdminApiKeySummary[]> {
+  const response = await requestJson<{ items: AdminApiKeySummary[] }>("/admin/api-keys");
+  return response.items;
+}
+
+export async function createAdminApiKey(request: AdminApiKeyCreateRequest): Promise<AdminApiKeyCreateResponse> {
+  return requestJsonWithBody<AdminApiKeyCreateResponse>("/admin/api-keys", "POST", request);
+}
+
+export async function revokeAdminApiKey(apiKeyId: string): Promise<AdminApiKeySummary> {
+  return requestJsonWithBody<AdminApiKeySummary>(`/admin/api-keys/${apiKeyId}/revoke`, "POST");
 }
 
 export async function releaseMailQuarantineItem(

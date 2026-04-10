@@ -544,30 +544,28 @@ function calculateIdentityPosture(telemetry: DeviceRiskTelemetrySnapshot, driver
 }
 
 function calculateConfidence(telemetry: DeviceRiskTelemetrySnapshot): ConfidenceResult {
-  let confidenceScore = 100;
+  let presentWeight = 0;
+  let totalWeight = 0;
   const missingTelemetryFields: string[] = [];
 
   for (const category of CATEGORY_ORDER) {
     const fields = CATEGORY_FIELDS[category];
-    const presentCount = fields.filter((field) => isFieldPresent(telemetry[field])).length;
-
-    if (presentCount === 0) {
-      confidenceScore -= 14;
-    }
-
     for (const field of fields) {
       const value = telemetry[field];
+      const fieldWeight = CRITICAL_FIELDS[category].includes(field) ? 2 : 1;
+      totalWeight += fieldWeight;
+
       if (isFieldPresent(value)) {
+        presentWeight += fieldWeight;
         continue;
       }
 
       missingTelemetryFields.push(field);
-      confidenceScore -= CRITICAL_FIELDS[category].includes(field) ? 5 : 2;
     }
   }
 
   return {
-    confidenceScore: clamp(confidenceScore, 0, 100),
+    confidenceScore: totalWeight > 0 ? roundScore((presentWeight / totalWeight) * 100) : 0,
     missingTelemetryFields: [...new Set(missingTelemetryFields)]
   };
 }

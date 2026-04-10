@@ -2,10 +2,38 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import {
+  buildAdminActorContext,
+  createAdminLoginResponse,
+  createBootstrapAdminState,
+  createSessionToken,
+  DEFAULT_ADMIN_MFA_SECRET,
+  DEFAULT_ADMIN_PASSWORD,
+  hashSessionToken,
+  hashPassword,
+  hasAdminRole,
+  toAdminApiKeySummary,
+  toAdminPrincipalSummary,
+  toAdminSessionSummary,
+  verifyPassword,
+  verifyTotpCode
+} from "./adminAuth.ts";
 import { generateAlertsFromTelemetry, mergeGeneratedAlerts } from "./detectionEngine.ts";
 import { explainDeviceRisk, scoreDeviceRisk, summarizeDeviceRisk } from "./deviceRiskScoring.ts";
 import { createEmptyState, createSeedState, DEMO_DEVICE_IDS, DEMO_HOSTNAMES } from "./seedState.ts";
 import type {
+  AdminActorContext,
+  AdminApiKeyCreateRequest,
+  AdminApiKeyCreateResponse,
+  AdminApiKeyRecord,
+  AdminApiKeySummary,
+  AdminAuditEventSummary,
+  AdminLoginRequest,
+  AdminLoginResponse,
+  AdminPrincipalRecord,
+  AdminPrincipalSummary,
+  AdminSessionRecord,
+  AdminSessionSummary,
   AlertSummary,
   CommandStatus,
   CompleteCommandRequest,
@@ -63,6 +91,9 @@ const MAX_EVIDENCE_ITEMS = 2_000;
 const MAX_SCAN_HISTORY = 5_000;
 const MAX_DEVICE_SCORE_HISTORY = 3_000;
 const MAX_PRIVILEGE_EVENTS = 5_000;
+const MAX_ADMIN_SESSIONS = 1_000;
+const MAX_ADMIN_API_KEYS = 500;
+const MAX_ADMIN_AUDIT_EVENTS = 5_000;
 
 type ParsedPayload = Record<string, unknown>;
 
@@ -74,6 +105,23 @@ interface CreateFileBackedControlPlaneStoreOptions {
 }
 
 export interface ControlPlaneStore {
+  listAdminPrincipals(): Promise<AdminPrincipalSummary[]>;
+  listAdminSessions(): Promise<AdminSessionSummary[]>;
+  listAdminApiKeys(): Promise<AdminApiKeySummary[]>;
+  listAdminAuditEvents(limit?: number): Promise<AdminAuditEventSummary[]>;
+  loginAdmin(request: AdminLoginRequest, observedRemoteAddress?: string, userAgent?: string): Promise<AdminLoginResponse>;
+  resolveAdminSession(
+    sessionToken: string,
+    observedRemoteAddress?: string,
+    userAgent?: string
+  ): Promise<{ principal: AdminPrincipalSummary; session: AdminSessionSummary } | null>;
+  logoutAdminSession(sessionToken: string, observedRemoteAddress?: string): Promise<boolean>;
+  createAdminApiKey(
+    request: AdminApiKeyCreateRequest,
+    actor: AdminActorContext,
+    observedRemoteAddress?: string
+  ): Promise<AdminApiKeyCreateResponse>;
+  revokeAdminApiKey(apiKeyId: string, actor: AdminActorContext): Promise<AdminApiKeySummary>;
   getDashboardSnapshot(): Promise<DashboardSnapshot>;
   getDeviceDetail(deviceId: string): Promise<DeviceDetail>;
   listDevices(): Promise<DeviceSummary[]>;
@@ -85,12 +133,12 @@ export interface ControlPlaneStore {
   listQuarantineItems(deviceId?: string, status?: QuarantineStatus, limit?: number): Promise<QuarantineItemSummary[]>;
   getDefaultPolicy(): Promise<PolicySummary>;
   listPolicies(): Promise<PolicyProfile[]>;
-  createPolicy(request: CreatePolicyRequest): Promise<PolicyProfile>;
-  updatePolicy(policyId: string, request: UpdatePolicyRequest): Promise<PolicyProfile>;
-  assignPolicy(policyId: string, request: PolicyAssignmentRequest): Promise<PolicyProfile>;
+  createPolicy(request: CreatePolicyRequest, actor?: AdminActorContext): Promise<PolicyProfile>;
+  updatePolicy(policyId: string, request: UpdatePolicyRequest, actor?: AdminActorContext): Promise<PolicyProfile>;
+  assignPolicy(policyId: string, request: PolicyAssignmentRequest, actor?: AdminActorContext): Promise<PolicyProfile>;
   listScripts(): Promise<ScriptSummary[]>;
-  createScript(request: CreateScriptRequest): Promise<ScriptSummary>;
-  updateScript(scriptId: string, request: UpdateScriptRequest): Promise<ScriptSummary>;
+  createScript(request: CreateScriptRequest, actor?: AdminActorContext): Promise<ScriptSummary>;
+  updateScript(scriptId: string, request: UpdateScriptRequest, actor?: AdminActorContext): Promise<ScriptSummary>;
   upsertDeviceRiskTelemetry(deviceId: string, request: UpsertDeviceRiskTelemetryRequest): Promise<DeviceRiskTelemetrySnapshot>;
   recalculateDeviceScore(deviceId: string): Promise<DeviceScoreSnapshot>;
   getLatestDeviceScore(deviceId: string): Promise<DeviceScoreSnapshot>;
@@ -101,17 +149,19 @@ export interface ControlPlaneStore {
   listDevicePrivilegeEvents(deviceId: string, limit?: number): Promise<PrivilegeEventSummary[]>;
   enforceDevicePrivilegeHardening(
     deviceId: string,
-    request: { issuedBy?: string; reason?: string }
+    request: { issuedBy?: string; reason?: string },
+    actor?: AdminActorContext
   ): Promise<PrivilegeStateSnapshot>;
   recoverDevicePrivilegeHardening(
     deviceId: string,
-    request: { issuedBy?: string; reason?: string }
+    request: { issuedBy?: string; reason?: string },
+    actor?: AdminActorContext
   ): Promise<PrivilegeStateSnapshot>;
   enrollDevice(request: EnrollmentRequest, observedRemoteAddress?: string): Promise<EnrollmentResponse>;
   recordHeartbeat(deviceId: string, request: HeartbeatRequest, observedRemoteAddress?: string): Promise<HeartbeatResponse>;
   policyCheckIn(deviceId: string, request: PolicyCheckInRequest, observedRemoteAddress?: string): Promise<PolicyCheckInResponse>;
   ingestTelemetry(deviceId: string, request: TelemetryBatchRequest, observedRemoteAddress?: string): Promise<TelemetryBatchResponse>;
-  queueCommand(deviceId: string, request: QueueCommandRequest): Promise<DeviceCommandSummary>;
+  queueCommand(deviceId: string, request: QueueCommandRequest, actor?: AdminActorContext): Promise<DeviceCommandSummary>;
   pollPendingCommands(deviceId: string, limit?: number): Promise<PollCommandsResponse>;
   completeCommand(
     deviceId: string,
@@ -145,6 +195,20 @@ export class ScriptNotFoundError extends Error {
   constructor(scriptId: string) {
     super(`Script not found: ${scriptId}`);
     this.name = "ScriptNotFoundError";
+  }
+}
+
+export class AdminAuthenticationError extends Error {
+  constructor(message = "Invalid admin credentials") {
+    super(message);
+    this.name = "AdminAuthenticationError";
+  }
+}
+
+export class AdminAuthorizationError extends Error {
+  constructor(message = "Admin authorization failed") {
+    super(message);
+    this.name = "AdminAuthorizationError";
   }
 }
 
@@ -523,6 +587,147 @@ function sortPolicies(items: PolicyProfile[]) {
 
 function sortScripts(items: ScriptSummary[]) {
   return sortByIsoDescending(items, (item) => item.updatedAt);
+}
+
+function normalizeAdminRoles(rawRoles: unknown) {
+  if (!Array.isArray(rawRoles)) {
+    return ["admin"] as AdminPrincipalRecord["roles"];
+  }
+
+  const roles = rawRoles.filter(
+    (role): role is AdminPrincipalRecord["roles"][number] =>
+      role === "admin" || role === "analyst" || role === "operator" || role === "read_only" || role === "automation"
+  );
+
+  return roles.length > 0 ? [...new Set(roles)] : (["admin"] as AdminPrincipalRecord["roles"]);
+}
+
+function normalizeAdminPrincipalRecord(raw: unknown, nowIso: string): AdminPrincipalRecord {
+  const principal = (raw ?? {}) as Partial<AdminPrincipalRecord>;
+  const passwordSalt = readOptionalString(principal.passwordSalt, randomUUID().replace(/-/g, ""));
+  const passwordHash = readOptionalString(principal.passwordHash, hashPassword(DEFAULT_ADMIN_PASSWORD, passwordSalt));
+
+  return {
+    id: readOptionalString(principal.id, randomUUID()),
+    username: readOptionalString(principal.username, "admin@fenrir.local"),
+    displayName: readOptionalString(principal.displayName, "Fenrir Platform Admin"),
+    passwordSalt,
+    passwordHash,
+    mfaSecret: readOptionalString(principal.mfaSecret, DEFAULT_ADMIN_MFA_SECRET),
+    roles: normalizeAdminRoles(principal.roles),
+    enabled: principal.enabled !== false,
+    createdAt: readOptionalString(principal.createdAt, nowIso),
+    updatedAt: readOptionalString(principal.updatedAt, nowIso),
+    lastLoginAt: typeof principal.lastLoginAt === "string" ? principal.lastLoginAt : undefined
+  };
+}
+
+function normalizeAdminSessionRecord(raw: unknown, nowIso: string): AdminSessionRecord {
+  const session = (raw ?? {}) as Partial<AdminSessionRecord>;
+  return {
+    id: readOptionalString(session.id, randomUUID()),
+    principalId: readOptionalString(session.principalId),
+    tokenHash: readOptionalString(session.tokenHash, randomUUID().replace(/-/g, "")),
+    createdAt: readOptionalString(session.createdAt, nowIso),
+    expiresAt: readOptionalString(session.expiresAt, nowIso),
+    lastSeenAt: readOptionalString(session.lastSeenAt, nowIso),
+    revokedAt: typeof session.revokedAt === "string" ? session.revokedAt : undefined,
+    sourceIp: typeof session.sourceIp === "string" ? session.sourceIp : undefined,
+    userAgent: typeof session.userAgent === "string" ? session.userAgent : undefined
+  };
+}
+
+function normalizeAdminApiKeyRecord(raw: unknown, nowIso: string): AdminApiKeyRecord {
+  const apiKey = (raw ?? {}) as Partial<AdminApiKeyRecord>;
+  return {
+    id: readOptionalString(apiKey.id, randomUUID()),
+    principalId: readOptionalString(apiKey.principalId),
+    name: readOptionalString(apiKey.name, "Unnamed API key"),
+    scopes: readOptionalStringArray(apiKey.scopes),
+    tokenHash: readOptionalString(apiKey.tokenHash, randomUUID().replace(/-/g, "")),
+    createdAt: readOptionalString(apiKey.createdAt, nowIso),
+    updatedAt: readOptionalString(apiKey.updatedAt, nowIso),
+    revokedAt: typeof apiKey.revokedAt === "string" ? apiKey.revokedAt : undefined,
+    lastUsedAt: typeof apiKey.lastUsedAt === "string" ? apiKey.lastUsedAt : undefined,
+    sourceIp: typeof apiKey.sourceIp === "string" ? apiKey.sourceIp : undefined
+  };
+}
+
+function normalizeAdminAuditEventSummary(raw: unknown, nowIso: string): AdminAuditEventSummary {
+  const event = (raw ?? {}) as Partial<AdminAuditEventSummary>;
+  const actorType =
+    event.actorType === "user" || event.actorType === "api_key" || event.actorType === "session" || event.actorType === "system"
+      ? event.actorType
+      : "anonymous";
+
+  return {
+    id: readOptionalString(event.id, randomUUID()),
+    occurredAt: readOptionalString(event.occurredAt, nowIso),
+    actorId: typeof event.actorId === "string" ? event.actorId : undefined,
+    actorName: readOptionalString(event.actorName, "system"),
+    actorType,
+    action: readOptionalString(event.action, "admin.activity"),
+    resourceType: typeof event.resourceType === "string" ? event.resourceType : undefined,
+    resourceId: typeof event.resourceId === "string" ? event.resourceId : undefined,
+    outcome: event.outcome === "failure" ? "failure" : "success",
+    severity:
+      event.severity === "low" || event.severity === "medium" || event.severity === "critical" ? event.severity : "medium",
+    details: readOptionalString(event.details, "Administrative event recorded."),
+    source: readOptionalString(event.source, "control-plane"),
+    sessionId: typeof event.sessionId === "string" ? event.sessionId : undefined,
+    ipAddress: typeof event.ipAddress === "string" ? event.ipAddress : undefined
+  };
+}
+
+function sortAdminPrincipals(items: AdminPrincipalRecord[]) {
+  return [...items].sort((left, right) => left.username.localeCompare(right.username));
+}
+
+function sortAdminSessions(items: AdminSessionRecord[]) {
+  return sortByIsoDescending(items, (item) => item.lastSeenAt);
+}
+
+function sortAdminApiKeys(items: AdminApiKeyRecord[]) {
+  return sortByIsoDescending(items, (item) => item.updatedAt);
+}
+
+function sortAdminAuditEvents(items: AdminAuditEventSummary[]) {
+  return sortByIsoDescending(items, (item) => item.occurredAt);
+}
+
+function findAdminPrincipalById(state: ControlPlaneState, principalId: string) {
+  return state.adminPrincipals.find((item) => item.id === principalId) ?? null;
+}
+
+function findAdminPrincipalByUsername(state: ControlPlaneState, username: string) {
+  return state.adminPrincipals.find((item) => item.username.toLowerCase() === username.toLowerCase()) ?? null;
+}
+
+function findAdminSessionByTokenHash(state: ControlPlaneState, tokenHash: string) {
+  return state.adminSessions.find((item) => item.tokenHash === tokenHash) ?? null;
+}
+
+function findAdminApiKeyByTokenHash(state: ControlPlaneState, tokenHash: string) {
+  return state.adminApiKeys.find((item) => item.tokenHash === tokenHash) ?? null;
+}
+
+function recordAdminAuditEvent(state: ControlPlaneState, event: Omit<AdminAuditEventSummary, "id"> & { id?: string }) {
+  state.adminAuditEvents.push({
+    id: event.id ?? randomUUID(),
+    occurredAt: event.occurredAt,
+    actorId: event.actorId,
+    actorName: event.actorName,
+    actorType: event.actorType,
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+    outcome: event.outcome,
+    severity: event.severity,
+    details: event.details,
+    source: event.source,
+    sessionId: event.sessionId,
+    ipAddress: event.ipAddress
+  });
 }
 
 function toPolicySummary(policy: PolicyProfile): PolicySummary {
@@ -999,7 +1204,8 @@ function applyPrivilegeHardeningAction(
     mode: PrivilegeHardeningMode;
     summary: string;
     pamEnforcementEnabled: boolean;
-  }
+  },
+  actor?: AdminActorContext
 ) {
   const telemetry = ensurePrivilegeRiskTelemetry(state, device, nowIso);
   telemetry.privilege_hardening_mode = action.mode;
@@ -1043,6 +1249,26 @@ function applyPrivilegeHardeningAction(
     resultJson: JSON.stringify({ summary: action.summary, mode: action.mode })
   };
   state.commands.push(command);
+
+  if (actor) {
+    const principal = findAdminPrincipalById(state, actor.actorId);
+    if (principal && principal.enabled) {
+      recordAdminAuditEvent(state, {
+        occurredAt: nowIso,
+        actorId: principal.id,
+        actorName: principal.displayName,
+        actorType: actor.actorType,
+        action: action.type,
+        resourceType: "device",
+        resourceId: device.id,
+        outcome: "success",
+        severity: "high",
+        details: action.summary,
+        source: "control-plane",
+        sessionId: actor.sessionId
+      });
+    }
+  }
 
   recalculateDeviceScoreSnapshot(state, device, nowIso);
   return privilegeState;
@@ -1399,11 +1625,28 @@ function normalizeState(rawState: unknown, nowIso: string): ControlPlaneState {
     : [];
   const hostnameByDeviceId = new Map(devices.map((item) => [item.id, item.hostname]));
   const scripts = Array.isArray(raw.scripts) ? raw.scripts.map((item) => normalizeScript(item, nowIso)) : [];
+  const adminBootstrap = createBootstrapAdminState(nowIso);
 
   const state: ControlPlaneState = {
     defaultPolicy: toPolicySummary(defaultPolicyProfile),
     policies,
     scripts,
+    adminPrincipals:
+      Array.isArray(raw.adminPrincipals) && raw.adminPrincipals.length > 0
+        ? raw.adminPrincipals.map((item) => normalizeAdminPrincipalRecord(item, nowIso))
+        : adminBootstrap.adminPrincipals,
+    adminSessions:
+      Array.isArray(raw.adminSessions) && raw.adminSessions.length > 0
+        ? raw.adminSessions.map((item) => normalizeAdminSessionRecord(item, nowIso))
+        : adminBootstrap.adminSessions,
+    adminApiKeys:
+      Array.isArray(raw.adminApiKeys) && raw.adminApiKeys.length > 0
+        ? raw.adminApiKeys.map((item) => normalizeAdminApiKeyRecord(item, nowIso))
+        : adminBootstrap.adminApiKeys,
+    adminAuditEvents:
+      Array.isArray(raw.adminAuditEvents) && raw.adminAuditEvents.length > 0
+        ? raw.adminAuditEvents.map((item) => normalizeAdminAuditEventSummary(item, nowIso))
+        : adminBootstrap.adminAuditEvents,
     devices,
     alerts: Array.isArray(raw.alerts) ? raw.alerts.map((item) => normalizeAlert(item)) : [],
     telemetry: Array.isArray(raw.telemetry)
@@ -1543,6 +1786,10 @@ function trimState(state: ControlPlaneState) {
     assignedDeviceIds: [...policy.assignedDeviceIds].sort((left, right) => left.localeCompare(right))
   }));
   state.scripts = sortScripts(state.scripts);
+  state.adminPrincipals = sortAdminPrincipals(state.adminPrincipals);
+  state.adminSessions = sortAdminSessions(state.adminSessions).slice(0, MAX_ADMIN_SESSIONS);
+  state.adminApiKeys = sortAdminApiKeys(state.adminApiKeys).slice(0, MAX_ADMIN_API_KEYS);
+  state.adminAuditEvents = sortAdminAuditEvents(state.adminAuditEvents).slice(0, MAX_ADMIN_AUDIT_EVENTS);
   state.alerts = sortAlerts(state.alerts).slice(0, MAX_ALERTS);
   state.telemetry = sortTelemetry(state.telemetry).slice(0, MAX_TELEMETRY);
   state.commands = sortCommands(state.commands).slice(0, MAX_COMMANDS);
@@ -1846,7 +2093,11 @@ function buildEffectiveRiskTelemetry(state: ControlPlaneState, device: DeviceRec
     firewall_enabled: coalesceDefined(stored?.firewall_enabled, posture ? posture.wfpState === "ready" : undefined),
     disk_encryption_enabled: stored?.disk_encryption_enabled,
     tamper_protection_enabled: coalesceDefined(stored?.tamper_protection_enabled, posture ? posture.tamperProtectionState === "ready" : undefined),
-    local_admin_users_count: stored?.local_admin_users_count,
+    local_admin_users_count: coalesceDefined(
+      stored?.local_admin_users_count,
+      privilegeBaseline ? privilegeBaseline.localAdministrators.filter((item) => item.enabled).length : undefined,
+      privilegeState?.standingAdminPresentFlag ? 1 : undefined
+    ),
     standing_admin_present_flag: coalesceDefined(
       stored?.standing_admin_present_flag,
       privilegeState?.standingAdminPresentFlag,
@@ -2482,6 +2733,301 @@ export function createFileBackedControlPlaneStore(
   }
 
   return {
+    async listAdminPrincipals() {
+      const state = await loadState();
+      return sortAdminPrincipals(state.adminPrincipals).map((item) => toAdminPrincipalSummary(item));
+    },
+
+    async listAdminSessions() {
+      const state = await loadState();
+      return sortAdminSessions(state.adminSessions).map((item) => {
+        const principal = findAdminPrincipalById(state, item.principalId);
+        return toAdminSessionSummary(
+          item,
+          principal ?? {
+            id: item.principalId,
+            username: "unknown",
+            displayName: "Unknown principal",
+            passwordSalt: "",
+            passwordHash: "",
+            mfaSecret: "",
+            roles: ["read_only"],
+            enabled: false,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt
+          }
+        );
+      });
+    },
+
+    async listAdminApiKeys() {
+      const state = await loadState();
+      return sortAdminApiKeys(state.adminApiKeys).map((item) => {
+        const principal = findAdminPrincipalById(state, item.principalId);
+        return toAdminApiKeySummary(
+          item,
+          principal ?? {
+            id: item.principalId,
+            username: "unknown",
+            displayName: "Unknown principal",
+            passwordSalt: "",
+            passwordHash: "",
+            mfaSecret: "",
+            roles: ["read_only"],
+            enabled: false,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt
+          }
+        );
+      });
+    },
+
+    async listAdminAuditEvents(limit = 100) {
+      const state = await loadState();
+      return sortAdminAuditEvents(state.adminAuditEvents).slice(0, limit);
+    },
+
+    async loginAdmin(request, observedRemoteAddress, userAgent) {
+      const state = await loadState();
+      const principal = findAdminPrincipalByUsername(state, request.username);
+      const validPrincipal = principal && principal.enabled;
+      const passwordValid = principal ? verifyPassword(request.password, principal.passwordSalt, principal.passwordHash) : false;
+      const mfaValid = principal ? verifyTotpCode(principal.mfaSecret, request.mfaCode) : false;
+
+      if (!validPrincipal || !passwordValid || !mfaValid) {
+        recordAdminAuditEvent(state, {
+          occurredAt: now(),
+          actorName: request.username,
+          actorType: "anonymous",
+          action: "admin.login",
+          resourceType: "admin_session",
+          outcome: "failure",
+          severity: "medium",
+          details: "Admin login failed due to invalid credentials or MFA.",
+          source: "control-plane",
+          ipAddress: observedRemoteAddress,
+          sessionId: undefined
+        });
+        trimState(state);
+        await persistStateSerialized(state);
+        throw new AdminAuthenticationError();
+      }
+
+      return mutateState(async (mutatedState) => {
+        const resolvedPrincipal = findAdminPrincipalByUsername(mutatedState, request.username);
+        if (!resolvedPrincipal || !resolvedPrincipal.enabled) {
+          throw new AdminAuthenticationError();
+        }
+
+        const timestamp = now();
+        const sessionToken = createSessionToken();
+        const sessionMinutes = typeof request.sessionMinutes === "number" && Number.isFinite(request.sessionMinutes)
+          ? Math.min(Math.max(Math.floor(request.sessionMinutes), 30), 24 * 60)
+          : 480;
+        const expiresAt = new Date(Date.parse(timestamp) + sessionMinutes * 60_000).toISOString();
+        const session: AdminSessionRecord = {
+          id: randomUUID(),
+          principalId: resolvedPrincipal.id,
+          tokenHash: hashSessionToken(sessionToken),
+          createdAt: timestamp,
+          expiresAt,
+          lastSeenAt: timestamp,
+          sourceIp: observedRemoteAddress,
+          userAgent
+        };
+
+        mutatedState.adminSessions.push(session);
+        resolvedPrincipal.lastLoginAt = timestamp;
+        resolvedPrincipal.updatedAt = timestamp;
+        recordAdminAuditEvent(mutatedState, {
+          occurredAt: timestamp,
+          actorId: resolvedPrincipal.id,
+          actorName: resolvedPrincipal.displayName,
+          actorType: "user",
+          action: "admin.login",
+          resourceType: "admin_session",
+          resourceId: session.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Admin session started for ${resolvedPrincipal.username}.`,
+          source: "control-plane",
+          sessionId: session.id,
+          ipAddress: observedRemoteAddress
+        });
+
+        return createAdminLoginResponse(sessionToken, resolvedPrincipal, session);
+      });
+    },
+
+    async resolveAdminSession(sessionToken, observedRemoteAddress, userAgent) {
+      const tokenHash = hashSessionToken(sessionToken);
+
+      return mutateState(async (state) => {
+        const currentIso = now();
+        const currentTime = Date.parse(currentIso);
+        const session = findAdminSessionByTokenHash(state, tokenHash);
+        if (!session || session.revokedAt) {
+          return null;
+        }
+
+        if (Date.parse(session.expiresAt) <= currentTime) {
+          session.revokedAt = session.revokedAt ?? currentIso;
+          recordAdminAuditEvent(state, {
+            occurredAt: currentIso,
+            actorId: session.principalId,
+            actorName: findAdminPrincipalById(state, session.principalId)?.displayName ?? "Unknown principal",
+            actorType: "session",
+            action: "admin.session.expired",
+            resourceType: "admin_session",
+            resourceId: session.id,
+            outcome: "failure",
+            severity: "low",
+            details: `Admin session ${session.id} expired before it could be used.`,
+            source: "control-plane",
+            sessionId: session.id,
+            ipAddress: observedRemoteAddress
+          });
+          return null;
+        }
+
+        const principal = findAdminPrincipalById(state, session.principalId);
+        if (!principal || !principal.enabled) {
+          session.revokedAt = session.revokedAt ?? currentIso;
+          return null;
+        }
+
+        session.lastSeenAt = currentIso;
+        if (observedRemoteAddress) {
+          session.sourceIp = observedRemoteAddress;
+        }
+        if (userAgent) {
+          session.userAgent = userAgent;
+        }
+
+        return {
+          principal: toAdminPrincipalSummary(principal),
+          session: toAdminSessionSummary(session, principal)
+        };
+      });
+    },
+
+    async logoutAdminSession(sessionToken, observedRemoteAddress) {
+      const tokenHash = hashSessionToken(sessionToken);
+
+      return mutateState(async (state) => {
+        const session = findAdminSessionByTokenHash(state, tokenHash);
+        if (!session) {
+          return false;
+        }
+
+        if (!session.revokedAt) {
+          session.revokedAt = now();
+          recordAdminAuditEvent(state, {
+            occurredAt: session.revokedAt,
+            actorId: session.principalId,
+            actorName: findAdminPrincipalById(state, session.principalId)?.displayName ?? "Unknown principal",
+            actorType: "session",
+            action: "admin.logout",
+            resourceType: "admin_session",
+            resourceId: session.id,
+            outcome: "success",
+            severity: "low",
+            details: `Admin session ${session.id} was revoked.`,
+            source: "control-plane",
+            sessionId: session.id,
+            ipAddress: observedRemoteAddress
+          });
+        }
+
+        return true;
+      });
+    },
+
+    async createAdminApiKey(request, actor, observedRemoteAddress) {
+      if (!hasAdminRole(actor, ["admin"])) {
+        throw new AdminAuthorizationError();
+      }
+
+      return mutateState(async (state) => {
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
+        const timestamp = now();
+        const accessKey = `avk_${createSessionToken()}`;
+        const apiKey: AdminApiKeyRecord = {
+          id: randomUUID(),
+          principalId: principal.id,
+          name: request.name.trim(),
+          scopes: [...new Set(request.scopes.filter((item) => item.trim().length > 0))],
+          tokenHash: hashSessionToken(accessKey),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          sourceIp: observedRemoteAddress
+        };
+
+        state.adminApiKeys.push(apiKey);
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "admin.api_key.create",
+          resourceType: "admin_api_key",
+          resourceId: apiKey.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Created API key ${apiKey.name}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId,
+          ipAddress: observedRemoteAddress
+        });
+
+        return {
+          accessKey,
+          apiKey: toAdminApiKeySummary(apiKey, principal)
+        };
+      });
+    },
+
+    async revokeAdminApiKey(apiKeyId, actor) {
+      if (!hasAdminRole(actor, ["admin"])) {
+        throw new AdminAuthorizationError();
+      }
+
+      return mutateState(async (state) => {
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
+        const apiKey = state.adminApiKeys.find((item) => item.id === apiKeyId);
+        if (!apiKey) {
+          throw new AdminAuthorizationError(`API key not found: ${apiKeyId}`);
+        }
+
+        apiKey.revokedAt = apiKey.revokedAt ?? now();
+        apiKey.updatedAt = now();
+        recordAdminAuditEvent(state, {
+          occurredAt: apiKey.updatedAt,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "admin.api_key.revoke",
+          resourceType: "admin_api_key",
+          resourceId: apiKey.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Revoked API key ${apiKey.name}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
+
+        return toAdminApiKeySummary(apiKey, principal);
+      });
+    },
+
     async getDashboardSnapshot() {
       const state = await loadState();
       const devices = sortDevices(state.devices.map((item) => toDeviceSummary(state, item)));
@@ -2593,8 +3139,17 @@ export function createFileBackedControlPlaneStore(
       return sortPolicies(state.policies);
     },
 
-    async createPolicy(request) {
+    async createPolicy(request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const timestamp = now();
         const created: PolicyProfile = {
           id: randomUUID(),
@@ -2620,12 +3175,35 @@ export function createFileBackedControlPlaneStore(
           updatedAt: timestamp
         };
         state.policies.push(created);
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "policy.create",
+          resourceType: "policy",
+          resourceId: created.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Created policy ${created.name}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
         return created;
       });
     },
 
-    async updatePolicy(policyId, request) {
+    async updatePolicy(policyId, request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const policy = findPolicyOrThrow(state, policyId);
         const timestamp = now();
         Object.assign(policy, {
@@ -2664,12 +3242,36 @@ export function createFileBackedControlPlaneStore(
           }
         }
 
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "policy.update",
+          resourceType: "policy",
+          resourceId: policy.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Updated policy ${policy.name}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
+
         return policy;
       });
     },
 
-    async assignPolicy(policyId, request) {
+    async assignPolicy(policyId, request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin", "operator"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const policy = findPolicyOrThrow(state, policyId);
         const timestamp = now();
 
@@ -2683,6 +3285,21 @@ export function createFileBackedControlPlaneStore(
 
         policy.updatedAt = timestamp;
         syncPolicyAssignments(state);
+
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "policy.assign",
+          resourceType: "policy",
+          resourceId: policy.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Assigned policy ${policy.name} to ${request.deviceIds.length} device(s).`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
         return policy;
       });
     },
@@ -2692,8 +3309,17 @@ export function createFileBackedControlPlaneStore(
       return sortScripts(state.scripts);
     },
 
-    async createScript(request) {
+    async createScript(request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const timestamp = now();
         const created: ScriptSummary = {
           id: randomUUID(),
@@ -2705,18 +3331,57 @@ export function createFileBackedControlPlaneStore(
           updatedAt: timestamp
         };
         state.scripts.push(created);
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "script.create",
+          resourceType: "script",
+          resourceId: created.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Created script ${created.name}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
         return created;
       });
     },
 
-    async updateScript(scriptId, request) {
+    async updateScript(scriptId, request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const script = findScriptOrThrow(state, scriptId);
         script.name = request.name?.trim() || script.name;
         script.description = request.description?.trim() || script.description;
         script.language = request.language ?? script.language;
         script.content = request.content ?? script.content;
-        script.updatedAt = now();
+        const timestamp = now();
+        script.updatedAt = timestamp;
+
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "script.update",
+          resourceType: "script",
+          resourceId: script.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Updated script ${script.name}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
         return script;
       });
     },
@@ -2807,8 +3472,17 @@ export function createFileBackedControlPlaneStore(
       return sortPrivilegeEvents(state.privilegeEvents.filter((item) => item.deviceId === deviceId)).slice(0, limit);
     },
 
-    async enforceDevicePrivilegeHardening(deviceId, request) {
+    async enforceDevicePrivilegeHardening(deviceId, request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin", "operator"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const device = findDeviceOrThrow(state, deviceId);
         const policy = state.policies.find((item) => item.id === device.policyId);
         const timestamp = now();
@@ -2823,12 +3497,21 @@ export function createFileBackedControlPlaneStore(
           summary: mode === "restricted"
             ? "PAM-lite hardening applied; standing administrator access is now restricted through the recovery path."
             : "Privilege hardening applied; standing administrator access is being brokered through controlled elevation."
-        });
+        }, actor);
       });
     },
 
-    async recoverDevicePrivilegeHardening(deviceId, request) {
+    async recoverDevicePrivilegeHardening(deviceId, request, actor) {
       return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin", "operator"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
         const device = findDeviceOrThrow(state, deviceId);
         const policy = state.policies.find((item) => item.id === device.policyId);
         const timestamp = now();
@@ -2848,7 +3531,7 @@ export function createFileBackedControlPlaneStore(
             mode === "monitor_only"
               ? "Privilege recovery completed and the endpoint has returned to monitored access with break-glass escrow intact."
               : "Privilege recovery completed and hardening remains in effect with a recoverable administrative path intact."
-        });
+        }, actor);
       });
     },
 
@@ -3020,8 +3703,15 @@ export function createFileBackedControlPlaneStore(
       });
     },
 
-    async queueCommand(deviceId, request) {
+    async queueCommand(deviceId, request, actor) {
       return mutateState(async (state) => {
+        if (actor) {
+          const principal = findAdminPrincipalById(state, actor.actorId);
+          if (!principal || !principal.enabled || !hasAdminRole(actor, ["admin", "operator"])) {
+            throw new AdminAuthorizationError();
+          }
+        }
+
         const device = findDeviceOrThrow(state, deviceId);
         const createdAt = now();
         const command: DeviceCommandSummary = {
@@ -3038,6 +3728,26 @@ export function createFileBackedControlPlaneStore(
           payloadJson: request.payloadJson
         };
         state.commands.push(command);
+
+        if (actor) {
+          const principal = findAdminPrincipalById(state, actor.actorId);
+          if (principal) {
+            recordAdminAuditEvent(state, {
+              occurredAt: createdAt,
+              actorId: principal.id,
+              actorName: principal.displayName,
+              actorType: actor.actorType,
+              action: "command.queue",
+              resourceType: "device_command",
+              resourceId: command.id,
+              outcome: "success",
+              severity: "medium",
+              details: `Queued ${command.type} for ${device.hostname}.`,
+              source: "control-plane",
+              sessionId: actor.sessionId
+            });
+          }
+        }
         return command;
       });
     },

@@ -12,12 +12,15 @@ import {
 } from "./mailStore.ts";
 import {
   CommandNotFoundError,
+  AdminAuthenticationError,
+  AdminAuthorizationError,
   createFileBackedControlPlaneStore,
   DeviceNotFoundError,
   PolicyNotFoundError,
   ScriptNotFoundError,
   type ControlPlaneStore
 } from "./controlPlaneStore.ts";
+import type { AdminActorContext, AdminApiKeyCreateRequest, AdminLoginRequest, AdminRole } from "./types.ts";
 
 const enrollmentRequestSchema = z.object({
   hostname: z.string().min(1),
@@ -280,6 +283,23 @@ const mailActionRequestSchema = z.object({
   requestedBy: z.string().min(1).optional()
 });
 
+const adminLoginRequestSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+  mfaCode: z.string().regex(/^\d{6}$/),
+  sessionMinutes: z.coerce.number().int().positive().max(24 * 60).optional()
+});
+
+const adminApiKeyCreateRequestSchema = z.object({
+  name: z.string().min(1),
+  scopes: z.array(z.string().min(1)).min(1),
+  sessionMinutes: z.coerce.number().int().positive().max(24 * 60).optional()
+});
+
+const adminLimitQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(200).optional()
+});
+
 const simulatedInboundMailRequestSchema = z.object({
   mailDomainId: z.string().min(1).optional(),
   sender: z.string().min(1),
@@ -388,6 +408,92 @@ function sendMailDomainNotFound(
     error: "mail_domain_not_found",
     identifier
   });
+}
+
+function sendAdminUnauthorized(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, details = "Admin authentication required") {
+  return reply.code(401).send({
+    error: "admin_auth_required",
+    details
+  });
+}
+
+function sendAdminForbidden(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, details = "Admin role not permitted") {
+  return reply.code(403).send({
+    error: "admin_forbidden",
+    details
+  });
+}
+
+function extractAdminSessionToken(request: { headers: Record<string, unknown>; raw: { url?: string } }) {
+  const headerValue = request.headers["x-admin-session-token"];
+  if (typeof headerValue === "string" && headerValue.length > 0) {
+    return headerValue;
+  }
+
+  const authHeader = request.headers.authorization;
+  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    return authHeader.slice("Bearer ".length).trim();
+  }
+
+  const rawUrl = request.raw.url;
+  if (typeof rawUrl === "string") {
+    const queryStart = rawUrl.indexOf("?");
+    if (queryStart >= 0) {
+      const query = rawUrl.slice(queryStart + 1);
+      const params = new URLSearchParams(query);
+      const queryToken = params.get("adminSessionToken");
+      if (queryToken && queryToken.length > 0) {
+        return queryToken;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function hasRequiredAdminRole(roles: AdminRole[], allowedRoles: AdminRole[]) {
+  if (roles.includes("admin")) {
+    return true;
+  }
+
+  return allowedRoles.some((role) => roles.includes(role));
+}
+
+async function requireAdminActor(
+  request: { headers: Record<string, unknown>; raw: { url?: string }; ip: string },
+  reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } },
+  store: ControlPlaneStore,
+  allowedRoles: AdminRole[] = ["admin"]
+) {
+  const token = extractAdminSessionToken(request);
+  if (!token) {
+    sendAdminUnauthorized(reply);
+    return null;
+  }
+
+  const session = await store.resolveAdminSession(
+    token,
+    request.ip,
+    typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
+  );
+
+  if (!session) {
+    sendAdminUnauthorized(reply, "Admin session is invalid or expired");
+    return null;
+  }
+
+  if (!hasRequiredAdminRole(session.principal.roles, allowedRoles)) {
+    sendAdminForbidden(reply);
+    return null;
+  }
+
+  return {
+    actorId: session.principal.id,
+    actorName: session.principal.displayName,
+    actorType: "session" as const,
+    roles: session.principal.roles,
+    sessionId: session.session.id
+  } satisfies AdminActorContext;
 }
 
 function validateQueuedCommand(
@@ -852,11 +958,20 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
-      return reply.code(201).send(await store.enforceDevicePrivilegeHardening(params.data.deviceId, body.data));
+      return reply.code(201).send(await store.enforceDevicePrivilegeHardening(params.data.deviceId, body.data, actor));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -875,11 +990,20 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
-      return reply.code(201).send(await store.recoverDevicePrivilegeHardening(params.data.deviceId, body.data));
+      return reply.code(201).send(await store.recoverDevicePrivilegeHardening(params.data.deviceId, body.data, actor));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -941,6 +1065,148 @@ export function buildServer(options: BuildServerOptions = {}) {
   app.get("/api/v1/scan-history", async (request, reply) => {
     const parsed = telemetryQuerySchema.safeParse(request.query);
 
+      app.post("/api/v1/admin/auth/login", async (request, reply) => {
+        const body = adminLoginRequestSchema.safeParse(request.body);
+
+        if (!body.success) {
+          return sendValidationError(reply, body.error.flatten());
+        }
+
+        try {
+          return reply.code(201).send(
+            await store.loginAdmin(
+              body.data,
+              extractObservedRemoteAddress(request),
+              typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
+            )
+          );
+        } catch (error) {
+          if (error instanceof AdminAuthenticationError) {
+            return reply.code(401).send({
+              error: "admin_auth_failed",
+              details: error.message
+            });
+          }
+
+          throw error;
+        }
+      });
+
+      app.get("/api/v1/admin/auth/me", async (request, reply) => {
+        const token = extractAdminSessionToken(request);
+        if (!token) {
+          return sendAdminUnauthorized(reply);
+        }
+
+        const session = await store.resolveAdminSession(
+          token,
+          extractObservedRemoteAddress(request),
+          typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined
+        );
+
+        if (!session) {
+          return sendAdminUnauthorized(reply, "Admin session is invalid or expired");
+        }
+
+        return session;
+      });
+
+      app.post("/api/v1/admin/auth/logout", async (request, reply) => {
+        const token = extractAdminSessionToken(request);
+        if (!token) {
+          return sendAdminUnauthorized(reply);
+        }
+
+        const revoked = await store.logoutAdminSession(token, extractObservedRemoteAddress(request));
+        return {
+          revoked
+        };
+      });
+
+      app.get("/api/v1/admin/sessions", async (request, reply) => {
+        const actor = await requireAdminActor(request, reply, store, ["admin"]);
+        if (!actor) {
+          return;
+        }
+
+        return {
+          items: await store.listAdminSessions()
+        };
+      });
+
+      app.get("/api/v1/admin/audit", async (request, reply) => {
+        const actor = await requireAdminActor(request, reply, store, ["admin", "analyst", "operator", "read_only"]);
+        if (!actor) {
+          return;
+        }
+
+        const parsed = adminLimitQuerySchema.safeParse(request.query);
+        if (!parsed.success) {
+          return sendValidationError(reply, parsed.error.flatten());
+        }
+
+        return {
+          items: await store.listAdminAuditEvents(parsed.data.limit)
+        };
+      });
+
+      app.get("/api/v1/admin/api-keys", async (request, reply) => {
+        const actor = await requireAdminActor(request, reply, store, ["admin"]);
+        if (!actor) {
+          return;
+        }
+
+        return {
+          items: await store.listAdminApiKeys()
+        };
+      });
+
+      app.post("/api/v1/admin/api-keys", async (request, reply) => {
+        const actor = await requireAdminActor(request, reply, store, ["admin"]);
+        if (!actor) {
+          return;
+        }
+
+        const body = adminApiKeyCreateRequestSchema.safeParse(request.body);
+        if (!body.success) {
+          return sendValidationError(reply, body.error.flatten());
+        }
+
+        try {
+          return reply.code(201).send(
+            await store.createAdminApiKey(body.data, actor, extractObservedRemoteAddress(request))
+          );
+        } catch (error) {
+          if (error instanceof AdminAuthorizationError) {
+            return sendAdminForbidden(reply);
+          }
+
+          throw error;
+        }
+      });
+
+      app.post("/api/v1/admin/api-keys/:apiKeyId/revoke", async (request, reply) => {
+        const params = z.object({ apiKeyId: z.string().min(1) }).safeParse(request.params);
+        if (!params.success) {
+          return sendValidationError(reply, params.error.flatten());
+        }
+
+        const actor = await requireAdminActor(request, reply, store, ["admin"]);
+        if (!actor) {
+          return;
+        }
+
+        try {
+          return await store.revokeAdminApiKey(params.data.apiKeyId, actor);
+        } catch (error) {
+          if (error instanceof AdminAuthorizationError) {
+            return sendAdminForbidden(reply);
+          }
+
+          throw error;
+        }
+      });
+
     if (!parsed.success) {
       return sendValidationError(reply, parsed.error.flatten());
     }
@@ -963,7 +1229,12 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
-    return reply.code(201).send(await store.createPolicy(body.data));
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    return reply.code(201).send(await store.createPolicy(body.data, actor));
   });
 
   app.patch("/api/v1/policies/:policyId", async (request, reply) => {
@@ -978,11 +1249,20 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
     try {
-      return await store.updatePolicy(params.data.policyId, body.data);
+      return await store.updatePolicy(params.data.policyId, body.data, actor);
     } catch (error) {
       if (error instanceof PolicyNotFoundError) {
         return sendPolicyNotFound(reply, params.data.policyId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1001,8 +1281,13 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
-      return await store.assignPolicy(params.data.policyId, body.data);
+      return await store.assignPolicy(params.data.policyId, body.data, actor);
     } catch (error) {
       if (error instanceof PolicyNotFoundError) {
         return sendPolicyNotFound(reply, params.data.policyId);
@@ -1010,6 +1295,10 @@ export function buildServer(options: BuildServerOptions = {}) {
 
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, error.message.replace("Device not found: ", ""));
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1027,7 +1316,12 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
-    return reply.code(201).send(await store.createScript(body.data));
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    return reply.code(201).send(await store.createScript(body.data, actor));
   });
 
   app.patch("/api/v1/scripts/:scriptId", async (request, reply) => {
@@ -1042,11 +1336,20 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
     try {
-      return await store.updateScript(params.data.scriptId, body.data);
+      return await store.updateScript(params.data.scriptId, body.data, actor);
     } catch (error) {
       if (error instanceof ScriptNotFoundError) {
         return sendScriptNotFound(reply, params.data.scriptId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1146,11 +1449,20 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, validation.details);
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
-      return reply.code(201).send(await store.queueCommand(params.data.deviceId, body.data));
+      return reply.code(201).send(await store.queueCommand(params.data.deviceId, body.data, actor));
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1169,16 +1481,25 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "device.isolate",
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1197,16 +1518,25 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "device.release",
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1225,17 +1555,26 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "quarantine.restore",
           recordId: params.data.recordId,
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1254,17 +1593,26 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "quarantine.delete",
           recordId: params.data.recordId,
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1283,17 +1631,26 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "remediate.path",
           targetPath: body.data.targetPath,
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1312,17 +1669,26 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "process.tree.terminate",
           targetPath: body.data.targetPath,
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1341,17 +1707,26 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "update.apply",
           targetPath: body.data.targetPath,
-          issuedBy: body.data.issuedBy ?? "console"
-        })
+          issuedBy: body.data.issuedBy ?? actor.actorName
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1370,6 +1745,11 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       const scripts = await store.listScripts();
       const script = scripts.find((item) => item.id === body.data.scriptId);
@@ -1380,18 +1760,22 @@ export function buildServer(options: BuildServerOptions = {}) {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "script.run",
-          issuedBy: body.data.issuedBy ?? "console",
+          issuedBy: body.data.issuedBy ?? actor.actorName,
           payloadJson: JSON.stringify({
             scriptId: script.id,
             scriptName: script.name,
             language: script.language,
             content: script.content
           })
-        })
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1410,11 +1794,16 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "software.uninstall",
-          issuedBy: body.data.issuedBy ?? "console",
+          issuedBy: body.data.issuedBy ?? actor.actorName,
           payloadJson: JSON.stringify({
             softwareId: body.data.softwareId,
             displayName: body.data.displayName,
@@ -1427,11 +1816,15 @@ export function buildServer(options: BuildServerOptions = {}) {
             commandLine: body.data.commandLine,
             workingDirectory: body.data.workingDirectory ?? body.data.installLocation
           })
-        })
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1450,11 +1843,16 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "software.update",
-          issuedBy: body.data.issuedBy ?? "console",
+          issuedBy: body.data.issuedBy ?? actor.actorName,
           payloadJson: JSON.stringify({
             softwareId: body.data.softwareId,
             displayName: body.data.displayName,
@@ -1465,11 +1863,15 @@ export function buildServer(options: BuildServerOptions = {}) {
             commandLine: body.data.commandLine,
             workingDirectory: body.data.workingDirectory ?? body.data.installLocation
           })
-        })
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1488,11 +1890,16 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "software.update.search",
-          issuedBy: body.data.issuedBy ?? "console",
+          issuedBy: body.data.issuedBy ?? actor.actorName,
           payloadJson: JSON.stringify({
             softwareId: body.data.softwareId,
             displayName: body.data.displayName,
@@ -1501,11 +1908,15 @@ export function buildServer(options: BuildServerOptions = {}) {
             installLocation: body.data.installLocation,
             executableNames: body.data.executableNames
           })
-        })
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;
@@ -1524,11 +1935,16 @@ export function buildServer(options: BuildServerOptions = {}) {
       return sendValidationError(reply, body.error.flatten());
     }
 
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
     try {
       return reply.code(201).send(
         await store.queueCommand(params.data.deviceId, {
           type: "software.block",
-          issuedBy: body.data.issuedBy ?? "console",
+          issuedBy: body.data.issuedBy ?? actor.actorName,
           payloadJson: JSON.stringify({
             softwareId: body.data.softwareId,
             displayName: body.data.displayName,
@@ -1537,11 +1953,15 @@ export function buildServer(options: BuildServerOptions = {}) {
             installLocation: body.data.installLocation,
             executableNames: body.data.executableNames
           })
-        })
+        }, actor)
       );
     } catch (error) {
       if (error instanceof DeviceNotFoundError) {
         return sendNotFound(reply, params.data.deviceId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
       }
 
       throw error;

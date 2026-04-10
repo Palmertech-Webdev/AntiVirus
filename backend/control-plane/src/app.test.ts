@@ -1555,9 +1555,40 @@ test("device risk scoring applies overrides and confidence tracking", () => {
   assert.ok(score.overrideReasons.some((reason) => /ransomware/i.test(reason)));
   assert.ok(score.overrideReasons.some((reason) => /command-and-control|c2/i.test(reason)));
   assert.ok(score.confidenceScore < 100);
+  assert.ok(score.confidenceScore > 0);
   assert.ok(score.missingTelemetryFields.includes("critical_patches_overdue_count"));
   assert.ok(score.missingTelemetryFields.includes("malicious_domain_contacts_7d"));
   assert.ok(score.recommendedActions.some((action) => /isolate|contain/i.test(action)));
+});
+
+test("partial derived telemetry still produces non-zero confidence", () => {
+  const score = scoreDeviceRisk({
+    deviceId: "risk-unit-002",
+    hostname: "DERIVED-TELEMETRY-UNIT",
+    now: "2026-04-08T12:00:00Z",
+    telemetry: {
+      deviceId: "risk-unit-002",
+      hostname: "DERIVED-TELEMETRY-UNIT",
+      updatedAt: "2026-04-08T11:59:00Z",
+      source: "fenrir-derived",
+      ransomware_behaviour_flag: true,
+      lateral_movement_indicator: true,
+      c2_beacon_indicator: true,
+      edr_enabled: false,
+      av_enabled: true,
+      firewall_enabled: false,
+      tamper_protection_enabled: false,
+      standing_admin_present_flag: true,
+      pam_enforcement_enabled: true,
+      privilege_hardening_mode: "restricted",
+      recovery_path_exists: true
+    }
+  });
+
+  assert.equal(score.riskBand, "critical");
+  assert.ok(score.confidenceScore > 0);
+  assert.ok(score.missingTelemetryFields.includes("os_patch_age_days"));
+  assert.ok(score.missingTelemetryFields.includes("disk_encryption_enabled"));
 });
 
 test("device risk telemetry endpoints expose score, history, findings, and summary", async (t) => {

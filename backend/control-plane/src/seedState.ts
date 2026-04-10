@@ -1,4 +1,5 @@
 import type { ControlPlaneState } from "./types.ts";
+import { createBootstrapAdminState } from "./adminAuth.ts";
 
 export const DEMO_DEVICE_IDS = [
   "dev-lon-001",
@@ -58,10 +59,13 @@ function createDefaultPolicyProfile(baseIso: string) {
 }
 
 export function createEmptyState(baseIso: string = new Date().toISOString()): ControlPlaneState {
+  const adminState = createBootstrapAdminState(baseIso);
+
   return {
     defaultPolicy: createDefaultPolicy(),
     policies: [createDefaultPolicyProfile(baseIso)],
     scripts: [],
+    ...adminState,
     devices: [],
     alerts: [],
     telemetry: [],
@@ -80,6 +84,7 @@ export function createEmptyState(baseIso: string = new Date().toISOString()): Co
 
 export function createSeedState(baseIso: string = new Date().toISOString()): ControlPlaneState {
   const defaultPolicy = createDefaultPolicy();
+  const adminState = createBootstrapAdminState(baseIso);
   const financeSoftware = [
     {
       id: "sw-fin-vpn",
@@ -150,6 +155,7 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
 
   return {
     defaultPolicy,
+    ...adminState,
     policies: [
       {
         ...defaultPolicy,
