@@ -40,6 +40,7 @@ constexpr wchar_t kAmsiTestCliName[] = L"fenrir-amsitestcli.exe";
 constexpr wchar_t kEtwTestCliName[] = L"fenrir-etwtestcli.exe";
 constexpr wchar_t kWfpTestCliName[] = L"fenrir-wfptestcli.exe";
 constexpr wchar_t kWinpthreadDllName[] = L"libwinpthread-1.dll";
+constexpr wchar_t kWebView2LoaderDllName[] = L"WebView2Loader.dll";
 constexpr wchar_t kSetupExeName[] = L"FenrirSetup.exe";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
 constexpr wchar_t kToolsRelativePath[] = L"tools\\fenrir-scannercli.exe";
@@ -728,10 +729,8 @@ bool CreateStartMenuShortcuts(const std::filesystem::path& installRoot) {
 
     const auto shortcutRoot = *programsRoot / kProductName;
     const auto endpointShortcut = shortcutRoot / L"Fenrir Endpoint.lnk";
-    const auto uninstallShortcut = shortcutRoot / L"Uninstall Fenrir Endpoint.lnk";
 
-    if (CreateShortcut(endpointShortcut, installRoot / kEndpointExeName, L"", L"Open Fenrir Endpoint") &&
-        CreateShortcut(uninstallShortcut, installRoot / kSetupExeName, L"--uninstall", L"Remove Fenrir Endpoint")) {
+    if (CreateShortcut(endpointShortcut, installRoot / kEndpointExeName, L"", L"Open Fenrir Endpoint")) {
       return true;
     }
   }
@@ -813,13 +812,14 @@ bool WriteArpEntry(const std::filesystem::path& installRoot) {
          WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"InstallLocation", installRoot.wstring()) &&
          WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"DisplayIcon",
                              (installRoot / kEndpointExeName).wstring()) &&
-         WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"DisplayVersion", L"0.1.0-alpha") &&
-         WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"InstallDate", installDate) &&
-         WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"UninstallString", uninstallCommand) &&
-         WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"QuietUninstallString", uninstallCommand) &&
-         WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"EstimatedSize", EstimateInstallSizeKb(installRoot)) &&
-         WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"NoModify", 1) &&
-         WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"NoRepair", 0);
+        WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"DisplayVersion", L"0.1.0-alpha") &&
+        WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"InstallDate", installDate) &&
+        WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"UninstallString", uninstallCommand) &&
+        WriteRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"QuietUninstallString", uninstallCommand) &&
+        WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"EstimatedSize", EstimateInstallSizeKb(installRoot)) &&
+        WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"NoModify", 1) &&
+        WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"NoRepair", 0) &&
+        WriteRegistryDword(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"NoRemove", 1);
 }
 
 void PostLog(HWND hwnd, const std::wstring& text) {
@@ -913,7 +913,8 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
       {IDR_PAYLOAD_WFPTESTCLI, kToolsWfpTestCliRelativePath, 58, L"Installing WFP diagnostic tool"},
       {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 62, L"Installing runtime dependencies"},
       {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 66, L"Installing tool runtime dependencies"},
-      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 70, L"Installing signature bundle"},
+      {IDR_PAYLOAD_WEBVIEW2_LOADER, kWebView2LoaderDllName, 68, L"Installing WebView2 runtime loader"},
+      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 72, L"Installing signature bundle"},
   };
 
   for (const auto& item : payloadItems) {
@@ -1140,10 +1141,10 @@ void RefreshUi(UiContext& context) {
   context.installed = IsInstalledAt(context.installRoot);
   SetWindowTextW(context.pathValue, context.installRoot.c_str());
   SetWindowTextW(context.statusLabel,
-                 context.installed ? L"Existing installation detected. You can repair or remove it."
+                 context.installed ? L"Existing installation detected. You can repair it from this window."
                                   : L"Ready to install Fenrir Endpoint on this device.");
   SetWindowTextW(context.primaryButton, context.installed ? L"Repair" : L"Install");
-  EnableWindow(context.uninstallButton, context.installed && !context.busy);
+  ShowWindow(context.uninstallButton, SW_HIDE);
   EnableWindow(context.primaryButton, !context.busy);
   EnableWindow(context.closeButton, !context.busy);
   EnableWindow(context.openFolderButton, !context.busy);
@@ -1169,7 +1170,7 @@ void LayoutControls(UiContext& context) {
 
   const int buttonTop = padding + 434;
   MoveWindow(context.primaryButton, padding, buttonTop, 140, 36, TRUE);
-  MoveWindow(context.uninstallButton, padding + 152, buttonTop, 140, 36, TRUE);
+  MoveWindow(context.uninstallButton, padding + 152, buttonTop, 140, 36, FALSE);
   MoveWindow(context.openFolderButton, padding + 304, buttonTop, 160, 36, TRUE);
   MoveWindow(context.closeButton, width - padding - 120, buttonTop, 120, 36, TRUE);
 }
@@ -1243,6 +1244,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       SendMessageW(context->titleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->titleFont), TRUE);
       SendMessageW(context->progressBar, PBM_SETRANGE32, 0, 100);
       SendMessageW(context->progressBar, PBM_SETPOS, 0, 0);
+      ShowWindow(context->uninstallButton, SW_HIDE);
 
       LayoutControls(*context);
       RefreshUi(*context);

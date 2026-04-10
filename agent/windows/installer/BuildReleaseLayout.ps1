@@ -104,6 +104,7 @@ Ensure-Directory -Path (Join-Path $outputRoot 'docs')
 $artifactMap = @(
     @{ Source = (Join-Path $buildRoot 'fenrir-agent-service.exe'); Target = (Join-Path $outputRoot 'fenrir-agent-service.exe') },
     @{ Source = (Join-Path $buildRoot 'fenrir-endpoint-client.exe'); Target = (Join-Path $outputRoot 'fenrir-endpoint-client.exe') },
+    @{ Source = (Join-Path $buildRoot 'WebView2Loader.dll'); Target = (Join-Path $outputRoot 'WebView2Loader.dll') },
     @{ Source = (Join-Path $buildRoot 'fenrir-amsi-provider.dll'); Target = (Join-Path $outputRoot 'fenrir-amsi-provider.dll') },
     @{ Source = (Join-Path $buildRoot 'fenrir-scannercli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-scannercli.exe') },
     @{ Source = (Join-Path $buildRoot 'fenrir-amsitestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-amsitestcli.exe') },

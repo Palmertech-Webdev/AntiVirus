@@ -1,34 +1,46 @@
 #include <Windows.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <commctrl.h>
+#include <wincrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <uxtheme.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <atomic>
+#include <array>
+#include <functional>
+#include <iomanip>
 #include <cstdint>
 #include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <unordered_map>
+#include <utility>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include "AgentConfig.h"
+#include "DeviceInventoryCollector.h"
 #include "EndpointClient.h"
 #include "ProcessInventory.h"
 #include "LocalScanRunner.h"
 #include "LocalStateStore.h"
 #include "ServiceInventory.h"
 #include "StringUtils.h"
+#include "WebView2.h"
 
 namespace {
 
 using antivirus::agent::EndpointClientSnapshot;
 using antivirus::agent::LocalServiceState;
+using Microsoft::WRL::ComPtr;
 
 constexpr wchar_t kWindowClassName[] = L"FenrirEndpointClientWindow";
 constexpr wchar_t kWindowTitle[] = L"Fenrir Protection Centre";
@@ -39,6 +51,7 @@ constexpr UINT kScanCompleteMessage = WM_APP + 2;
 constexpr UINT kScanProgressMessage = WM_APP + 3;
 constexpr UINT_PTR kRefreshTimerId = 100;
 constexpr UINT kRefreshIntervalMs = 10000;
+constexpr UINT kFenrirPngResourceId = 101;
 
 enum : int {
   IDC_BRAND_CARD = 1001,
@@ -121,6 +134,8 @@ struct ScanProgressPayload {
 struct LaunchOptions {
   bool backgroundMode{false};
   bool manageExclusionsMode{false};
+  bool applyExclusionsMode{false};
+  std::vector<std::filesystem::path> applyExclusionsPaths;
 };
 
 HANDLE g_instanceMutex = nullptr;
@@ -131,6 +146,8 @@ struct UiContext {
   NOTIFYICONDATAW trayIcon{};
   HWND hwnd{};
   HWND brandCard{};
+  HWND brandLogo{};
+  HWND brandSummary{};
   HWND titleLabel{};
   HWND subtitleLabel{};
   HWND statusBadge{};
@@ -194,16 +211,156 @@ struct UiContext {
   std::size_t lastObservedThreatCount{0};
   LocalServiceState lastObservedServiceState{LocalServiceState::Unknown};
   std::wstring lastThreatFingerprint;
+  std::wstring scanStatusText{L"Ready."};
+  std::uint32_t scanProgressCompleted{0};
+  std::uint32_t scanProgressTotal{0};
   std::atomic_bool scanRunning{false};
   std::wstring activeScanLabel;
   ClientPage currentPage{ClientPage::Dashboard};
+  bool webViewReady{false};
+  bool webViewEnabled{false};
+  std::wstring webViewLogoDataUri;
+  HMODULE webViewLoaderModule{};
+  ComPtr<ICoreWebView2Environment> webViewEnvironment;
+  ComPtr<ICoreWebView2Controller> webViewController;
+  ComPtr<ICoreWebView2> webView;
+  EventRegistrationToken webMessageReceivedToken{};
 };
 
 UiContext* GetContext(HWND hwnd) {
   return reinterpret_cast<UiContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 }
 
+class WebViewEnvironmentCompletedHandler final : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler {
+ public:
+  using CallbackType = std::function<HRESULT(HRESULT, ICoreWebView2Environment*)>;
+
+  explicit WebViewEnvironmentCompletedHandler(CallbackType callback) : callback_(std::move(callback)) {}
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+    if (ppvObject == nullptr) {
+      return E_POINTER;
+    }
+
+    if (IsEqualIID(riid, IID_IUnknown) ||
+        IsEqualIID(riid, IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler)) {
+      *ppvObject = static_cast<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+
+    *ppvObject = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount_; }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto count = --refCount_;
+    if (count == 0) {
+      delete this;
+    }
+    return count;
+  }
+
+  HRESULT STDMETHODCALLTYPE Invoke(HRESULT errorCode, ICoreWebView2Environment* result) override {
+    return callback_ ? callback_(errorCode, result) : S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refCount_{1};
+  CallbackType callback_;
+};
+
+class WebViewControllerCompletedHandler final : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
+ public:
+  using CallbackType = std::function<HRESULT(HRESULT, ICoreWebView2Controller*)>;
+
+  explicit WebViewControllerCompletedHandler(CallbackType callback) : callback_(std::move(callback)) {}
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+    if (ppvObject == nullptr) {
+      return E_POINTER;
+    }
+
+    if (IsEqualIID(riid, IID_IUnknown) ||
+        IsEqualIID(riid, IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler)) {
+      *ppvObject = static_cast<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+
+    *ppvObject = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount_; }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto count = --refCount_;
+    if (count == 0) {
+      delete this;
+    }
+    return count;
+  }
+
+  HRESULT STDMETHODCALLTYPE Invoke(HRESULT errorCode, ICoreWebView2Controller* result) override {
+    return callback_ ? callback_(errorCode, result) : S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refCount_{1};
+  CallbackType callback_;
+};
+
+class WebViewMessageReceivedHandler final : public ICoreWebView2WebMessageReceivedEventHandler {
+ public:
+  using CallbackType = std::function<HRESULT(ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs*)>;
+
+  explicit WebViewMessageReceivedHandler(CallbackType callback) : callback_(std::move(callback)) {}
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+    if (ppvObject == nullptr) {
+      return E_POINTER;
+    }
+
+    if (IsEqualIID(riid, IID_IUnknown) ||
+        IsEqualIID(riid, IID_ICoreWebView2WebMessageReceivedEventHandler)) {
+      *ppvObject = static_cast<ICoreWebView2WebMessageReceivedEventHandler*>(this);
+      AddRef();
+      return S_OK;
+    }
+
+    *ppvObject = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refCount_; }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto count = --refCount_;
+    if (count == 0) {
+      delete this;
+    }
+    return count;
+  }
+
+  HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* sender, ICoreWebView2WebMessageReceivedEventArgs* args) override {
+    return callback_ ? callback_(sender, args) : S_OK;
+  }
+
+ private:
+  std::atomic<ULONG> refCount_{1};
+  CallbackType callback_;
+};
+
 void UpdateTrayIcon(UiContext& context);
+void PublishWebViewState(UiContext& context);
+void ResizeWebView(UiContext& context);
+void HideNativeShellControls(UiContext& context, bool visible);
+bool InitializeWebViewHost(UiContext& context);
+void DestroyWebViewHost(UiContext& context);
+void HandleWebViewMessage(UiContext& context, const std::wstring& message);
 
 std::wstring NullableText(const std::wstring& value, const wchar_t* fallback = L"(not available)") {
   return value.empty() ? std::wstring(fallback) : value;
@@ -221,6 +378,66 @@ bool HasSwitch(const std::vector<std::wstring>& arguments, const wchar_t* value)
 
 bool IsCurrentUserAdmin() {
   return IsUserAnAdmin() != FALSE;
+}
+
+bool StartsWithSwitchPrefix(const std::wstring& value) {
+  return !value.empty() && (value.front() == L'-' || value.front() == L'/');
+}
+
+std::wstring QuoteCommandLineArgument(const std::wstring& argument) {
+  if (argument.empty()) {
+    return L"\"\"";
+  }
+
+  const auto needsQuotes = argument.find_first_of(L" \t\r\n\v\"") != std::wstring::npos;
+  if (!needsQuotes) {
+    return argument;
+  }
+
+  std::wstring quoted;
+  quoted.reserve(argument.size() + 2);
+  quoted.push_back(L'"');
+
+  std::size_t backslashCount = 0;
+  for (const auto ch : argument) {
+    if (ch == L'\\') {
+      ++backslashCount;
+      continue;
+    }
+
+    if (ch == L'"') {
+      quoted.append(backslashCount * 2 + 1, L'\\');
+      quoted.push_back(L'"');
+      backslashCount = 0;
+      continue;
+    }
+
+    if (backslashCount != 0) {
+      quoted.append(backslashCount, L'\\');
+      backslashCount = 0;
+    }
+
+    quoted.push_back(ch);
+  }
+
+  if (backslashCount != 0) {
+    quoted.append(backslashCount * 2, L'\\');
+  }
+
+  quoted.push_back(L'"');
+  return quoted;
+}
+
+int ApplyExclusionsFromLaunchOptions(const LaunchOptions& options) {
+  if (options.applyExclusionsPaths.empty()) {
+    return 1;
+  }
+
+  if (!antivirus::agent::SaveConfiguredScanExclusions(options.applyExclusionsPaths)) {
+    return 1;
+  }
+
+  return antivirus::agent::RestartAgentService() ? 0 : 2;
 }
 
 LaunchOptions ParseLaunchOptions() {
@@ -242,6 +459,25 @@ LaunchOptions ParseLaunchOptions() {
       HasSwitch(arguments, L"--background") || HasSwitch(arguments, L"--tray") || HasSwitch(arguments, L"/background");
   options.manageExclusionsMode = HasSwitch(arguments, L"--manage-exclusions") ||
                                  HasSwitch(arguments, L"/manage-exclusions") || HasSwitch(arguments, L"--exclusions");
+
+  options.applyExclusionsMode = HasSwitch(arguments, L"--apply-exclusions") || HasSwitch(arguments, L"/apply-exclusions");
+  if (options.applyExclusionsMode) {
+    options.backgroundMode = true;
+  }
+
+  bool capturePaths = false;
+  for (const auto& argument : arguments) {
+    if (_wcsicmp(argument.c_str(), L"--apply-exclusions") == 0 ||
+        _wcsicmp(argument.c_str(), L"/apply-exclusions") == 0) {
+      capturePaths = true;
+      continue;
+    }
+
+    if (capturePaths && !StartsWithSwitchPrefix(argument)) {
+      options.applyExclusionsPaths.emplace_back(argument);
+    }
+  }
+
   return options;
 }
 
@@ -294,6 +530,100 @@ std::wstring BuildExclusionEditorSummary() {
   return stream.str();
 }
 
+std::wstring NormalizeExclusionKey(std::filesystem::path path) {
+  path = path.lexically_normal();
+  auto text = path.wstring();
+  std::transform(text.begin(), text.end(), text.begin(), [](const wchar_t value) {
+    return static_cast<wchar_t>(towlower(value));
+  });
+  return text;
+}
+
+bool AppendUniqueExclusion(std::vector<std::filesystem::path>& exclusions, const std::filesystem::path& candidate) {
+  const auto key = NormalizeExclusionKey(candidate);
+  if (key.empty()) {
+    return false;
+  }
+
+  for (const auto& exclusion : exclusions) {
+    if (NormalizeExclusionKey(exclusion) == key) {
+      return false;
+    }
+  }
+
+  exclusions.push_back(candidate);
+  return true;
+}
+
+bool RemoveExclusionPath(std::vector<std::filesystem::path>& exclusions, const std::filesystem::path& candidate) {
+  const auto key = NormalizeExclusionKey(candidate);
+  if (key.empty()) {
+    return false;
+  }
+
+  const auto originalSize = exclusions.size();
+  exclusions.erase(std::remove_if(exclusions.begin(), exclusions.end(), [&key](const auto& existing) {
+                    return NormalizeExclusionKey(existing) == key;
+                  }),
+                  exclusions.end());
+  return exclusions.size() != originalSize;
+}
+
+std::optional<std::wstring> PickFile(HWND owner) {
+  wchar_t filePath[MAX_PATH] = {};
+  wchar_t filter[] = L"All files (*.*)\0*.*\0\0";
+  OPENFILENAMEW dialog{};
+  dialog.lStructSize = sizeof(dialog);
+  dialog.hwndOwner = owner;
+  dialog.lpstrFilter = filter;
+  dialog.lpstrFile = filePath;
+  dialog.nMaxFile = static_cast<DWORD>(std::size(filePath));
+  dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+  dialog.lpstrTitle = L"Choose a file to exclude";
+
+  if (!GetOpenFileNameW(&dialog)) {
+    return std::nullopt;
+  }
+
+  return std::wstring(filePath);
+}
+
+std::vector<std::filesystem::path> ResolveProcessExclusionPaths(const DWORD pid) {
+  const auto processes = antivirus::agent::CollectProcessInventory(0);
+  for (const auto& process : processes) {
+    if (process.pid == pid && !process.imagePath.empty()) {
+      return {std::filesystem::path(process.imagePath)};
+    }
+  }
+
+  return {};
+}
+
+std::vector<std::filesystem::path> ResolveSoftwareExclusionPaths(const std::wstring& softwareId) {
+  const auto inventory = antivirus::agent::CollectDeviceInventorySnapshot();
+  for (const auto& software : inventory.installedSoftware) {
+    if (_wcsicmp(software.softwareId.c_str(), softwareId.c_str()) != 0) {
+      continue;
+    }
+
+    std::vector<std::filesystem::path> exclusions;
+    if (!software.installLocation.empty()) {
+      exclusions.emplace_back(software.installLocation);
+      for (const auto& executable : software.executableNames) {
+        if (!executable.empty()) {
+          exclusions.emplace_back(std::filesystem::path(software.installLocation) / executable);
+        }
+      }
+    } else if (!software.displayIconPath.empty()) {
+      exclusions.emplace_back(software.displayIconPath);
+    }
+
+    return exclusions;
+  }
+
+  return {};
+}
+
 std::wstring GetCurrentExecutablePath() {
   std::wstring buffer(MAX_PATH, L'\0');
   const auto written = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -303,6 +633,21 @@ std::wstring GetCurrentExecutablePath() {
 
   buffer.resize(written);
   return buffer;
+}
+
+std::filesystem::path GetWebViewUserDataFolder() {
+  std::wstring localAppData(MAX_PATH, L'\0');
+  const auto result = SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData.data());
+  if (FAILED(result)) {
+    return {};
+  }
+
+  localAppData.resize(wcslen(localAppData.c_str()));
+  if (localAppData.empty()) {
+    return {};
+  }
+
+  return std::filesystem::path(localAppData) / L"Fenrir Endpoint" / L"webview2";
 }
 
 bool LaunchExclusionsEditor(HWND owner) {
@@ -342,6 +687,50 @@ bool SaveExclusionsFromEditor(HWND hwnd, UiContext& context) {
   MessageBoxW(hwnd, L"Exclusions saved and protection was restarted to apply them.", kWindowTitle,
               MB_OK | MB_ICONINFORMATION);
   return true;
+}
+
+int CommitExclusions(HWND hwnd, const std::vector<std::filesystem::path>& exclusions) {
+  if (exclusions.empty()) {
+    return 1;
+  }
+
+  if (IsCurrentUserAdmin()) {
+    if (!antivirus::agent::SaveConfiguredScanExclusions(exclusions)) {
+      return 1;
+    }
+    return antivirus::agent::RestartAgentService() ? 0 : 2;
+  }
+
+  const auto executablePath = GetCurrentExecutablePath();
+  if (executablePath.empty()) {
+    return 1;
+  }
+
+  std::wstring parameters = L"--apply-exclusions";
+  for (const auto& exclusion : exclusions) {
+    parameters.push_back(L' ');
+    parameters += QuoteCommandLineArgument(exclusion.wstring());
+  }
+
+  SHELLEXECUTEINFOW execute{};
+  execute.cbSize = sizeof(execute);
+  execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+  execute.hwnd = hwnd;
+  execute.lpVerb = L"runas";
+  execute.lpFile = executablePath.c_str();
+  execute.lpParameters = parameters.c_str();
+  execute.nShow = SW_HIDE;
+  if (!ShellExecuteExW(&execute) || execute.hProcess == nullptr) {
+    return 1;
+  }
+
+  const auto waitResult = WaitForSingleObject(execute.hProcess, INFINITE);
+  DWORD exitCode = 1;
+  if (waitResult == WAIT_OBJECT_0) {
+    GetExitCodeProcess(execute.hProcess, &exitCode);
+  }
+  CloseHandle(execute.hProcess);
+  return static_cast<int>(exitCode);
 }
 
 std::wstring ProtectionHeadline(const EndpointClientSnapshot& snapshot) {
@@ -475,8 +864,7 @@ std::wstring OverallStatusChip(const EndpointClientSnapshot& snapshot) {
 
 std::wstring BuildBrandCardText(const EndpointClientSnapshot& snapshot) {
   std::wstringstream stream;
-  stream << L"Fenrir\r\n"
-         << NullableText(snapshot.agentState.hostname, L"Local device") << L"\r\n"
+  stream << NullableText(snapshot.agentState.hostname, L"Local device") << L"\r\n"
          << OverallStatusChip(snapshot) << L"\r\n"
          << L"Policy " << NullableText(snapshot.agentState.policy.revision, L"n/a");
   return stream.str();
@@ -499,6 +887,26 @@ std::wstring PageTitle(const ClientPage page) {
     case ClientPage::Dashboard:
     default:
       return L"Protection Centre";
+  }
+}
+
+std::wstring PageKey(const ClientPage page) {
+  switch (page) {
+    case ClientPage::Threats:
+      return L"threats";
+    case ClientPage::Quarantine:
+      return L"quarantine";
+    case ClientPage::Scans:
+      return L"scans";
+    case ClientPage::Service:
+      return L"service";
+    case ClientPage::History:
+      return L"history";
+    case ClientPage::Settings:
+      return L"settings";
+    case ClientPage::Dashboard:
+    default:
+      return L"dashboard";
   }
 }
 
@@ -1154,6 +1562,1625 @@ std::wstring DefaultDetailText(const UiContext& context) {
   }
 }
 
+std::wstring ReplaceAll(std::wstring value, const std::wstring& token, const std::wstring& replacement) {
+  std::size_t position = 0;
+  while ((position = value.find(token, position)) != std::wstring::npos) {
+    value.replace(position, token.size(), replacement);
+    position += replacement.size();
+  }
+
+  return value;
+}
+
+std::wstring JsonEscape(std::wstring_view value) {
+  std::wstring escaped;
+  escaped.reserve(value.size() + 16);
+  for (const auto ch : value) {
+    switch (ch) {
+      case L'\\':
+        escaped += L"\\\\";
+        break;
+      case L'"':
+        escaped += L"\\\"";
+        break;
+      case L'\b':
+        escaped += L"\\b";
+        break;
+      case L'\f':
+        escaped += L"\\f";
+        break;
+      case L'\n':
+        escaped += L"\\n";
+        break;
+      case L'\r':
+        escaped += L"\\r";
+        break;
+      case L'\t':
+        escaped += L"\\t";
+        break;
+      case L'<':
+        escaped += L"\\u003C";
+        break;
+      case L'>':
+        escaped += L"\\u003E";
+        break;
+      case L'&':
+        escaped += L"\\u0026";
+        break;
+      case L'\'':
+        escaped += L"\\u0027";
+        break;
+      default:
+        if (ch < 0x20) {
+          wchar_t buffer[7]{};
+          swprintf_s(buffer, L"\\u%04X", static_cast<unsigned>(ch));
+          escaped += buffer;
+        } else {
+          escaped.push_back(ch);
+        }
+        break;
+    }
+  }
+
+  return escaped;
+}
+
+int HexDigitValue(const wchar_t ch) {
+  if (ch >= L'0' && ch <= L'9') {
+    return static_cast<int>(ch - L'0');
+  }
+  if (ch >= L'a' && ch <= L'f') {
+    return 10 + static_cast<int>(ch - L'a');
+  }
+  if (ch >= L'A' && ch <= L'F') {
+    return 10 + static_cast<int>(ch - L'A');
+  }
+  return -1;
+}
+
+std::wstring UrlDecode(std::wstring_view value) {
+  std::wstring decoded;
+  decoded.reserve(value.size());
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const auto ch = value[index];
+    if (ch == L'+') {
+      decoded.push_back(L' ');
+      continue;
+    }
+
+    if (ch == L'%' && index + 2 < value.size()) {
+      const int hi = HexDigitValue(value[index + 1]);
+      const int lo = HexDigitValue(value[index + 2]);
+      if (hi >= 0 && lo >= 0) {
+        decoded.push_back(static_cast<wchar_t>((hi << 4) | lo));
+        index += 2;
+        continue;
+      }
+    }
+
+    decoded.push_back(ch);
+  }
+
+  return decoded;
+}
+
+std::vector<std::pair<std::wstring, std::wstring>> ParseWebMessage(const std::wstring& message) {
+  std::vector<std::pair<std::wstring, std::wstring>> pairs;
+  std::size_t start = 0;
+  while (start < message.size()) {
+    const auto end = message.find(L'&', start);
+    const auto token = message.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+    const auto equals = token.find(L'=');
+    if (equals == std::wstring::npos) {
+      if (!token.empty()) {
+        pairs.emplace_back(UrlDecode(token), std::wstring{});
+      }
+    } else {
+      pairs.emplace_back(UrlDecode(token.substr(0, equals)), UrlDecode(token.substr(equals + 1)));
+    }
+
+    if (end == std::wstring::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+
+  return pairs;
+}
+
+std::wstring GetQueryValue(const std::vector<std::pair<std::wstring, std::wstring>>& pairs, const wchar_t* key) {
+  for (const auto& [candidateKey, candidateValue] : pairs) {
+    if (_wcsicmp(candidateKey.c_str(), key) == 0) {
+      return candidateValue;
+    }
+  }
+  return {};
+}
+
+std::wstring LoadFenrirLogoDataUri() {
+  const auto module = GetModuleHandleW(nullptr);
+  const auto resource = FindResourceW(module, MAKEINTRESOURCEW(kFenrirPngResourceId), RT_RCDATA);
+  if (resource == nullptr) {
+    return {};
+  }
+
+  const auto loaded = LoadResource(module, resource);
+  if (loaded == nullptr) {
+    return {};
+  }
+
+  const auto size = SizeofResource(module, resource);
+  const auto rawBytes = LockResource(loaded);
+  if (rawBytes == nullptr || size == 0) {
+    return {};
+  }
+
+  const auto* bytes = static_cast<const BYTE*>(rawBytes);
+  DWORD encodedLength = 0;
+  if (CryptBinaryToStringW(bytes, size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &encodedLength) == FALSE ||
+      encodedLength == 0) {
+    return {};
+  }
+
+  std::wstring encoded(encodedLength, L'\0');
+  if (CryptBinaryToStringW(bytes, size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, encoded.data(), &encodedLength) ==
+      FALSE) {
+    return {};
+  }
+
+  if (!encoded.empty() && encoded.back() == L'\0') {
+    encoded.pop_back();
+  }
+
+  return L"data:image/png;base64," + encoded;
+}
+
+std::wstring BuildWebViewStateJson(const UiContext& context) {
+  const auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+  const bool exclusionsMode = context.currentPage == ClientPage::Settings && context.manageExclusionsMode;
+  const auto pageTitle = exclusionsMode ? std::wstring(L"Exclusions") : PageTitle(context.currentPage);
+  const auto pageSubtitle = exclusionsMode
+                                ? std::wstring(L"Add trusted file, folder, process, and application exclusions without leaving Fenrir.")
+                                : PageSubtitle(context.currentPage, context.snapshot);
+
+  std::wstring lastScan = L"(never)";
+  for (const auto& record : context.snapshot.recentFindings) {
+    if (IsScanSessionRecord(record)) {
+      lastScan = NullableText(record.recordedAt, L"(never)");
+      break;
+    }
+  }
+
+  std::wstring nextAction;
+  if (context.snapshot.serviceState == LocalServiceState::NotInstalled) {
+    nextAction = L"Install the protection service";
+  } else if (context.snapshot.serviceState == LocalServiceState::Stopped) {
+    nextAction = L"Start the protection service";
+  } else if (context.snapshot.openThreatCount != 0) {
+    nextAction = L"Review threats and quarantine";
+  } else if (_wcsicmp(context.snapshot.agentState.healthState.c_str(), L"healthy") != 0) {
+    nextAction = L"Review runtime health";
+  } else {
+    nextAction = L"Keep protection running";
+  }
+
+  const auto serviceState = antivirus::agent::LocalServiceStateToString(context.snapshot.serviceState);
+  std::wstring statusTone = L"info";
+  if (context.snapshot.serviceState == LocalServiceState::NotInstalled ||
+      context.snapshot.serviceState == LocalServiceState::Stopped) {
+    statusTone = L"danger";
+  } else if (context.snapshot.openThreatCount != 0 ||
+             _wcsicmp(context.snapshot.agentState.healthState.c_str(), L"healthy") != 0) {
+    statusTone = L"warning";
+  } else {
+    statusTone = L"good";
+  }
+
+  std::wstring detailText = DefaultDetailText(context);
+  if (exclusionsMode) {
+    detailText = L"Choose a source below and add only exclusions you trust.\r\n\r\nFile and folder exclusions use File Explorer pickers.\r\nProcess exclusions use the current process list.\r\nApplication exclusions use the installed software inventory.";
+  } else if (context.currentPage == ClientPage::Dashboard) {
+    detailText = BuildDetailsCardText(context.snapshot);
+  } else if (context.currentPage == ClientPage::Threats && !context.snapshot.recentThreats.empty()) {
+    detailText = BuildThreatDetailText(context.snapshot.recentThreats.front());
+  } else if (context.currentPage == ClientPage::Quarantine && !context.snapshot.quarantineItems.empty()) {
+    detailText = BuildQuarantineDetailText(context.snapshot.quarantineItems.front());
+  } else if ((context.currentPage == ClientPage::Scans || context.currentPage == ClientPage::History) &&
+             !context.snapshot.recentFindings.empty()) {
+    detailText = BuildHistoryDetailText(context.snapshot.recentFindings.front());
+  }
+
+  const auto settingsEntries = std::vector<std::pair<std::wstring, std::wstring>>{
+      {L"Control plane", NullableText(context.config.controlPlaneBaseUrl)},
+      {L"Runtime database", context.config.runtimeDatabasePath.wstring()},
+      {L"State file", context.config.stateFilePath.wstring()},
+      {L"Telemetry queue", context.config.telemetryQueuePath.wstring()},
+      {L"Quarantine root", context.config.quarantineRootPath.wstring()},
+      {L"Evidence root", context.config.evidenceRootPath.wstring()},
+      {L"Realtime port", NullableText(context.config.realtimeProtectionPortName)},
+      {L"Sync interval", std::to_wstring(context.config.syncIntervalSeconds) + L" seconds"},
+         {L"Telemetry batch size", std::to_wstring(context.config.telemetryBatchSize)},
+         {L"Isolation loopback", context.config.isolationAllowLoopback ? L"allowed" : L"blocked"},
+         {L"Custom exclusions", std::to_wstring(antivirus::agent::LoadConfiguredScanExclusions().size()) + L" path(s)"},
+  };
+
+  const auto processInventory = exclusionsMode ? antivirus::agent::CollectProcessInventory(40) : std::vector<antivirus::agent::ProcessObservation>{};
+  const auto deviceInventory = exclusionsMode ? antivirus::agent::CollectDeviceInventorySnapshot() : antivirus::agent::DeviceInventorySnapshot{};
+
+  std::wstringstream json;
+  json << L"{";
+  json << L"\"pageKey\":\"" << JsonEscape(PageKey(context.currentPage)) << L"\",";
+  json << L"\"pageTitle\":\"" << JsonEscape(pageTitle) << L"\",";
+  json << L"\"pageSubtitle\":\"" << JsonEscape(pageSubtitle) << L"\",";
+  json << L"\"statusChip\":\"" << JsonEscape(OverallStatusChip(context.snapshot)) << L"\",";
+  json << L"\"statusTone\":\"" << statusTone << L"\",";
+  json << L"\"headline\":\"" << JsonEscape(ProtectionHeadline(context.snapshot)) << L"\",";
+  json << L"\"guidance\":\"" << JsonEscape(ProtectionGuidance(context.snapshot)) << L"\",";
+  json << L"\"nextAction\":\"" << JsonEscape(nextAction) << L"\",";
+  json << L"\"manageExclusionsMode\":" << (context.manageExclusionsMode ? 1 : 0) << L",";
+  json << L"\"detailTitle\":\"" << JsonEscape(SecondarySectionTitle(context.currentPage)) << L"\",";
+  json << L"\"detailSubtitle\":\"" << JsonEscape(DefaultDetailText(context).substr(0, std::min<std::size_t>(80, DefaultDetailText(context).size()))) << L"\",";
+  json << L"\"detailText\":\"" << JsonEscape(detailText) << L"\",";
+  json << L"\"scan\":{\"running\":" << (context.scanRunning ? 1 : 0)
+       << L",\"status\":\"" << JsonEscape(context.scanStatusText) << L"\",\"completed\":" << context.scanProgressCompleted
+       << L",\"total\":" << context.scanProgressTotal << L",\"label\":\"" << JsonEscape(context.activeScanLabel)
+       << L"\"},";
+  json << L"\"brand\":{\"logo\":\"" << JsonEscape(context.webViewLogoDataUri) << L"\",\"device\":\""
+       << JsonEscape(NullableText(context.snapshot.agentState.hostname, L"Local device")) << L"\",\"status\":\""
+       << JsonEscape(OverallStatusChip(context.snapshot)) << L"\",\"policy\":\""
+       << JsonEscape(L"Policy " + NullableText(context.snapshot.agentState.policy.revision, L"n/a")) << L"\"},";
+  json << L"\"runtime\":{\"serviceState\":\"" << JsonEscape(serviceState) << L"\",\"healthState\":\""
+       << JsonEscape(NullableText(context.snapshot.agentState.healthState, L"unknown")) << L"\",\"deviceId\":\""
+       << JsonEscape(NullableText(context.snapshot.agentState.deviceId, L"(not enrolled)")) << L"\",\"controlPlane\":\""
+       << JsonEscape(NullableText(context.config.controlPlaneBaseUrl)) << L"\",\"lastHeartbeat\":\""
+       << JsonEscape(NullableText(context.snapshot.agentState.lastHeartbeatAt, L"(never)")) << L"\",\"lastPolicySync\":\""
+       << JsonEscape(NullableText(context.snapshot.agentState.lastPolicySyncAt, L"(never)")) << L"\",\"queuedTelemetry\":\""
+       << context.snapshot.queuedTelemetryCount << L"\",\"lastScan\":\"" << JsonEscape(lastScan) << L"\"},";
+
+  const auto appendCard = [&json](const std::wstring& label, const std::wstring& value, const std::wstring& detail,
+                                  const std::wstring& tone) {
+    json << L"{\"label\":\"" << JsonEscape(label) << L"\",\"value\":\"" << JsonEscape(value)
+         << L"\",\"detail\":\"" << JsonEscape(detail) << L"\",\"tone\":\"" << JsonEscape(tone) << L"\"}";
+  };
+
+  json << L"\"cards\":[";
+  appendCard(L"Open threats", std::to_wstring(context.snapshot.openThreatCount),
+             context.snapshot.openThreatCount == 1 ? L"1 unresolved detection" :
+                                                     std::to_wstring(context.snapshot.openThreatCount) + L" unresolved detections",
+             context.snapshot.openThreatCount == 0 ? L"good" : L"danger");
+  json << L",";
+  appendCard(L"Quarantined", std::to_wstring(context.snapshot.activeQuarantineCount),
+             context.snapshot.activeQuarantineCount == 1 ? L"1 item contained" :
+                                                          std::to_wstring(context.snapshot.activeQuarantineCount) + L" items contained",
+             context.snapshot.activeQuarantineCount == 0 ? L"info" : L"warning");
+  json << L",";
+  appendCard(L"Protection service", serviceState,
+             NullableText(context.snapshot.agentState.healthState, L"unknown"), statusTone);
+  json << L",";
+  appendCard(L"Last check-in", NullableText(context.snapshot.agentState.lastHeartbeatAt, L"(never)"),
+             std::to_wstring(context.snapshot.queuedTelemetryCount) + L" upload(s) queued", L"info");
+  json << L"],";
+
+  json << L"\"settings\":[";
+  for (std::size_t index = 0; index < settingsEntries.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    json << L"{\"label\":\"" << JsonEscape(settingsEntries[index].first) << L"\",\"value\":\""
+         << JsonEscape(settingsEntries[index].second) << L"\"}";
+  }
+  json << L"],";
+
+  json << L"\"exclusions\":[";
+  for (std::size_t index = 0; index < exclusions.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& path = exclusions[index];
+    std::error_code error;
+    const auto isDirectory = std::filesystem::is_directory(path, error);
+    const auto kind = isDirectory ? L"Folder" : L"File";
+    json << L"{\"path\":\"" << JsonEscape(path.wstring()) << L"\",\"kind\":\"" << JsonEscape(kind)
+         << L"\",\"id\":\"" << JsonEscape(path.wstring()) << L"\"}";
+  }
+  json << L"],";
+
+  json << L"\"processes\":[";
+  for (std::size_t index = 0; index < processInventory.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& process = processInventory[index];
+    json << L"{\"pid\":" << process.pid << L",\"parentPid\":" << process.parentPid << L",\"name\":\""
+         << JsonEscape(NullableText(process.imageName, L"(unknown)")) << L"\",\"path\":\""
+         << JsonEscape(NullableText(process.imagePath, L"")) << L"\",\"prioritized\":"
+         << (process.prioritized ? 1 : 0) << L"}";
+  }
+  json << L"],";
+
+  json << L"\"software\":[";
+  for (std::size_t index = 0; index < deviceInventory.installedSoftware.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& software = deviceInventory.installedSoftware[index];
+    json << L"{\"id\":\"" << JsonEscape(software.softwareId) << L"\",\"name\":\""
+         << JsonEscape(NullableText(software.displayName, L"(unknown)")) << L"\",\"version\":\""
+         << JsonEscape(NullableText(software.displayVersion, L"")) << L"\",\"publisher\":\""
+         << JsonEscape(NullableText(software.publisher, L"")) << L"\",\"location\":\""
+         << JsonEscape(NullableText(software.installLocation, L"")) << L"\",\"blocked\":"
+         << (software.blocked ? 1 : 0) << L"}";
+  }
+  json << L"],";
+
+  const auto appendRecentFinding = [&json](const antivirus::agent::ScanHistoryRecord& record) {
+    const auto item = ThreatDisplayPath(record);
+    const auto attack = record.techniqueId.empty() ? record.tacticId : record.tacticId + L" / " + record.techniqueId;
+    json << L"{\"time\":\"" << JsonEscape(NullableText(record.recordedAt)) << L"\",\"item\":\""
+         << JsonEscape(item) << L"\",\"result\":\"" << JsonEscape(HistoryDispositionLabel(record))
+         << L"\",\"source\":\"" << JsonEscape(HistorySourceLabel(record.source)) << L"\",\"technique\":\""
+         << JsonEscape(attack.empty() ? std::wstring(L"(n/a)") : attack) << L"\",\"remediation\":\""
+         << JsonEscape(NullableText(record.remediationStatus, L"(none)")) << L"\",\"kind\":\""
+         << JsonEscape(record.contentType.empty() ? L"detection" : record.contentType) << L"\",\"id\":\""
+         << JsonEscape(record.recordedAt + L"|" + item) << L"\",\"detail\":\""
+         << JsonEscape(BuildHistoryDetailText(record)) << L"\"}";
+  };
+
+  json << L"\"history\":[";
+  for (std::size_t index = 0; index < context.snapshot.recentFindings.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    appendRecentFinding(context.snapshot.recentFindings[index]);
+  }
+  json << L"],";
+
+  json << L"\"threats\":[";
+  for (std::size_t index = 0; index < context.snapshot.recentThreats.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& record = context.snapshot.recentThreats[index];
+    const auto attack = record.techniqueId.empty() ? record.tacticId : record.tacticId + L" / " + record.techniqueId;
+    json << L"{\"time\":\"" << JsonEscape(NullableText(record.recordedAt)) << L"\",\"item\":\""
+         << JsonEscape(ThreatDisplayPath(record)) << L"\",\"action\":\"" << JsonEscape(record.disposition)
+         << L"\",\"confidence\":\"" << record.confidence << L"\",\"attack\":\""
+         << JsonEscape(attack.empty() ? std::wstring(L"(n/a)") : attack) << L"\",\"remediation\":\""
+         << JsonEscape(NullableText(record.remediationStatus, L"(none)")) << L"\",\"source\":\""
+         << JsonEscape(NullableText(record.source, L"(unknown)")) << L"\",\"sha256\":\""
+         << JsonEscape(NullableText(record.sha256, L"(unavailable)")) << L"\",\"id\":\""
+         << JsonEscape(record.evidenceRecordId.empty() ? record.recordedAt + L"|" + ThreatDisplayPath(record)
+                                                       : record.evidenceRecordId)
+         << L"\",\"detail\":\"" << JsonEscape(BuildThreatDetailText(record)) << L"\"}";
+  }
+  json << L"],";
+
+  json << L"\"quarantine\":[";
+  for (std::size_t index = 0; index < context.snapshot.quarantineItems.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& record = context.snapshot.quarantineItems[index];
+    json << L"{\"time\":\"" << JsonEscape(NullableText(record.capturedAt)) << L"\",\"item\":\""
+         << JsonEscape(record.originalPath.wstring()) << L"\",\"status\":\"" << JsonEscape(record.localStatus)
+         << L"\",\"technique\":\""
+         << JsonEscape(record.techniqueId.empty() ? std::wstring(L"(n/a)") : record.techniqueId)
+         << L"\",\"sha256\":\"" << JsonEscape(record.sha256.empty() ? std::wstring(L"(unavailable)") : record.sha256)
+         << L"\",\"id\":\"" << JsonEscape(record.recordId) << L"\",\"detail\":\""
+         << JsonEscape(BuildQuarantineDetailText(record)) << L"\"}";
+  }
+  json << L"]}";
+  return json.str();
+}
+
+std::wstring BuildWebViewHtml(const UiContext& context) {
+  std::wstring html = LR"HTML(
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fenrir Protection Centre</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070b11;
+      --surface: rgba(12, 17, 25, 0.9);
+      --surface-soft: rgba(15, 21, 31, 0.88);
+      --border: rgba(255,255,255,0.06);
+      --text: #edf3ff;
+      --muted: #90a0b7;
+      --accent: #7aa7ff;
+      --good: #52c98f;
+      --warning: #e4a450;
+      --danger: #e36f7b;
+      --shadow: none;
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; }
+    body {
+      overflow: hidden;
+      font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(900px 420px at 18% 0%, rgba(116,167,255,.11), transparent 52%),
+        radial-gradient(780px 360px at 92% 16%, rgba(76,195,138,.08), transparent 48%),
+        linear-gradient(180deg, #05080d 0%, #070b11 100%);
+    }
+    button { font: inherit; }
+    .layout {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 16px;
+      height: 100%;
+    }
+    .rail, .card, .panel {
+      background: linear-gradient(180deg, rgba(16, 21, 31, .92), rgba(9, 13, 20, .96));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .rail {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 0;
+      padding: 12px 16px;
+    }
+    .brand { padding: 0; display: flex; flex-direction: row; align-items: center; gap: 12px; min-width: 0; }
+    .brand img { width: 42px; height: 42px; object-fit: contain; border-radius: 12px; flex: 0 0 auto; }
+    .brand .name { display: none; }
+    .brand .device { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .brand .meta, .foot { color: var(--muted); font-size: 12px; line-height: 1.45; white-space: pre-line; }
+    .nav { display: none; }
+    .nav button, .tabs button, .actions button {
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: rgba(255,255,255,.02);
+      color: var(--text);
+      cursor: pointer;
+      transition: transform .12s ease, background .12s ease, border-color .12s ease;
+    }
+    .nav button { text-align: left; padding: 12px 14px; color: var(--muted); }
+    .nav button.active { color: var(--text); background: rgba(122,167,255,.11); border-color: rgba(122,167,255,.2); }
+    .tabs, .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tabs { padding-top: 2px; }
+    .tabs button, .actions button { padding: 10px 16px; font-size: 12px; letter-spacing: .01em; }
+    .tabs button.active { background: rgba(122,167,255,.11); border-color: rgba(122,167,255,.2); }
+    .actions button.primary { background: rgba(122,167,255,.12); border-color: rgba(122,167,255,.2); }
+    .actions button.good { background: rgba(82,201,143,.12); border-color: rgba(82,201,143,.2); }
+    .actions button.warning { background: rgba(228,164,80,.12); border-color: rgba(228,164,80,.2); }
+    .actions button.danger { background: rgba(227,111,123,.12); border-color: rgba(227,111,123,.2); }
+    .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 12px; }
+    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .16em; color: var(--muted); font-size: 10px; }
+    h1 { margin: 4px 0 8px; font-size: 34px; line-height: 1.02; letter-spacing: -.035em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 920px; }
+    .chip {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 30px; padding: 0 12px; border-radius: 999px;
+      font-size: 12px; font-weight: 700; border: 1px solid rgba(255,255,255,.11);
+      background: rgba(255,255,255,.03); white-space: nowrap;
+    }
+    .chip.good { background: rgba(76,195,138,.12); color: #9de3bf; }
+    .chip.warning { background: rgba(224,163,79,.12); color: #ffd48a; }
+    .chip.danger { background: rgba(228,109,122,.14); color: #ffbcc4; }
+    .chip.info { background: rgba(116,167,255,.12); color: #b9d0ff; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr); gap: 12px; }
+    .card { padding: 18px; min-width: 0; overflow: hidden; }
+    .card h2 { margin: 8px 0 10px; font-size: 24px; line-height: 1.06; letter-spacing: -.03em; }
+    .kv { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 8px 12px; margin-top: 8px; }
+    .kv .key { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; padding-top: 7px; }
+    .kv .value { color: var(--text); font-size: 13px; line-height: 1.45; padding-top: 5px; word-break: break-word; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+    .metric {
+      border: 1px solid var(--border); border-radius: 16px; padding: 14px 15px;
+      background: rgba(255,255,255,.015);
+    }
+    .metric .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .14em; }
+    .metric .value { margin: 8px 0 4px; font-size: 24px; font-weight: 700; letter-spacing: -.03em; }
+    .metric .detail { color: var(--muted); font-size: 13px; line-height: 1.35; }
+    .page-body { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: 1; overflow: auto; padding-bottom: 4px; }
+    .section {
+      border: 1px solid rgba(255,255,255,.05);
+      border-radius: 18px;
+      background: rgba(255,255,255,.015);
+      padding: 16px;
+    }
+    .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .section-title { margin: 0; font-size: 18px; line-height: 1.08; letter-spacing: -.02em; }
+    .section-text { margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 76ch; }
+    .hero-status { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+    .hero-chip {
+      display: flex; flex-direction: column; gap: 5px;
+      border: 1px solid rgba(255,255,255,.05);
+      border-radius: 16px;
+      padding: 12px 13px;
+      background: rgba(255,255,255,.015);
+    }
+    .hero-chip .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .14em; }
+    .hero-chip .value { font-size: 20px; font-weight: 700; letter-spacing: -.03em; }
+    .hero-chip .detail { color: var(--muted); font-size: 12px; line-height: 1.4; }
+    .record-list { display: flex; flex-direction: column; gap: 8px; }
+    .record {
+      width: 100%;
+      appearance: none;
+      border: 1px solid rgba(255,255,255,.05);
+      border-radius: 14px;
+      background: rgba(255,255,255,.015);
+      color: inherit;
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      padding: 14px 15px;
+      text-align: left;
+    }
+    .record:hover { background: rgba(122,167,255,.06); }
+    .record.selected { background: rgba(122,167,255,.10); border-color: rgba(122,167,255,.18); }
+    .record-title { font-size: 13px; font-weight: 700; line-height: 1.3; }
+    .record-meta { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; white-space: pre-line; }
+    .record-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; justify-content: flex-end; max-width: 48%; }
+    .record-badges .chip { min-height: 26px; padding: 0 10px; }
+    .subtabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .subtabs button {
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.05);
+      background: rgba(255,255,255,.015);
+      color: var(--muted);
+    }
+    .subtabs button.active { color: var(--text); background: rgba(122,167,255,.11); border-color: rgba(122,167,255,.2); }
+    .exclusion-shell { display: grid; grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr); gap: 12px; align-items: start; }
+    .filter-row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+    .filter-row input {
+      flex: 1;
+      min-width: 0;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.02);
+      color: var(--text);
+      outline: none;
+    }
+    .source-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .source-card {
+      width: 100%;
+      appearance: none;
+      border: 1px solid rgba(255,255,255,.05);
+      border-radius: 14px;
+      background: rgba(255,255,255,.015);
+      color: inherit;
+      cursor: pointer;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      padding: 14px 15px;
+      text-align: left;
+    }
+    .source-card:hover { background: rgba(122,167,255,.06); }
+    .source-title { font-size: 13px; font-weight: 700; line-height: 1.3; }
+    .source-meta { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; white-space: pre-line; }
+    .source-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; justify-content: flex-end; max-width: 48%; }
+    .source-badges .chip { min-height: 26px; padding: 0 10px; }
+    .inline-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .inline-actions button { padding: 8px 12px; border-radius: 999px; font-size: 12px; }
+    .detail-card { border: 1px solid rgba(255,255,255,.05); border-radius: 18px; background: rgba(255,255,255,.015); padding: 14px; }
+    .detail-card .title { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+    .detail-card .text { color: var(--muted); font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+    .detail-grid { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 8px 12px; margin-top: 8px; }
+    .detail-grid .key { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; padding-top: 6px; }
+    .detail-grid .value { color: var(--text); font-size: 13px; line-height: 1.45; padding-top: 4px; word-break: break-word; }
+    .empty { color: var(--muted); font-size: 13px; line-height: 1.55; padding: 18px 14px; }
+    progress { width: 100%; height: 8px; border: 0; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.05); }
+    progress::-webkit-progress-bar { background: rgba(255,255,255,.05); }
+    progress::-webkit-progress-value { background: linear-gradient(90deg, rgba(116,167,255,.95), rgba(76,195,138,.95)); }
+    @media (max-width: 1280px) {
+      body { overflow: auto; }
+      .layout { height: auto; }
+      .rail { flex-direction: column; align-items: flex-start; }
+      .hero, .metrics { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="rail">
+      <div class="brand">
+        <img src="__FENRIR_LOGO_URI__" alt="Fenrir" />
+        <div class="device" id="brandDevice"></div>
+        <div class="meta" id="brandMeta"></div>
+      </div>
+      <div class="nav" id="nav"></div>
+      <div class="foot" id="foot"></div>
+    </aside>
+    <main class="main">
+      <header class="header">
+        <div>
+          <div class="eyebrow">Protection Centre</div>
+          <h1 id="pageTitle"></h1>
+          <p class="subtitle" id="pageSubtitle"></p>
+        </div>
+        <div class="chip info" id="statusChip"></div>
+      </header>
+      <div class="tabs" id="tabs"></div>
+      <div class="actions" id="actions"></div>
+      <section id="pageBody" class="page-body"></section>
+    </main>
+  </div>
+  <script>
+    const initialState = __FENRIR_INITIAL_STATE__;
+    let appState = initialState;
+    const selection = Object.create(null);
+    let exclusionMode = 'current';
+    let exclusionSearch = '';
+    const pages = [
+      { key: 'dashboard', label: 'Home' },
+      { key: 'threats', label: 'Threats' },
+      { key: 'quarantine', label: 'Quarantine' },
+      { key: 'scans', label: 'Scans' },
+      { key: 'history', label: 'History' },
+      { key: 'settings', label: 'Settings' }
+    ];
+
+    function esc(value) {
+      return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function send(message) {
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage(message);
+      }
+    }
+
+    function actionMessage(action, fields = {}) {
+      return new URLSearchParams({ action, ...fields }).toString();
+    }
+
+    function rowsFor(pageKey) {
+      if (pageKey === 'dashboard' || pageKey === 'history') return appState.history || [];
+      if (pageKey === 'threats') return appState.threats || [];
+      if (pageKey === 'quarantine') return appState.quarantine || [];
+      if (pageKey === 'scans') return (appState.history || []).filter((item) => item.kind === 'scan-session');
+      return appState.settings || [];
+    }
+
+    function activeItem(pageKey) {
+      const rows = rowsFor(pageKey);
+      const index = Number.isInteger(selection[pageKey]) ? selection[pageKey] : -1;
+      return index >= 0 && index < rows.length ? rows[index] : (rows[0] || null);
+    }
+
+    function buildNav() {
+      const nav = document.getElementById('nav');
+      nav.innerHTML = pages.map((page) =>
+        `<button class="${page.key === appState.pageKey ? 'active' : ''}" data-nav="${page.key}">${esc(page.label)}</button>`
+      ).join('');
+    }
+
+    function buildTabs() {
+      const tabs = document.getElementById('tabs');
+      tabs.innerHTML = pages.map((page) =>
+        `<button class="${page.key === appState.pageKey ? 'active' : ''}" data-nav="${page.key}">${esc(page.label)}</button>`
+      ).join('');
+    }
+
+    function buildActions() {
+      const page = appState.pageKey;
+      const actions = [];
+      if (page === 'dashboard') {
+        actions.push(`<button class="primary" data-action="scan" data-preset="quick">Quick scan</button>`);
+        actions.push(`<button data-action="openQuarantine">Open quarantine</button>`);
+        actions.push(`<button data-action="refresh">Refresh</button>`);
+      } else if (page === 'threats') {
+        actions.push(`<button data-action="refresh">Refresh</button>`);
+        actions.push(`<button data-action="openQuarantine">Open quarantine</button>`);
+      } else if (page === 'quarantine') {
+        actions.push(`<button data-action="refresh">Refresh</button>`);
+        actions.push(`<button data-action="openQuarantine">Open folder</button>`);
+      } else if (page === 'scans') {
+        actions.push(`<button class="primary" data-action="scan" data-preset="quick">Quick scan</button>`);
+        actions.push(`<button data-action="scan" data-preset="full">Full scan</button>`);
+        actions.push(`<button data-action="scan" data-preset="folder">Scan folder</button>`);
+        actions.push(`<button data-action="refresh">Refresh</button>`);
+      } else if (page === 'history') {
+        actions.push(`<button data-action="refresh">Refresh</button>`);
+      } else if (page === 'settings') {
+        if (appState.manageExclusionsMode) {
+          actions.push(`<button class="warning" data-action="exclusionsDone">Back to settings</button>`);
+          actions.push(`<button class="primary" data-action="exclusionsAddFile">Add file</button>`);
+          actions.push(`<button class="primary" data-action="exclusionsAddFolder">Add folder</button>`);
+          actions.push(`<button data-exclusion-mode="process">Process</button>`);
+          actions.push(`<button data-exclusion-mode="application">Application</button>`);
+          actions.push(`<button data-action="refresh">Refresh</button>`);
+        } else {
+          actions.push(`<button class="warning" data-action="openExclusions">Manage exclusions</button>`);
+          actions.push(`<button data-action="refresh">Refresh</button>`);
+        }
+      }
+      if (appState.runtime && (appState.runtime.serviceState === 'not installed' || appState.runtime.serviceState === 'stopped')) {
+        actions.push(`<button class="good" data-action="startService">Start protection</button>`);
+      }
+      const current = page === 'quarantine' ? selectedItem('quarantine') : null;
+      if (current) {
+        actions.push(`<button class="good" data-action="quarantineRestore" data-id="${esc(current.id)}">Restore selected</button>`);
+        actions.push(`<button class="danger" data-action="quarantineDelete" data-id="${esc(current.id)}">Delete selected</button>`);
+      }
+      return actions.join('');
+    }
+
+    function buildHeroActions() {
+      const page = appState.pageKey;
+      if (page === 'dashboard') {
+        return [
+          `<button class="primary" data-action="navigate" data-page="threats">Review threats</button>`,
+          `<button data-action="navigate" data-page="quarantine">Open quarantine</button>`,
+          `<button data-action="scan" data-preset="quick">Run quick scan</button>`
+        ].join('');
+      }
+      if (page === 'quarantine') {
+        const current = activeItem('quarantine');
+        return current ? [
+          `<button class="good" data-action="quarantineRestore" data-id="${esc(current.id)}">Restore</button>`,
+          `<button class="danger" data-action="quarantineDelete" data-id="${esc(current.id)}">Delete</button>`
+        ].join('') : '';
+      }
+      if (page === 'settings') {
+        return `<button class="warning" data-action="openExclusions">Edit exclusions</button>`;
+      }
+      return `<button class="primary" data-action="refresh">Refresh status</button>`;
+    }
+
+    function buildMetrics() {
+      return (appState.cards || []).map((card) => `
+        <div class="metric">
+          <div class="label">${esc(card.label)}</div>
+          <div class="value">${esc(card.value)}</div>
+          <div class="detail">${esc(card.detail)}</div>
+        </div>
+      `).join('');
+    }
+
+    function buildRuntimeKv() {
+      const runtime = appState.runtime || {};
+      const pairs = [
+        ['Device ID', runtime.deviceId],
+        ['Service state', runtime.serviceState],
+        ['Health state', runtime.healthState],
+        ['Policy', appState.brand ? appState.brand.policy : ''],
+        ['Last heartbeat', runtime.lastHeartbeat],
+        ['Last policy sync', runtime.lastPolicySync],
+        ['Queued telemetry', runtime.queuedTelemetry],
+        ['Last scan', runtime.lastScan],
+        ['Control plane', runtime.controlPlane]
+      ];
+      return pairs.map(([key, value]) => `<div class="key">${esc(key)}</div><div class="value">${esc(value)}</div>`).join('');
+    }
+
+    function selectedItem(pageKey) {
+      const rows = rowsFor(pageKey);
+      const index = Number.isInteger(selection[pageKey]) ? selection[pageKey] : -1;
+      return index >= 0 && index < rows.length ? rows[index] : (rows[0] || null);
+    }
+
+    function badgeForTone(tone, text) {
+      if (!String(text ?? '').trim()) {
+        return '';
+      }
+      return `<span class="chip ${esc(tone || 'info')}">${esc(text)}</span>`;
+    }
+
+    function buildRecordCards(pageKey) {
+      const rows = rowsFor(pageKey);
+      if (!rows.length) {
+        return `<div class="empty">No items are currently recorded for this view.</div>`;
+      }
+
+      return `<div class="record-list">${
+        rows.map((item, index) => {
+          const selected = Number.isInteger(selection[pageKey]) && selection[pageKey] === index;
+          if (pageKey === 'threats') {
+            return `<button type="button" class="record ${selected ? 'selected' : ''}" data-select="${index}">
+              <div>
+                <div class="record-title">${esc(item.item)}</div>
+                <div class="record-meta">${esc(item.time)}\n${esc(item.source)}</div>
+              </div>
+              <div class="record-badges">
+                ${badgeForTone(item.action === 'block' ? 'danger' : 'warning', item.action)}
+                ${badgeForTone('info', `Confidence ${item.confidence}`)}
+              </div>
+            </button>`;
+          }
+          if (pageKey === 'quarantine') {
+            return `<button type="button" class="record ${selected ? 'selected' : ''}" data-select="${index}">
+              <div>
+              <div class="record-title">${esc(item.item)}</div>
+                <div class="record-meta">${esc(item.time)}\n${esc(item.status)} · ${esc(item.technique)}</div>
+              </div>
+              <div class="record-badges">
+                ${badgeForTone(item.status === 'restored' ? 'good' : 'warning', item.status)}
+                ${badgeForTone('info', `${String(item.sha256 || '').slice(0, 12)}…`)}
+              </div>
+            </button>`;
+          }
+          const label = item.result || item.kind || 'event';
+          return `<button type="button" class="record ${selected ? 'selected' : ''}" data-select="${index}">
+            <div>
+              <div class="record-title">${esc(item.item || item.result || 'Selected item')}</div>
+              <div class="record-meta">${esc(item.time)}\n${esc(item.source || item.detail || '')}</div>
+            </div>
+            <div class="record-badges">
+              ${badgeForTone(item.result === 'blocked' || item.result === 'block' ? 'danger' : 'info', label)}
+              ${badgeForTone('info', item.technique || item.kind || '')}
+            </div>
+          </button>`;
+        }).join('')
+      }</div>`;
+    }
+
+    function buildSelectedDetail(pageKey) {
+      if (pageKey === 'settings') {
+        return `
+          <div class="detail-card">
+            <div class="title">${esc(appState.detailTitle)}</div>
+            <div class="text">${esc(appState.detailText)}</div>
+          </div>
+          <div class="detail-card">
+            <div class="title">Local configuration</div>
+            <div class="detail-grid">${
+              (appState.settings || []).map((item) => `
+                <div class="key">${esc(item.label)}</div><div class="value">${esc(item.value)}</div>
+              `).join('')
+            }</div>
+            <div class="actions" style="margin-top: 14px;">
+              <button class="warning" data-action="openExclusions">Manage exclusions</button>
+            </div>
+          </div>`;
+      }
+
+      const current = selectedItem(pageKey);
+      if (!current) {
+        return `<div class="detail-card"><div class="title">${esc(appState.detailTitle)}</div><div class="text">${esc(appState.detailText)}</div></div>`;
+      }
+
+      const rows = [];
+      if (pageKey === 'quarantine') {
+        rows.push(['Captured', current.time], ['Original path', current.item], ['Status', current.status], ['Technique', current.technique], ['SHA-256', current.sha256]);
+      } else if (pageKey === 'threats') {
+        rows.push(['Detected', current.time], ['Item', current.item], ['Action', current.action], ['Confidence', current.confidence], ['ATT&CK', current.attack], ['Remediation', current.remediation], ['Source', current.source], ['SHA-256', current.sha256]);
+      } else {
+        rows.push(['Recorded', current.time], ['Result', current.result], ['Item', current.item], ['Source', current.source], ['Technique', current.technique], ['Remediation', current.remediation], ['Kind', current.kind]);
+      }
+
+      const buttons = pageKey === 'quarantine' ? `
+        <div class="actions" style="margin-top: 14px;">
+          <button class="good" data-action="quarantineRestore" data-id="${esc(current.id)}">Restore</button>
+          <button class="danger" data-action="quarantineDelete" data-id="${esc(current.id)}">Delete</button>
+        </div>` : '';
+
+      return `
+        <div class="detail-card">
+          <div class="title">${esc(current.item || current.result || 'Selected item')}</div>
+          <div class="text">${esc(current.detail || appState.detailText)}</div>
+        </div>
+        <div class="detail-card">
+          <div class="detail-grid">${rows.map(([key, value]) => `<div class="key">${esc(key)}</div><div class="value">${esc(value)}</div>`).join('')}</div>
+          ${buttons}
+        </div>`;
+    }
+
+    function buildSettingsOverviewBody() {
+      return `
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Settings</div>
+              <div class="section-title">Local configuration</div>
+              <div class="section-text">Control plane, runtime paths, exclusions, and endpoint preferences.</div>
+            </div>
+            <div class="chip info">Protected</div>
+          </div>
+          <div style="margin-top: 14px;">${buildSelectedDetail('settings')}</div>
+        </section>`;
+    }
+
+    function buildExclusionEntryCard(item) {
+      return `
+        <div class="record">
+          <div>
+            <div class="record-title">${esc(item.path)}</div>
+            <div class="record-meta">${esc(item.kind || 'Path')} exclusion</div>
+          </div>
+          <div class="inline-actions">
+            <button class="danger" data-action="exclusionsRemove" data-path="${esc(item.path)}">Remove</button>
+          </div>
+        </div>`;
+    }
+
+    function buildProcessCard(item) {
+      return `
+        <button type="button" class="source-card" data-action="exclusionsAddProcess" data-pid="${esc(item.pid)}">
+          <div>
+            <div class="source-title">${esc(item.name || 'Process')}</div>
+            <div class="source-meta">${esc(item.path || '(path unavailable)')}\nPID ${esc(item.pid)}</div>
+          </div>
+          <div class="source-badges">
+            ${badgeForTone(item.prioritized ? 'warning' : 'info', item.prioritized ? 'Prioritized' : 'Process')}
+          </div>
+        </button>`;
+    }
+
+    function buildSoftwareCard(item) {
+      return `
+        <button type="button" class="source-card" data-action="exclusionsAddApplication" data-software-id="${esc(item.id)}">
+          <div>
+            <div class="source-title">${esc(item.name || 'Application')}</div>
+            <div class="source-meta">${esc(item.publisher || '(unknown publisher)')}\n${esc(item.version || '')}\n${esc(item.location || '(no install location)')}</div>
+          </div>
+          <div class="source-badges">
+            ${badgeForTone(item.blocked ? 'danger' : 'info', item.blocked ? 'Blocked' : 'Installed')}
+          </div>
+        </button>`;
+    }
+
+    function buildExclusionsBody() {
+      const exclusions = appState.exclusions || [];
+      const query = exclusionSearch.trim().toLowerCase();
+      const filteredExclusions = exclusions.filter((item) => {
+        if (!query) return true;
+        return String(item.path || '').toLowerCase().includes(query) ||
+               String(item.kind || '').toLowerCase().includes(query);
+      });
+      const processes = (appState.processes || []).filter((item) => {
+        if (!query) return true;
+        return String(item.name || '').toLowerCase().includes(query) ||
+               String(item.path || '').toLowerCase().includes(query) ||
+               String(item.pid || '').includes(query);
+      });
+      const software = (appState.software || []).filter((item) => {
+        if (!query) return true;
+        return String(item.name || '').toLowerCase().includes(query) ||
+               String(item.publisher || '').toLowerCase().includes(query) ||
+               String(item.location || '').toLowerCase().includes(query) ||
+               String(item.version || '').toLowerCase().includes(query);
+      });
+
+      let rightPanel = '';
+      if (exclusionMode === 'current') {
+        rightPanel = `
+          <div class="detail-card">
+            <div class="title">Current exclusions</div>
+            <div class="text">These paths are trusted by Fenrir and are skipped during scans.</div>
+            <div class="source-list" style="margin-top: 12px;">${
+              filteredExclusions.length ? filteredExclusions.map((item) => buildExclusionEntryCard(item)).join('') :
+                `<div class="empty">No exclusions are configured yet.</div>`
+            }</div>
+          </div>`;
+      } else if (exclusionMode === 'file') {
+        rightPanel = `
+          <div class="detail-card">
+            <div class="title">File exclusion</div>
+            <div class="text">Choose a single file to trust. Fenrir will store its full path and skip it in scans.</div>
+            <div class="inline-actions" style="margin-top: 12px;">
+              <button class="primary" data-action="exclusionsAddFile">Choose file</button>
+            </div>
+          </div>`;
+      } else if (exclusionMode === 'folder') {
+        rightPanel = `
+          <div class="detail-card">
+            <div class="title">Folder exclusion</div>
+            <div class="text">Choose a folder to trust. Everything under that path will be skipped by scanning.</div>
+            <div class="inline-actions" style="margin-top: 12px;">
+              <button class="primary" data-action="exclusionsAddFolder">Choose folder</button>
+            </div>
+          </div>`;
+      } else if (exclusionMode === 'process') {
+        rightPanel = `
+          <div class="detail-card">
+            <div class="title">Process exclusion</div>
+            <div class="text">Pick from the current running processes Fenrir sees on this device.</div>
+            <div class="filter-row"><input id="exclusionSearch" value="${esc(exclusionSearch)}" placeholder="Search running processes..." /></div>
+            <div class="source-list">${
+              processes.length ? processes.map((item) => buildProcessCard(item)).join('') :
+                `<div class="empty">No matching processes were found.</div>`
+            }</div>
+          </div>`;
+      } else if (exclusionMode === 'application') {
+        rightPanel = `
+          <div class="detail-card">
+            <div class="title">Application exclusion</div>
+            <div class="text">Pick from the installed software list collected on this endpoint.</div>
+            <div class="filter-row"><input id="exclusionSearch" value="${esc(exclusionSearch)}" placeholder="Search installed software..." /></div>
+            <div class="source-list">${
+              software.length ? software.map((item) => buildSoftwareCard(item)).join('') :
+                `<div class="empty">No matching software was found.</div>`
+            }</div>
+          </div>`;
+      }
+
+      const currentCount = exclusions.length;
+      return `
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Exclusions</div>
+              <div class="section-title">Trusted paths and application targets</div>
+              <div class="section-text">Use file, folder, process, and application sources to build exclusions without leaving Fenrir.</div>
+            </div>
+            <div class="chip ${currentCount === 0 ? 'info' : 'warning'}">${currentCount} trusted path(s)</div>
+          </div>
+          <div class="subtabs">
+            <button class="${exclusionMode === 'current' ? 'active' : ''}" data-exclusion-mode="current">Current list</button>
+            <button class="${exclusionMode === 'file' ? 'active' : ''}" data-exclusion-mode="file">File</button>
+            <button class="${exclusionMode === 'folder' ? 'active' : ''}" data-exclusion-mode="folder">Folder</button>
+            <button class="${exclusionMode === 'process' ? 'active' : ''}" data-exclusion-mode="process">Process</button>
+            <button class="${exclusionMode === 'application' ? 'active' : ''}" data-exclusion-mode="application">Application</button>
+          </div>
+          <div class="exclusion-shell" style="margin-top: 14px;">
+            <div class="detail-card">
+              <div class="title">Configured exclusions</div>
+              <div class="text">These exclusions are stored for the Fenrir service and applied at system level.</div>
+              <div class="source-list" style="margin-top: 12px;">${
+                filteredExclusions.length ? filteredExclusions.map((item) => buildExclusionEntryCard(item)).join('') :
+                  `<div class="empty">No exclusions are configured yet.</div>`
+              }</div>
+            </div>
+            ${rightPanel}
+          </div>
+        </section>`;
+    }
+
+    function buildDashboardBody() {
+      const recent = (appState.history || []).slice(0, 5);
+      return `
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Protection status</div>
+              <div class="section-title">${esc(appState.headline || '')}</div>
+              <div class="section-text">${esc(appState.guidance || '')}</div>
+            </div>
+            <div class="chip ${esc(appState.statusTone || 'info')}">${esc(appState.statusChip || '')}</div>
+          </div>
+          <div class="actions" style="margin-top: 14px;">${buildHeroActions()}</div>
+          <div class="hero-status" style="margin-top: 14px;">${buildMetrics()}</div>
+        </section>
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Recent activity</div>
+              <div class="section-title">What changed recently</div>
+              <div class="section-text">Only the most important actions and detections are shown here.</div>
+            </div>
+            <div class="chip info">${recent.length} items</div>
+          </div>
+          <div class="record-list" style="margin-top: 14px;">${
+            recent.map((item, index) => {
+              const title = item.item || item.result || 'Event';
+              return `<button type="button" class="record ${index === 0 ? 'selected' : ''}" data-select="${index}">
+                <div>
+                  <div class="record-title">${esc(title)}</div>
+                  <div class="record-meta">${esc(item.time)}\n${esc(item.source || item.kind || '')}</div>
+                </div>
+                <div class="record-badges">
+                  ${badgeForTone(item.result === 'blocked' || item.result === 'block' ? 'danger' : 'info', item.result || 'event')}
+                  ${badgeForTone('info', item.technique || item.remediation || '')}
+                </div>
+              </button>`;
+            }).join('')
+          }</div>
+        </section>
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Runtime snapshot</div>
+              <div class="section-title">Local protection state</div>
+              <div class="section-text">Service, policy, telemetry, and sync status for this endpoint.</div>
+            </div>
+          </div>
+          <div class="kv" style="margin-top: 12px;">${buildRuntimeKv()}</div>
+        </section>`;
+    }
+
+    function buildPageBody(pageKey) {
+      if (pageKey === 'dashboard') {
+        return buildDashboardBody();
+      }
+
+      if (pageKey === 'threats') {
+        return `
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Threats</div>
+                <div class="section-title">Active detections</div>
+                <div class="section-text">Keep this page focused on items that still need a decision.</div>
+              </div>
+              <div class="chip ${esc(appState.statusTone || 'info')}">${esc(appState.threats?.length ? `${appState.threats.length} detected` : 'No current detections')}</div>
+            </div>
+            <div style="margin-top: 14px;">${buildRecordCards('threats')}</div>
+          </section>
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Selected threat</div>
+                <div class="section-title">Why Fenrir flagged it</div>
+                <div class="section-text">Selected item details, ATT&CK mapping, and recommended next steps.</div>
+              </div>
+            </div>
+            <div style="margin-top: 14px;">${buildSelectedDetail('threats')}</div>
+          </section>`;
+      }
+
+      if (pageKey === 'quarantine') {
+        return `
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Quarantine</div>
+                <div class="section-title">Contained items</div>
+                <div class="section-text">Restore only when you are confident the file is safe.</div>
+              </div>
+              <div class="chip info">${esc(appState.quarantine?.length ? `${appState.quarantine.length} contained` : 'Empty')}</div>
+            </div>
+            <div style="margin-top: 14px;">${buildRecordCards('quarantine')}</div>
+          </section>
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Selected item</div>
+                <div class="section-title">Original path and remediation</div>
+                <div class="section-text">Use the actions below to restore or delete the selected entry.</div>
+              </div>
+            </div>
+            <div style="margin-top: 14px;">${buildSelectedDetail('quarantine')}</div>
+          </section>`;
+      }
+
+      if (pageKey === 'scans') {
+        const currentScan = appState.scan || {};
+        return `
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Scans</div>
+                <div class="section-title">Launch and track scans</div>
+                <div class="section-text">Quick, full, and folder scans all report progress here.</div>
+              </div>
+              <div class="chip ${currentScan.running ? 'warning' : 'info'}">${currentScan.running ? 'Scan running' : 'Idle'}</div>
+            </div>
+            <div class="actions" style="margin-top: 14px;">${buildActions()}</div>
+            <div class="detail-card" style="margin-top: 14px;">
+              <div class="title">${esc(currentScan.label || 'No active scan')}</div>
+              <div class="text">${esc(currentScan.status || appState.detailText || 'Ready.')}</div>
+              <div style="margin-top: 12px;"><progress value="${Number(currentScan.completed || 0)}" max="${Math.max(Number(currentScan.total || 100), 1)}"></progress></div>
+            </div>
+          </section>
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Recent scan history</div>
+                <div class="section-title">Latest sessions</div>
+                <div class="section-text">Recent scans are recorded as a simple activity stream.</div>
+              </div>
+            </div>
+            <div style="margin-top: 14px;">${buildRecordCards('scans')}</div>
+          </section>`;
+      }
+
+      if (pageKey === 'history') {
+        return `
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">History</div>
+                <div class="section-title">Activity timeline</div>
+                <div class="section-text">Important protection and response events, ordered by recency.</div>
+              </div>
+              <div class="chip info">${esc((appState.history || []).length)} events</div>
+            </div>
+            <div style="margin-top: 14px;">${buildRecordCards('history')}</div>
+          </section>
+          <section class="section">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">Selected event</div>
+                <div class="section-title">Evidence and remediation</div>
+                <div class="section-text">The selected event’s context is shown below.</div>
+              </div>
+            </div>
+            <div style="margin-top: 14px;">${buildSelectedDetail('history')}</div>
+          </section>`;
+      }
+
+      if (pageKey === 'settings') {
+        if (appState.manageExclusionsMode) {
+          return buildExclusionsBody();
+        }
+        return buildSettingsOverviewBody();
+      }
+
+      return buildDashboardBody();
+    }
+
+    function listColumns(pageKey) {
+      if (pageKey === 'threats') return ['Time', 'Item', 'Action', 'Confidence', 'ATT&CK', 'Remediation'];
+      if (pageKey === 'quarantine') return ['Captured', 'Original path', 'Status', 'Technique', 'SHA-256'];
+      if (pageKey === 'scans' || pageKey === 'history' || pageKey === 'dashboard') return ['Time', 'Result', 'Item', 'Source', 'Technique', 'Remediation'];
+      return ['Label', 'Value'];
+    }
+
+    function buildList(pageKey) {
+      const rows = rowsFor(pageKey);
+      if (pageKey === 'settings') {
+        return `<div class="list-grid">${
+          (appState.settings || []).map((item) => `
+            <div class="list-card">
+              <div class="title">${esc(item.label)}</div>
+              <div class="meta">${esc(item.value)}</div>
+            </div>`).join('')
+        }</div>`;
+      }
+
+      if (!rows.length) {
+        return `<div class="empty">No items are currently recorded for this view.</div>`;
+      }
+
+      const header = listColumns(pageKey).map((column) => `<th>${esc(column)}</th>`).join('');
+      const body = rows.map((item, index) => {
+        const selected = Number.isInteger(selection[pageKey]) && selection[pageKey] === index;
+        if (pageKey === 'threats') {
+          return `<tr class="${selected ? 'selected' : ''}" data-select="${index}">
+            <td>${esc(item.time)}</td>
+            <td>${esc(item.item)}<span class="secondary">${esc(item.source)}</span></td>
+            <td>${esc(item.action)}</td>
+            <td>${esc(item.confidence)}</td>
+            <td>${esc(item.attack)}</td>
+            <td>${esc(item.remediation)}</td>
+          </tr>`;
+        }
+        if (pageKey === 'quarantine') {
+          return `<tr class="${selected ? 'selected' : ''}" data-select="${index}">
+            <td>${esc(item.time)}</td>
+            <td>${esc(item.item)}<span class="secondary">${esc(item.detail)}</span></td>
+            <td>${esc(item.status)}</td>
+            <td>${esc(item.technique)}</td>
+            <td>${esc(item.sha256)}</td>
+          </tr>`;
+        }
+        return `<tr class="${selected ? 'selected' : ''}" data-select="${index}">
+          <td>${esc(item.time)}</td>
+          <td>${esc(item.result)}</td>
+          <td>${esc(item.item)}<span class="secondary">${esc(item.kind || item.detail || '')}</span></td>
+          <td>${esc(item.source)}</td>
+          <td>${esc(item.technique)}</td>
+          <td>${esc(item.remediation)}</td>
+        </tr>`;
+      }).join('');
+
+      return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    function buildDetail(pageKey) {
+      if (pageKey === 'settings') {
+        return `
+          <div class="detail-card">
+            <div class="title">${esc(appState.detailTitle)}</div>
+            <div class="text">${esc(appState.detailText)}</div>
+          </div>
+          <div class="detail-card">
+            <div class="title">Local configuration</div>
+            <div class="kv">${
+              (appState.settings || []).map((item) => `
+                <div class="key">${esc(item.label)}</div><div class="value">${esc(item.value)}</div>
+              `).join('')
+            }</div>
+            <div class="actions" style="margin-top: 14px;">
+              <button class="warning" data-action="openExclusions">Edit exclusions</button>
+            </div>
+          </div>`;
+      }
+
+      const current = activeItem(pageKey);
+      if (!current) {
+        return `<div class="detail-card"><div class="title">${esc(appState.detailTitle)}</div><div class="text">${esc(appState.detailText)}</div></div>`;
+      }
+
+      const rows = [];
+      if (pageKey === 'quarantine') {
+        rows.push(['Captured', current.time], ['Original path', current.item], ['Status', current.status], ['Technique', current.technique], ['SHA-256', current.sha256]);
+      } else if (pageKey === 'threats') {
+        rows.push(['Detected', current.time], ['Item', current.item], ['Action', current.action], ['Confidence', current.confidence], ['ATT&CK', current.attack], ['Remediation', current.remediation], ['Source', current.source], ['SHA-256', current.sha256]);
+      } else {
+        rows.push(['Recorded', current.time], ['Result', current.result], ['Item', current.item], ['Source', current.source], ['Technique', current.technique], ['Remediation', current.remediation], ['Kind', current.kind]);
+      }
+
+      const buttons = pageKey === 'quarantine' ? `
+        <div class="actions" style="margin-top: 14px;">
+          <button class="good" data-action="quarantineRestore" data-id="${esc(current.id)}">Restore</button>
+          <button class="danger" data-action="quarantineDelete" data-id="${esc(current.id)}">Delete</button>
+        </div>` : '';
+
+      return `
+        <div class="detail-card">
+          <div class="title">${esc(current.item || current.result || 'Selected item')}</div>
+          <div class="text">${esc(current.detail || appState.detailText)}</div>
+        </div>
+        <div class="detail-card">
+          <div class="kv">${rows.map(([key, value]) => `<div class="key">${esc(key)}</div><div class="value">${esc(value)}</div>`).join('')}</div>
+          ${buttons}
+        </div>`;
+    }
+
+    function render(pageState) {
+      appState = pageState;
+      if (!pageState.manageExclusionsMode || pageState.pageKey !== 'settings') {
+        exclusionMode = 'current';
+        exclusionSearch = '';
+      }
+      document.getElementById('brandDevice').textContent = pageState.brand?.device || '';
+      document.getElementById('brandMeta').textContent = `${pageState.brand?.status || ''}\n${pageState.brand?.policy || ''}`;
+      document.getElementById('pageTitle').textContent = pageState.pageTitle || '';
+      document.getElementById('pageSubtitle').textContent = pageState.pageSubtitle || '';
+      const chip = document.getElementById('statusChip');
+      chip.className = `chip ${pageState.statusTone || 'info'}`;
+      chip.textContent = pageState.statusChip || '';
+      document.getElementById('actions').innerHTML = buildActions();
+      buildNav();
+      buildTabs();
+      document.getElementById('foot').textContent = `${pageState.runtime?.queuedTelemetry || ''} queued upload(s) • ${pageState.runtime?.controlPlane || ''}`;
+      const pageBody = document.getElementById('pageBody');
+      if (pageBody) {
+        pageBody.innerHTML = buildPageBody(pageState.pageKey || 'dashboard');
+      }
+    }
+
+    document.addEventListener('click', (event) => {
+      const target = event.target.closest('[data-nav], [data-action], [data-select], [data-exclusion-mode]');
+      if (!target) return;
+      if (target.dataset.exclusionMode) {
+        exclusionMode = target.dataset.exclusionMode;
+        if (exclusionMode === 'current') {
+          exclusionSearch = '';
+        }
+        render(appState);
+        return;
+      }
+      if (target.dataset.nav) {
+        send(actionMessage('navigate', { page: target.dataset.nav }));
+        return;
+      }
+      if (target.dataset.select) {
+        selection[appState.pageKey] = Number(target.dataset.select);
+        render(appState);
+        return;
+      }
+      if (target.dataset.action) {
+        const payload = { action: target.dataset.action };
+        if (target.dataset.preset) payload.preset = target.dataset.preset;
+        if (target.dataset.page) payload.page = target.dataset.page;
+        if (target.dataset.id) payload.id = target.dataset.id;
+        send(new URLSearchParams(payload).toString());
+      }
+    });
+
+    document.addEventListener('input', (event) => {
+      const target = event.target;
+      if (target && target.id === 'exclusionSearch') {
+        exclusionSearch = target.value || '';
+        render(appState);
+      }
+    });
+
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.addEventListener('message', (event) => render(event.data));
+    }
+
+    render(initialState);
+  </script>
+</body>
+</html>
+)HTML";
+
+  html = ReplaceAll(std::move(html), L"__FENRIR_LOGO_URI__", context.webViewLogoDataUri);
+  html = ReplaceAll(std::move(html), L"__FENRIR_INITIAL_STATE__", BuildWebViewStateJson(context));
+  return html;
+}
+
+void HideNativeShellControls(UiContext& context, const bool visible) {
+  const auto showCommand = visible ? SW_SHOW : SW_HIDE;
+  const std::array<HWND, 34> controls{
+      context.brandCard,          context.brandLogo,           context.brandSummary,        context.titleLabel,
+      context.subtitleLabel,      context.statusBadge,         context.primarySectionTitle, context.secondarySectionTitle,
+      context.summaryCard,        context.detailsCard,         context.metricThreats,       context.metricQuarantine,
+      context.metricService,      context.metricSync,         context.scanStatusLabel,     context.progressBar,
+      context.threatsList,        context.quarantineList,      context.historyList,         context.detailEdit,
+      context.refreshButton,      context.quickScanButton,     context.fullScanButton,      context.customScanButton,
+      context.startServiceButton,  context.openQuarantineButton, context.restoreButton,      context.deleteButton,
+      context.navDashboardButton,  context.navThreatsButton,    context.navQuarantineButton, context.navScansButton,
+      context.navHistoryButton,   context.navSettingsButton};
+
+  for (const auto control : controls) {
+    if (control != nullptr) {
+      ShowWindow(control, showCommand);
+    }
+  }
+}
+
+void ResizeWebView(UiContext& context) {
+  if (!context.webViewReady || context.webViewController == nullptr) {
+    return;
+  }
+
+  RECT client{};
+  GetClientRect(context.hwnd, &client);
+  context.webViewController->put_Bounds(client);
+}
+
+void PublishWebViewState(UiContext& context) {
+  if (!context.webViewReady || context.webView == nullptr) {
+    return;
+  }
+
+  const auto json = BuildWebViewStateJson(context);
+  context.webView->PostWebMessageAsJson(json.c_str());
+}
+
+void DestroyWebViewHost(UiContext& context) {
+  context.webViewReady = false;
+  if (context.webView != nullptr && context.webMessageReceivedToken.value != 0) {
+    context.webView->remove_WebMessageReceived(context.webMessageReceivedToken);
+    context.webMessageReceivedToken.value = 0;
+  }
+  context.webView.Reset();
+  context.webViewController.Reset();
+  context.webViewEnvironment.Reset();
+  if (context.webViewLoaderModule != nullptr) {
+    FreeLibrary(context.webViewLoaderModule);
+    context.webViewLoaderModule = nullptr;
+  }
+}
+
+bool InitializeWebViewHost(UiContext& context) {
+  if (context.webViewReady || context.webViewEnabled) {
+    return true;
+  }
+
+  const auto currentExecutable = GetCurrentExecutablePath();
+  if (currentExecutable.empty()) {
+    return false;
+  }
+
+  const auto loaderPath = std::filesystem::path(currentExecutable).parent_path() / L"WebView2Loader.dll";
+  if (!std::filesystem::exists(loaderPath)) {
+    return false;
+  }
+
+  context.webViewLoaderModule = LoadLibraryW(loaderPath.c_str());
+  if (context.webViewLoaderModule == nullptr) {
+    return false;
+  }
+
+  using CreateEnvironmentFn = HRESULT(WINAPI*)(PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions*,
+                                              ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
+  const auto createEnvironment = reinterpret_cast<CreateEnvironmentFn>(
+      GetProcAddress(context.webViewLoaderModule, "CreateCoreWebView2EnvironmentWithOptions"));
+  if (createEnvironment == nullptr) {
+    DestroyWebViewHost(context);
+    return false;
+  }
+
+  context.webViewLogoDataUri = LoadFenrirLogoDataUri();
+  context.webViewEnabled = true;
+  const auto userDataFolder = GetWebViewUserDataFolder();
+  if (userDataFolder.empty()) {
+    DestroyWebViewHost(context);
+    return false;
+  }
+  std::error_code error;
+  std::filesystem::create_directories(userDataFolder, error);
+
+  const auto hwnd = context.hwnd;
+  ComPtr<WebViewEnvironmentCompletedHandler> environmentHandler =
+      new WebViewEnvironmentCompletedHandler([hwnd](HRESULT errorCode, ICoreWebView2Environment* environment) -> HRESULT {
+        auto* callbackContext = GetContext(hwnd);
+        if (callbackContext == nullptr) {
+          return S_OK;
+        }
+
+        if (FAILED(errorCode) || environment == nullptr) {
+          callbackContext->webViewEnabled = false;
+          DestroyWebViewHost(*callbackContext);
+          return S_OK;
+        }
+
+        callbackContext->webViewEnvironment = environment;
+        ComPtr<WebViewControllerCompletedHandler> controllerHandler =
+            new WebViewControllerCompletedHandler([hwnd](HRESULT controllerError, ICoreWebView2Controller* controller) -> HRESULT {
+              auto* controllerContext = GetContext(hwnd);
+              if (controllerContext == nullptr) {
+                return S_OK;
+              }
+
+              if (FAILED(controllerError) || controller == nullptr) {
+                controllerContext->webViewEnabled = false;
+                DestroyWebViewHost(*controllerContext);
+                return S_OK;
+              }
+
+              controllerContext->webViewController = controller;
+              controllerContext->webViewController->put_IsVisible(TRUE);
+              controllerContext->webViewController->get_CoreWebView2(&controllerContext->webView);
+              if (controllerContext->webView == nullptr) {
+                controllerContext->webViewEnabled = false;
+                DestroyWebViewHost(*controllerContext);
+                return S_OK;
+              }
+
+              if (ComPtr<ICoreWebView2Settings> settings;
+                  controllerContext->webView->get_Settings(&settings) == S_OK && settings != nullptr) {
+                settings->put_AreDevToolsEnabled(FALSE);
+                settings->put_AreDefaultContextMenusEnabled(FALSE);
+                settings->put_IsStatusBarEnabled(FALSE);
+              }
+
+              ComPtr<ICoreWebView2Controller2> controller2;
+              if (controllerContext->webViewController != nullptr &&
+                  SUCCEEDED(controllerContext->webViewController->QueryInterface(
+                      IID_ICoreWebView2Controller2, reinterpret_cast<void**>(controller2.GetAddressOf()))) &&
+                  controller2 != nullptr) {
+                COREWEBVIEW2_COLOR background{};
+                background.R = 7;
+                background.G = 11;
+                background.B = 17;
+                background.A = 255;
+                controller2->put_DefaultBackgroundColor(background);
+              }
+
+              ComPtr<WebViewMessageReceivedHandler> messageHandler =
+                  new WebViewMessageReceivedHandler([hwnd](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                    auto* messageContext = GetContext(hwnd);
+                    if (messageContext == nullptr || args == nullptr) {
+                      return S_OK;
+                    }
+
+                    LPWSTR message = nullptr;
+                    if (args->TryGetWebMessageAsString(&message) == S_OK && message != nullptr) {
+                      HandleWebViewMessage(*messageContext, message);
+                      CoTaskMemFree(message);
+                    }
+                    return S_OK;
+                  });
+              controllerContext->webView->add_WebMessageReceived(messageHandler.Get(),
+                                                                  &controllerContext->webMessageReceivedToken);
+
+              controllerContext->webViewReady = true;
+              HideNativeShellControls(*controllerContext, false);
+              ResizeWebView(*controllerContext);
+              controllerContext->webView->NavigateToString(BuildWebViewHtml(*controllerContext).c_str());
+              PublishWebViewState(*controllerContext);
+              return S_OK;
+            });
+
+        environment->CreateCoreWebView2Controller(hwnd, controllerHandler.Get());
+        return S_OK;
+      });
+
+  const auto userDataFolderPath = userDataFolder.wstring();
+  const auto result = createEnvironment(nullptr, userDataFolderPath.c_str(), nullptr, environmentHandler.Get());
+  if (FAILED(result)) {
+    DestroyWebViewHost(context);
+    return false;
+  }
+
+  return true;
+}
+
 void PopulateThreatsList(UiContext& context) {
   ListView_DeleteAllItems(context.threatsList);
   int row = 0;
@@ -1340,7 +3367,7 @@ void ApplyDarkWindowChrome(HWND hwnd) {
 }
 
 void UpdatePageChrome(UiContext& context) {
-  SetWindowTextSafe(context.brandCard, BuildBrandCardText(context.snapshot));
+  SetWindowTextSafe(context.brandSummary, BuildBrandCardText(context.snapshot));
   SetWindowTextSafe(context.titleLabel, PageTitle(context.currentPage));
   SetWindowTextSafe(context.subtitleLabel, PageSubtitle(context.currentPage, context.snapshot));
   SetWindowTextSafe(context.statusBadge, OverallStatusChip(context.snapshot));
@@ -1396,6 +3423,10 @@ HBRUSH ResolveStaticBrush(UiContext& context, HWND control) {
   }
 
   if (control == context.brandCard) {
+    return context.detailsBrush;
+  }
+
+  if (control == context.brandLogo || control == context.brandSummary) {
     return context.detailsBrush;
   }
 
@@ -1458,6 +3489,10 @@ COLORREF ResolveStaticTextColor(UiContext& context, HWND control) {
   }
 
   if (control == context.brandCard) {
+    return DarkTextColor();
+  }
+
+  if (control == context.brandSummary) {
     return DarkTextColor();
   }
 
@@ -1629,6 +3664,11 @@ void DrawOwnerButton(const DRAWITEMSTRUCT* draw, UiContext& context) {
 }
 
 void UpdateActionButtons(UiContext& context) {
+  if (context.webViewReady) {
+    HideNativeShellControls(context, false);
+    return;
+  }
+
   const bool needsServiceStart =
       context.snapshot.serviceState == LocalServiceState::NotInstalled || context.snapshot.serviceState == LocalServiceState::Stopped;
   EnableWindow(context.startServiceButton, needsServiceStart);
@@ -1746,6 +3786,7 @@ void RefreshSnapshot(UiContext& context) {
     }
     UpdateTrayIcon(context);
     EvaluateNotifications(context, refreshedSnapshot);
+    PublishWebViewState(context);
   } catch (const std::exception& error) {
     UpdatePageChrome(context);
     SetWindowTextSafe(context.summaryCard, L"Unable to load local protection state.");
@@ -1759,6 +3800,7 @@ void RefreshSnapshot(UiContext& context) {
     ListView_DeleteAllItems(context.historyList);
     SetWindowTextSafe(context.detailEdit, L"Local protection details could not be loaded.");
     UpdateTrayIcon(context);
+    PublishWebViewState(context);
   }
 }
 
@@ -1770,6 +3812,7 @@ void UpdateScanProgress(UiContext& context, const std::wstring& statusText, cons
   const auto total = std::max<std::uint32_t>(totalTargets, 1);
   SendMessageW(context.progressBar, PBM_SETRANGE32, 0, total);
   SendMessageW(context.progressBar, PBM_SETPOS, std::min(completedTargets, total), 0);
+  PublishWebViewState(context);
 }
 
 void SetScanRunning(UiContext& context, const bool running, const std::wstring& statusText) {
@@ -1787,6 +3830,7 @@ void SetScanRunning(UiContext& context, const bool running, const std::wstring& 
   EnableWindow(context.fullScanButton, !running);
   EnableWindow(context.customScanButton, !running);
   EnableWindow(context.refreshButton, !running);
+  PublishWebViewState(context);
 }
 
 std::optional<std::wstring> PickFolder(HWND owner) {
@@ -1921,6 +3965,7 @@ void SelectPage(UiContext& context, const ClientPage page) {
   UpdatePageChrome(context);
   PopulateHistoryList(context);
   UpdateVisibleList(context);
+  PublishWebViewState(context);
 }
 
 void OpenQuarantineFolder(const UiContext& context) {
@@ -1945,7 +3990,12 @@ void ShowTrayMenu(UiContext& context) {
   POINT cursor{};
   GetCursorPos(&cursor);
   SetForegroundWindow(context.hwnd);
-  TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, cursor.x, cursor.y, 0, context.hwnd, nullptr);
+  const auto command = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
+                                        cursor.x, cursor.y, context.hwnd, nullptr);
+  PostMessageW(context.hwnd, WM_NULL, 0, 0);
+  if (command != 0) {
+    SendMessageW(context.hwnd, WM_COMMAND, command, 0);
+  }
   DestroyMenu(menu);
 }
 
@@ -1956,6 +4006,12 @@ void UpdateListColumnWidths(HWND listView, const std::vector<int>& widths) {
 }
 
 void LayoutControls(UiContext& context) {
+  if (context.webViewReady) {
+    HideNativeShellControls(context, false);
+    ResizeWebView(context);
+    return;
+  }
+
   RECT client{};
   GetClientRect(context.hwnd, &client);
 
@@ -1970,12 +4026,14 @@ void LayoutControls(UiContext& context) {
   const int contentX = railX + railWidth + railGap;
   const int contentWidth = width - contentX - padding;
 
-  const int brandHeight = 92;
+  const int brandHeight = 118;
   const int navButtonHeight = 34;
   const int navGap = 5;
   const int navTop = railY + brandHeight + 16;
 
   MoveWindow(context.brandCard, railX, railY, railWidth, brandHeight, TRUE);
+  MoveWindow(context.brandLogo, (railWidth - 36) / 2, 14, 36, 36, TRUE);
+  MoveWindow(context.brandSummary, 12, 58, railWidth - 24, brandHeight - 66, TRUE);
 
   const int titleHeight = 42;
   const int subtitleHeight = 24;
@@ -2134,6 +4192,302 @@ void PerformQuarantineAction(UiContext& context, const bool restore) {
   RefreshSnapshot(context);
 }
 
+void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
+  const auto pairs = ParseWebMessage(message);
+  const auto action = GetQueryValue(pairs, L"action");
+  if (action.empty()) {
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"navigate") == 0) {
+    const auto page = GetQueryValue(pairs, L"page");
+    if (_wcsicmp(page.c_str(), L"dashboard") == 0) {
+      SelectPage(context, ClientPage::Dashboard);
+    } else if (_wcsicmp(page.c_str(), L"threats") == 0) {
+      SelectPage(context, ClientPage::Threats);
+    } else if (_wcsicmp(page.c_str(), L"quarantine") == 0) {
+      SelectPage(context, ClientPage::Quarantine);
+    } else if (_wcsicmp(page.c_str(), L"scans") == 0) {
+      SelectPage(context, ClientPage::Scans);
+    } else if (_wcsicmp(page.c_str(), L"history") == 0) {
+      SelectPage(context, ClientPage::History);
+    } else if (_wcsicmp(page.c_str(), L"settings") == 0) {
+      SelectPage(context, ClientPage::Settings);
+    }
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"refresh") == 0) {
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"scan") == 0) {
+    const auto preset = GetQueryValue(pairs, L"preset");
+    if (_wcsicmp(preset.c_str(), L"quick") == 0) {
+      RunScanAsync(context.hwnd, context, ScanPreset::Quick, std::nullopt);
+    } else if (_wcsicmp(preset.c_str(), L"full") == 0) {
+      RunScanAsync(context.hwnd, context, ScanPreset::Full, std::nullopt);
+    } else if (_wcsicmp(preset.c_str(), L"folder") == 0) {
+      const auto folder = PickFolder(context.hwnd);
+      if (folder.has_value()) {
+        RunScanAsync(context.hwnd, context, ScanPreset::Folder, std::filesystem::path(*folder));
+      }
+    }
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"startService") == 0) {
+    if (!antivirus::agent::StartAgentService()) {
+      MessageBoxW(context.hwnd, L"Unable to start the protection service from the local client.", kWindowTitle,
+                  MB_OK | MB_ICONWARNING);
+    }
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"openQuarantine") == 0) {
+    SelectPage(context, ClientPage::Quarantine);
+    OpenQuarantineFolder(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"openExclusions") == 0) {
+    context.manageExclusionsMode = true;
+    SelectPage(context, ClientPage::Settings);
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"exclusionsDone") == 0) {
+    context.manageExclusionsMode = false;
+    SelectPage(context, ClientPage::Settings);
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"exclusionsAddFile") == 0) {
+    const auto file = PickFile(context.hwnd);
+    if (!file.has_value()) {
+      return;
+    }
+
+    auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+    bool changed = AppendUniqueExclusion(exclusions, std::filesystem::path(*file));
+    if (!changed) {
+      MessageBoxW(context.hwnd, L"That file is already excluded.", kWindowTitle, MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+
+    const auto commitResult = CommitExclusions(context.hwnd, exclusions);
+    if (commitResult == 0) {
+      MessageBoxW(context.hwnd, L"File exclusion saved and protection was refreshed.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+    } else if (commitResult == 2) {
+      MessageBoxW(context.hwnd,
+                  L"File exclusion was saved, but Fenrir could not restart the protection service automatically.",
+                  kWindowTitle, MB_OK | MB_ICONWARNING);
+    } else {
+      MessageBoxW(context.hwnd, L"Unable to save the selected file exclusion.", kWindowTitle, MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"exclusionsAddFolder") == 0) {
+    const auto folder = PickFolder(context.hwnd);
+    if (!folder.has_value()) {
+      return;
+    }
+
+    auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+    bool changed = AppendUniqueExclusion(exclusions, std::filesystem::path(*folder));
+    if (!changed) {
+      MessageBoxW(context.hwnd, L"That folder is already excluded.", kWindowTitle, MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+
+    const auto commitResult = CommitExclusions(context.hwnd, exclusions);
+    if (commitResult == 0) {
+      MessageBoxW(context.hwnd, L"Folder exclusion saved and protection was refreshed.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+    } else if (commitResult == 2) {
+      MessageBoxW(context.hwnd,
+                  L"Folder exclusion was saved, but Fenrir could not restart the protection service automatically.",
+                  kWindowTitle, MB_OK | MB_ICONWARNING);
+    } else {
+      MessageBoxW(context.hwnd, L"Unable to save the selected folder exclusion.", kWindowTitle,
+                  MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"exclusionsAddProcess") == 0) {
+    const auto pidText = GetQueryValue(pairs, L"pid");
+    std::size_t parsed = 0;
+    DWORD pid = 0;
+    try {
+      pid = static_cast<DWORD>(std::stoul(pidText, &parsed, 10));
+    } catch (...) {
+      return;
+    }
+    if (pid == 0 || parsed == 0) {
+      return;
+    }
+
+    auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+    const auto processPaths = ResolveProcessExclusionPaths(static_cast<DWORD>(pid));
+    bool changed = false;
+    for (const auto& path : processPaths) {
+      changed = AppendUniqueExclusion(exclusions, path) || changed;
+    }
+
+    if (!changed) {
+      MessageBoxW(context.hwnd, L"No eligible process path could be added from the current process list.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+
+    const auto commitResult = CommitExclusions(context.hwnd, exclusions);
+    if (commitResult == 0) {
+      MessageBoxW(context.hwnd, L"Process exclusion saved and protection was refreshed.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+    } else if (commitResult == 2) {
+      MessageBoxW(context.hwnd,
+                  L"Process exclusion was saved, but Fenrir could not restart the protection service automatically.",
+                  kWindowTitle, MB_OK | MB_ICONWARNING);
+    } else {
+      MessageBoxW(context.hwnd, L"Unable to save the selected process exclusion.", kWindowTitle,
+                  MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"exclusionsAddApplication") == 0) {
+    const auto softwareId = GetQueryValue(pairs, L"software-id");
+    if (softwareId.empty()) {
+      return;
+    }
+
+    auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+    const auto softwarePaths = ResolveSoftwareExclusionPaths(softwareId);
+    bool changed = false;
+    for (const auto& path : softwarePaths) {
+      changed = AppendUniqueExclusion(exclusions, path) || changed;
+    }
+
+    if (!changed) {
+      MessageBoxW(context.hwnd, L"No eligible application path could be added from the installed software list.",
+                  kWindowTitle, MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+
+    const auto commitResult = CommitExclusions(context.hwnd, exclusions);
+    if (commitResult == 0) {
+      MessageBoxW(context.hwnd, L"Application exclusion saved and protection was refreshed.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+    } else if (commitResult == 2) {
+      MessageBoxW(context.hwnd,
+                  L"Application exclusion was saved, but Fenrir could not restart the protection service automatically.",
+                  kWindowTitle, MB_OK | MB_ICONWARNING);
+    } else {
+      MessageBoxW(context.hwnd, L"Unable to save the selected application exclusion.", kWindowTitle,
+                  MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"exclusionsRemove") == 0) {
+    const auto pathText = GetQueryValue(pairs, L"path");
+    if (pathText.empty()) {
+      return;
+    }
+
+    auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+    if (!RemoveExclusionPath(exclusions, std::filesystem::path(pathText))) {
+      MessageBoxW(context.hwnd, L"That exclusion was not found in the current list.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+
+    const auto commitResult = CommitExclusions(context.hwnd, exclusions);
+    if (commitResult == 0) {
+      MessageBoxW(context.hwnd, L"Exclusion removed and protection was refreshed.", kWindowTitle,
+                  MB_OK | MB_ICONINFORMATION);
+    } else if (commitResult == 2) {
+      MessageBoxW(context.hwnd,
+                  L"Exclusion was removed, but Fenrir could not restart the protection service automatically.",
+                  kWindowTitle, MB_OK | MB_ICONWARNING);
+    } else {
+      MessageBoxW(context.hwnd, L"Unable to remove the selected exclusion.", kWindowTitle, MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"quarantineRestore") == 0) {
+    const auto id = GetQueryValue(pairs, L"id");
+    if (id.empty()) {
+      return;
+    }
+
+    const auto result = RestoreQuarantinedItem(context.config, id);
+    if (!result.success) {
+      const auto messageText = result.errorMessage.empty() ? L"Unable to restore the selected item."
+                                                           : result.errorMessage.c_str();
+      MessageBoxW(context.hwnd, messageText, kWindowTitle, MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"quarantineDelete") == 0) {
+    const auto id = GetQueryValue(pairs, L"id");
+    if (id.empty()) {
+      return;
+    }
+
+    const auto result = DeleteQuarantinedItem(context.config, id);
+    if (!result.success) {
+      const auto messageText = result.errorMessage.empty() ? L"Unable to delete the selected item."
+                                                           : result.errorMessage.c_str();
+      MessageBoxW(context.hwnd, messageText, kWindowTitle, MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+}
+
 void InitializeListView(HWND listView) {
   SendMessageW(listView, CCM_SETUNICODEFORMAT, TRUE, 0);
   ListView_SetExtendedListViewStyle(listView, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
@@ -2174,18 +4528,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
   switch (message) {
     case kTrayMessage: {
       auto* context = GetContext(hwnd);
-      if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK || lParam == NIN_BALLOONUSERCLICK ||
-          lParam == NIN_SELECT || lParam == NIN_KEYSELECT) {
+      if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+        if (context != nullptr) {
+          ShowTrayMenu(*context);
+        }
+        return 0;
+      }
+      if (lParam == WM_LBUTTONDBLCLK || lParam == NIN_BALLOONUSERCLICK || lParam == NIN_SELECT ||
+          lParam == NIN_KEYSELECT) {
         RestoreFromTray(hwnd);
         if (context != nullptr) {
           SelectPage(*context, ClientPage::Dashboard);
           LayoutControls(*context);
-        }
-        return 0;
-      }
-      if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
-        if (context != nullptr) {
-          ShowTrayMenu(*context);
         }
         return 0;
       }
@@ -2291,6 +4645,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(context->iconNeutralLarge));
 
       context->brandCard = CreateCard(hwnd, IDC_BRAND_CARD);
+      context->brandLogo = CreateWindowW(L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE,
+                                         0, 0, 0, 0, context->brandCard, nullptr, nullptr, nullptr);
+      context->brandSummary = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+                                            0, 0, 0, 0, context->brandCard, nullptr, nullptr, nullptr);
       context->titleLabel = CreateWindowW(L"STATIC", kWindowTitle, WS_CHILD | WS_VISIBLE,
                                           0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_TITLE), nullptr, nullptr);
       context->subtitleLabel = CreateWindowW(L"STATIC", BuildSubtitleText().c_str(), WS_CHILD | WS_VISIBLE,
@@ -2352,7 +4710,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                                             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_DELETE), nullptr, nullptr);
 
       const std::vector<HWND> bodyControls = {
-          context->brandCard,         context->subtitleLabel,    context->statusBadge,      context->primarySectionTitle,
+          context->brandCard,         context->brandLogo,       context->brandSummary,     context->subtitleLabel,
+          context->statusBadge,        context->primarySectionTitle,
           context->secondarySectionTitle, context->summaryCard,  context->detailsCard,      context->metricThreats,
           context->metricQuarantine,  context->metricService,    context->metricSync,       context->navDashboardButton,
           context->navThreatsButton,  context->navQuarantineButton, context->navScansButton,
@@ -2364,6 +4723,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       }
       SendMessageW(context->titleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->titleFont), TRUE);
       SendMessageW(context->subtitleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->headingFont), TRUE);
+      SendMessageW(context->brandSummary, WM_SETFONT, reinterpret_cast<WPARAM>(context->bodyFont), TRUE);
+      SendMessageW(context->brandLogo, STM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(context->iconNeutralLarge));
 
       InitializeListView(context->threatsList);
       InitializeListView(context->quarantineList);
@@ -2395,14 +4756,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
       SetScanRunning(*context, false, L"Ready.");
       RefreshSnapshot(*context);
-      if (context->manageExclusionsMode) {
-        SelectPage(*context, ClientPage::Settings);
+      SelectPage(*context, context->manageExclusionsMode ? ClientPage::Settings : ClientPage::Dashboard);
+      const auto webViewStarted = InitializeWebViewHost(*context);
+      if (context->manageExclusionsMode && !webViewStarted) {
         SendMessageW(context->detailEdit, EM_SETREADONLY, FALSE, 0);
         SetWindowTextSafe(context->secondarySectionTitle, L"Exclusions editor");
         SetWindowTextSafe(context->scanStatusLabel, BuildExclusionEditorSummary());
         SetWindowTextSafe(context->detailEdit, BuildExclusionsEditorText());
-      } else {
-        SelectPage(*context, ClientPage::Dashboard);
       }
       ShowWindow(context->navServiceButton, SW_HIDE);
       LayoutControls(*context);
@@ -2414,7 +4774,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
     case WM_SIZE: {
       if (auto* context = GetContext(hwnd)) {
-        LayoutControls(*context);
+        if (context->webViewReady) {
+          ResizeWebView(*context);
+        } else {
+          LayoutControls(*context);
+        }
       }
       return 0;
     }
@@ -2616,6 +4980,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (context->trayAdded) {
           Shell_NotifyIconW(NIM_DELETE, &context->trayIcon);
         }
+        DestroyWebViewHost(*context);
         if (context->titleFont != nullptr) {
           DeleteObject(context->titleFont);
         }
@@ -2653,6 +5018,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   InitCommonControlsEx(&controls);
   OleInitialize(nullptr);
   const auto launchOptions = ParseLaunchOptions();
+
+  if (launchOptions.applyExclusionsMode) {
+    const auto exitCode = ApplyExclusionsFromLaunchOptions(launchOptions);
+    OleUninitialize();
+    return exitCode;
+  }
 
   const wchar_t* mutexName =
       launchOptions.manageExclusionsMode ? L"Local\\FenrirEndpointClientSingleton.ManageExclusions" : kInstanceMutexName;

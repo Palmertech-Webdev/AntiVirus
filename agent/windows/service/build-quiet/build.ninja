@@ -50,8 +50,6 @@ build CMakeFiles/antivirus-sqlite3.dir/C_/Users/matt_admin/Documents/GitHub/Anti
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-sqlite3.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-sqlite3.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\third_party\sqlite\sqlite-amalgamation-3510300
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-sqlite3.dir\antivirus-sqlite3.pdb
-  TARGET_PDB = libantivirus-sqlite3.pdb
 
 
 # =============================================================================
@@ -65,9 +63,8 @@ build libantivirus-sqlite3.a: C_STATIC_LIBRARY_LINKER__antivirus-sqlite3_ CMakeF
   OBJECT_DIR = CMakeFiles\antivirus-sqlite3.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-sqlite3.dir\antivirus-sqlite3.pdb
   TARGET_FILE = libantivirus-sqlite3.a
-  TARGET_PDB = libantivirus-sqlite3.pdb
+  TARGET_PDB = antivirus-sqlite3.a.dbg
 
 # =============================================================================
 # Object build statements for STATIC_LIBRARY target antivirus-agent-core
@@ -84,8 +81,6 @@ build CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/A
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\sensor\etw\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/sensor/wfp/src/NetworkIsolationManager.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/sensor/wfp/src/NetworkIsolationManager.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\sensor\wfp\src\NetworkIsolationManager.cpp.obj.d
@@ -93,8 +88,6 @@ build CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/A
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\sensor\wfp\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/AmsiEvidenceRecorder.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/AmsiEvidenceRecorder.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\AmsiEvidenceRecorder.cpp.obj.d
@@ -102,8 +95,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/AmsiEvidenceRecorder.cpp.obj: CXX_
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/AmsiScanEngine.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/AmsiScanEngine.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\AmsiScanEngine.cpp.obj.d
@@ -111,8 +102,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/AmsiScanEngine.cpp.obj: CXX_COMPIL
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/AgentConfig.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/AgentConfig.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\AgentConfig.cpp.obj.d
@@ -120,8 +109,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/AgentConfig.cpp.obj: CXX_COMPILER_
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/AgentService.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/AgentService.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\AgentService.cpp.obj.d
@@ -129,8 +116,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/AgentService.cpp.obj: CXX_COMPILER
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/CommandJournalStore.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/CommandJournalStore.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\CommandJournalStore.cpp.obj.d
@@ -138,8 +123,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/CommandJournalStore.cpp.obj: CXX_C
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ControlPlaneClient.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ControlPlaneClient.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ControlPlaneClient.cpp.obj.d
@@ -147,8 +130,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ControlPlaneClient.cpp.obj: CXX_CO
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/CryptoUtils.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/CryptoUtils.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\CryptoUtils.cpp.obj.d
@@ -156,8 +137,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/CryptoUtils.cpp.obj: CXX_COMPILER_
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/DeviceInventoryCollector.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/DeviceInventoryCollector.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\DeviceInventoryCollector.cpp.obj.d
@@ -165,8 +144,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/DeviceInventoryCollector.cpp.obj: 
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/EndpointClient.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/EndpointClient.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\EndpointClient.cpp.obj.d
@@ -174,8 +151,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/EndpointClient.cpp.obj: CXX_COMPIL
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/EvidenceRecorder.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/EvidenceRecorder.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\EvidenceRecorder.cpp.obj.d
@@ -183,8 +158,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/EvidenceRecorder.cpp.obj: CXX_COMP
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/FileDeltaTracker.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/FileDeltaTracker.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\FileDeltaTracker.cpp.obj.d
@@ -192,8 +165,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/FileDeltaTracker.cpp.obj: CXX_COMP
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/FileInventory.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/FileInventory.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\FileInventory.cpp.obj.d
@@ -201,8 +172,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/FileInventory.cpp.obj: CXX_COMPILE
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/FileSnapshotCollector.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/FileSnapshotCollector.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\FileSnapshotCollector.cpp.obj.d
@@ -210,8 +179,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/FileSnapshotCollector.cpp.obj: CXX
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/HardeningManager.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/HardeningManager.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\HardeningManager.cpp.obj.d
@@ -219,8 +186,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/HardeningManager.cpp.obj: CXX_COMP
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/LocalScanRunner.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/LocalScanRunner.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\LocalScanRunner.cpp.obj.d
@@ -228,8 +193,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/LocalScanRunner.cpp.obj: CXX_COMPI
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/LocalStateStore.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/LocalStateStore.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\LocalStateStore.cpp.obj.d
@@ -237,8 +200,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/LocalStateStore.cpp.obj: CXX_COMPI
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ProcessDeltaTracker.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ProcessDeltaTracker.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ProcessDeltaTracker.cpp.obj.d
@@ -246,8 +207,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ProcessDeltaTracker.cpp.obj: CXX_C
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ProcessInventory.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ProcessInventory.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ProcessInventory.cpp.obj.d
@@ -255,8 +214,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ProcessInventory.cpp.obj: CXX_COMP
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ProcessSnapshotCollector.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ProcessSnapshotCollector.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ProcessSnapshotCollector.cpp.obj.d
@@ -264,8 +221,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ProcessSnapshotCollector.cpp.obj: 
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ReputationLookup.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ReputationLookup.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ReputationLookup.cpp.obj.d
@@ -273,8 +228,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ReputationLookup.cpp.obj: CXX_COMP
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/QuarantineStore.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/QuarantineStore.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\QuarantineStore.cpp.obj.d
@@ -282,8 +235,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/QuarantineStore.cpp.obj: CXX_COMPI
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/RealtimeProtectionBroker.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/RealtimeProtectionBroker.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\RealtimeProtectionBroker.cpp.obj.d
@@ -291,8 +242,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/RealtimeProtectionBroker.cpp.obj: 
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/RemediationEngine.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/RemediationEngine.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\RemediationEngine.cpp.obj.d
@@ -300,8 +249,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/RemediationEngine.cpp.obj: CXX_COM
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/RuntimeDatabase.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/RuntimeDatabase.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\RuntimeDatabase.cpp.obj.d
@@ -309,8 +256,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/RuntimeDatabase.cpp.obj: CXX_COMPI
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ScanEngine.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ScanEngine.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ScanEngine.cpp.obj.d
@@ -318,8 +263,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ScanEngine.cpp.obj: CXX_COMPILER__
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/SelfTestRunner.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/SelfTestRunner.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\SelfTestRunner.cpp.obj.d
@@ -327,8 +270,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/SelfTestRunner.cpp.obj: CXX_COMPIL
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/StringUtils.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/StringUtils.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\StringUtils.cpp.obj.d
@@ -336,8 +277,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/StringUtils.cpp.obj: CXX_COMPILER_
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ServiceInventory.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ServiceInventory.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ServiceInventory.cpp.obj.d
@@ -345,8 +284,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ServiceInventory.cpp.obj: CXX_COMP
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/ServiceSnapshotCollector.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/ServiceSnapshotCollector.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\ServiceSnapshotCollector.cpp.obj.d
@@ -354,8 +291,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/ServiceSnapshotCollector.cpp.obj: 
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/TelemetryQueueStore.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/TelemetryQueueStore.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\TelemetryQueueStore.cpp.obj.d
@@ -363,8 +298,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/TelemetryQueueStore.cpp.obj: CXX_C
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/UpdaterService.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/UpdaterService.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\UpdaterService.cpp.obj.d
@@ -372,8 +305,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/UpdaterService.cpp.obj: CXX_COMPIL
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 build CMakeFiles/antivirus-agent-core.dir/src/WscCoexistenceManager.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/WscCoexistenceManager.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\WscCoexistenceManager.cpp.obj.d
@@ -381,8 +312,6 @@ build CMakeFiles/antivirus-agent-core.dir/src/WscCoexistenceManager.cpp.obj: CXX
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
-  TARGET_PDB = libantivirus-agent-core.pdb
 
 
 # =============================================================================
@@ -396,9 +325,8 @@ build libantivirus-agent-core.a: CXX_STATIC_LIBRARY_LINKER__antivirus-agent-core
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-core.dir\antivirus-agent-core.pdb
   TARGET_FILE = libantivirus-agent-core.a
-  TARGET_PDB = libantivirus-agent-core.pdb
+  TARGET_PDB = antivirus-agent-core.a.dbg
 
 # =============================================================================
 # Object build statements for STATIC_LIBRARY target antivirus-amsi-provider-core
@@ -415,8 +343,6 @@ build CMakeFiles/antivirus-amsi-provider-core.dir/C_/Users/matt_admin/Documents/
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../provider/amsi/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-amsi-provider-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-amsi-provider-core.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\provider\amsi\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-amsi-provider-core.dir\antivirus-amsi-provider-core.pdb
-  TARGET_PDB = libantivirus-amsi-provider-core.pdb
 
 
 # =============================================================================
@@ -430,9 +356,8 @@ build libantivirus-amsi-provider-core.a: CXX_STATIC_LIBRARY_LINKER__antivirus-am
   OBJECT_DIR = CMakeFiles\antivirus-amsi-provider-core.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-amsi-provider-core.dir\antivirus-amsi-provider-core.pdb
   TARGET_FILE = libantivirus-amsi-provider-core.a
-  TARGET_PDB = libantivirus-amsi-provider-core.pdb
+  TARGET_PDB = antivirus-amsi-provider-core.a.dbg
 
 # =============================================================================
 # Object build statements for SHARED_LIBRARY target antivirus-amsi-provider
@@ -450,8 +375,6 @@ build CMakeFiles/antivirus-amsi-provider.dir/C_/Users/matt_admin/Documents/GitHu
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../provider/amsi/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-amsi-provider.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-amsi-provider.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\provider\amsi\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-amsi-provider.dir\
-  TARGET_PDB = fenrir-amsi-provider.pdb
 
 
 # =============================================================================
@@ -468,10 +391,9 @@ build fenrir-amsi-provider.dll libfenrir-amsi-provider.dll.a: CXX_SHARED_LIBRARY
   POST_BUILD = cd .
   PRE_LINK = cd .
   RESTAT = 1
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-amsi-provider.dir\
   TARGET_FILE = fenrir-amsi-provider.dll
   TARGET_IMPLIB = libfenrir-amsi-provider.dll.a
-  TARGET_PDB = fenrir-amsi-provider.pdb
+  TARGET_PDB = fenrir-amsi-provider.dll.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-agent-service
@@ -488,8 +410,6 @@ build CMakeFiles/antivirus-agent-service.dir/src/ServiceMain.cpp.obj: CXX_COMPIL
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-agent-service.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-service.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-service.dir\
-  TARGET_PDB = fenrir-agent-service.pdb
 
 
 # =============================================================================
@@ -505,10 +425,9 @@ build fenrir-agent-service.exe: CXX_EXECUTABLE_LINKER__antivirus-agent-service_ 
   OBJECT_DIR = CMakeFiles\antivirus-agent-service.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-agent-service.dir\
   TARGET_FILE = fenrir-agent-service.exe
   TARGET_IMPLIB = libfenrir-agent-service.dll.a
-  TARGET_PDB = fenrir-agent-service.pdb
+  TARGET_PDB = fenrir-agent-service.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-endpoint-client
@@ -522,21 +441,17 @@ build cmake_object_order_depends_target_antivirus-endpoint-client: phony || cmak
 build CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/endpointui.rc.obj: RC_COMPILER__antivirus-endpoint-client_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/endpointui.rc || cmake_object_order_depends_target_antivirus-endpoint-client
   DEFINES = -DUNICODE -D_UNICODE
   DEP_FILE = CMakeFiles\antivirus-endpoint-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\endpointui\src\endpointui.rc.obj.d
-  INCLUDES = -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
+  INCLUDES = -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../third_party/webview2/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-endpoint-client.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-endpoint-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\endpointui\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-endpoint-client.dir\
-  TARGET_PDB = fenrir-endpoint-client.pdb
 
 build CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/EndpointClientMain.cpp.obj: CXX_COMPILER__antivirus-endpoint-client_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/EndpointClientMain.cpp || cmake_object_order_depends_target_antivirus-endpoint-client
   DEFINES = -DUNICODE -D_UNICODE
   DEP_FILE = CMakeFiles\antivirus-endpoint-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\endpointui\src\EndpointClientMain.cpp.obj.d
   FLAGS = -std=gnu++20
-  INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
+  INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../third_party/webview2/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-endpoint-client.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-endpoint-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\endpointui\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-endpoint-client.dir\
-  TARGET_PDB = fenrir-endpoint-client.pdb
 
 
 # =============================================================================
@@ -550,12 +465,11 @@ build fenrir-endpoint-client.exe: CXX_EXECUTABLE_LINKER__antivirus-endpoint-clie
   LINK_FLAGS = -mwindows  -municode -static-libgcc -static-libstdc++
   LINK_LIBRARIES = libantivirus-agent-core.a  -lcomctl32  -lole32  -luxtheme  -ldwmapi  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lole32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-endpoint-client.dir
-  POST_BUILD = cd .
+  POST_BUILD = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\service\build-quiet && C:\Strawberry\c\bin\cmake.exe -E copy_if_different C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../third_party/webview2/runtime/x64/WebView2Loader.dll C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/WebView2Loader.dll"
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-endpoint-client.dir\
   TARGET_FILE = fenrir-endpoint-client.exe
   TARGET_IMPLIB = libfenrir-endpoint-client.dll.a
-  TARGET_PDB = fenrir-endpoint-client.pdb
+  TARGET_PDB = fenrir-endpoint-client.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-scannercli
@@ -572,8 +486,6 @@ build CMakeFiles/antivirus-scannercli.dir/C_/Users/matt_admin/Documents/GitHub/A
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-scannercli.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-scannercli.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\scannercli\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-scannercli.dir\
-  TARGET_PDB = fenrir-scannercli.pdb
 
 
 # =============================================================================
@@ -589,10 +501,9 @@ build fenrir-scannercli.exe: CXX_EXECUTABLE_LINKER__antivirus-scannercli_ CMakeF
   OBJECT_DIR = CMakeFiles\antivirus-scannercli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-scannercli.dir\
   TARGET_FILE = fenrir-scannercli.exe
   TARGET_IMPLIB = libfenrir-scannercli.dll.a
-  TARGET_PDB = fenrir-scannercli.pdb
+  TARGET_PDB = fenrir-scannercli.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-amsitestcli
@@ -609,8 +520,6 @@ build CMakeFiles/antivirus-amsitestcli.dir/C_/Users/matt_admin/Documents/GitHub/
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../provider/amsi/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-amsitestcli.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-amsitestcli.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\amsitestcli\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-amsitestcli.dir\
-  TARGET_PDB = fenrir-amsitestcli.pdb
 
 
 # =============================================================================
@@ -626,10 +535,9 @@ build fenrir-amsitestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-amsitestcli_ CMak
   OBJECT_DIR = CMakeFiles\antivirus-amsitestcli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-amsitestcli.dir\
   TARGET_FILE = fenrir-amsitestcli.exe
   TARGET_IMPLIB = libfenrir-amsitestcli.dll.a
-  TARGET_PDB = fenrir-amsitestcli.pdb
+  TARGET_PDB = fenrir-amsitestcli.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-etwtestcli
@@ -646,8 +554,6 @@ build CMakeFiles/antivirus-etwtestcli.dir/C_/Users/matt_admin/Documents/GitHub/A
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-etwtestcli.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-etwtestcli.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\etwtestcli\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-etwtestcli.dir\
-  TARGET_PDB = fenrir-etwtestcli.pdb
 
 
 # =============================================================================
@@ -663,10 +569,9 @@ build fenrir-etwtestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-etwtestcli_ CMakeF
   OBJECT_DIR = CMakeFiles\antivirus-etwtestcli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-etwtestcli.dir\
   TARGET_FILE = fenrir-etwtestcli.exe
   TARGET_IMPLIB = libfenrir-etwtestcli.dll.a
-  TARGET_PDB = fenrir-etwtestcli.pdb
+  TARGET_PDB = fenrir-etwtestcli.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-wfptestcli
@@ -683,8 +588,6 @@ build CMakeFiles/antivirus-wfptestcli.dir/C_/Users/matt_admin/Documents/GitHub/A
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
   OBJECT_DIR = CMakeFiles\antivirus-wfptestcli.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-wfptestcli.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\wfptestcli\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-wfptestcli.dir\
-  TARGET_PDB = fenrir-wfptestcli.pdb
 
 
 # =============================================================================
@@ -700,10 +603,9 @@ build fenrir-wfptestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-wfptestcli_ CMakeF
   OBJECT_DIR = CMakeFiles\antivirus-wfptestcli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-wfptestcli.dir\
   TARGET_FILE = fenrir-wfptestcli.exe
   TARGET_IMPLIB = libfenrir-wfptestcli.dll.a
-  TARGET_PDB = fenrir-wfptestcli.pdb
+  TARGET_PDB = fenrir-wfptestcli.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-setup
@@ -720,8 +622,6 @@ build CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVi
   INCLUDES = -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../installer/native/include
   OBJECT_DIR = CMakeFiles\antivirus-setup.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-setup.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\installer\native\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-setup.dir\
-  TARGET_PDB = FenrirSetup.pdb
 
 build CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/SetupMain.cpp.obj: CXX_COMPILER__antivirus-setup_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/SetupMain.cpp || cmake_object_order_depends_target_antivirus-setup
   DEFINES = -DUNICODE -D_UNICODE
@@ -730,8 +630,6 @@ build CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVi
   INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../installer/native/include
   OBJECT_DIR = CMakeFiles\antivirus-setup.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-setup.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\installer\native\src
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-setup.dir\
-  TARGET_PDB = FenrirSetup.pdb
 
 build CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj: RC_COMPILER__antivirus-setup_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/installer-generated/SetupPayload.rc || cmake_object_order_depends_target_antivirus-setup
   DEFINES = -DUNICODE -D_UNICODE
@@ -739,8 +637,6 @@ build CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj: RC
   INCLUDES = -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../installer/native/include
   OBJECT_DIR = CMakeFiles\antivirus-setup.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-setup.dir\installer-generated
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-setup.dir\
-  TARGET_PDB = FenrirSetup.pdb
 
 
 # =============================================================================
@@ -756,10 +652,9 @@ build FenrirSetup.exe: CXX_EXECUTABLE_LINKER__antivirus-setup_ CMakeFiles/antivi
   OBJECT_DIR = CMakeFiles\antivirus-setup.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\antivirus-setup.dir\
   TARGET_FILE = FenrirSetup.exe
   TARGET_IMPLIB = libFenrirSetup.dll.a
-  TARGET_PDB = FenrirSetup.pdb
+  TARGET_PDB = FenrirSetup.exe.dbg
 
 
 #############################################
@@ -826,14 +721,14 @@ build all: phony libantivirus-sqlite3.a libantivirus-agent-core.a libantivirus-a
 #############################################
 # Re-run CMake if any of its inputs changed.
 
-build build.ninja: RERUN_CMAKE | C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCCompiler.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCCompilerABI.c C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXCompiler.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXCompilerABI.cpp C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCommonLanguageInclude.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCompilerIdDetection.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCXXCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompileFeatures.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompilerABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompilerId.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineRCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineSystem.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeFindBinUtils.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeGenericSystem.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeInitializeConfigs.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeLanguageInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeNinjaFindMake.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeParseImplicitIncludeInfo.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeParseImplicitLinkInfo.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeParseLibraryArchitecture.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeRCCompiler.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeRCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystem.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInitialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestCXXCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestCompilerCommon.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestRCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/ADSP-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/ARMCC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/ARMClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/AppleClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Borland-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Bruce-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Clang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Clang-DetermineCompilerInternal.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Compaq-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Cray-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/CrayClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Embarcadero-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Fujitsu-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GHS-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-FindBinUtils.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/HP-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/HP-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IAR-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMCPP-C-DetermineVersionInternal.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMClang-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Intel-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/LCC-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/MSVC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/NVHPC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/NVIDIA-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/OrangeC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/PGI-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/PathScale-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SCO-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SDCC-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SunPro-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/TI-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/TIClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Tasking-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/TinyCC-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/VisualAge-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Watcom-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XL-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XL-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XLClang-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/zOS-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Internal/CMakeDetermineLinkerId.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Internal/FeatureTesting.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-Determine-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-Initialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-windres.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/WindowsPaths.cmake C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/CMakeLists.txt CMakeCache.txt CMakeFiles/3.29.2/CMakeCCompiler.cmake CMakeFiles/3.29.2/CMakeCXXCompiler.cmake CMakeFiles/3.29.2/CMakeRCCompiler.cmake CMakeFiles/3.29.2/CMakeSystem.cmake
+build build.ninja: RERUN_CMAKE | C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCommonLanguageInclude.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeGenericSystem.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeInitializeConfigs.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeLanguageInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeRCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInitialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-Initialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-windres.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/WindowsPaths.cmake C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/CMakeLists.txt CMakeCache.txt CMakeFiles/3.29.2/CMakeCCompiler.cmake CMakeFiles/3.29.2/CMakeCXXCompiler.cmake CMakeFiles/3.29.2/CMakeRCCompiler.cmake CMakeFiles/3.29.2/CMakeSystem.cmake
   pool = console
 
 
 #############################################
 # A missing CMake input file is not an error.
 
-build C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCCompiler.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCCompilerABI.c C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXCompiler.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXCompilerABI.cpp C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCommonLanguageInclude.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCompilerIdDetection.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCXXCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompileFeatures.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompilerABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineCompilerId.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineRCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeDetermineSystem.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeFindBinUtils.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeGenericSystem.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeInitializeConfigs.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeLanguageInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeNinjaFindMake.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeParseImplicitIncludeInfo.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeParseImplicitLinkInfo.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeParseLibraryArchitecture.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeRCCompiler.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeRCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystem.cmake.in C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInitialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestCXXCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestCompilerCommon.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeTestRCCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/ADSP-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/ARMCC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/ARMClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/AppleClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Borland-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Bruce-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Clang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Clang-DetermineCompilerInternal.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Compaq-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Cray-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/CrayClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Embarcadero-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Fujitsu-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GHS-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-FindBinUtils.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/HP-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/HP-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IAR-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMCPP-C-DetermineVersionInternal.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMClang-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Intel-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/LCC-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/MSVC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/NVHPC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/NVIDIA-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/OrangeC-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/PGI-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/PathScale-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SCO-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SDCC-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SunPro-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/TI-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/TIClang-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Tasking-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/TinyCC-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/VisualAge-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/Watcom-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XL-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XL-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XLClang-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/zOS-C-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Internal/CMakeDetermineLinkerId.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Internal/FeatureTesting.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-Determine-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-Initialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-windres.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/WindowsPaths.cmake C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/CMakeLists.txt CMakeCache.txt CMakeFiles/3.29.2/CMakeCCompiler.cmake CMakeFiles/3.29.2/CMakeCXXCompiler.cmake CMakeFiles/3.29.2/CMakeRCCompiler.cmake CMakeFiles/3.29.2/CMakeSystem.cmake: phony
+build C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCXXInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeCommonLanguageInclude.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeGenericSystem.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeInitializeConfigs.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeLanguageInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeRCInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInformation.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/CMakeSystemSpecificInitialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Compiler/GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-C.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX-ABI.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU-CXX.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-GNU.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-Initialize.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows-windres.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/Windows.cmake C$:/Strawberry/c/share/cmake-3.29/Modules/Platform/WindowsPaths.cmake C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/CMakeLists.txt CMakeCache.txt CMakeFiles/3.29.2/CMakeCCompiler.cmake CMakeFiles/3.29.2/CMakeCXXCompiler.cmake CMakeFiles/3.29.2/CMakeRCCompiler.cmake CMakeFiles/3.29.2/CMakeSystem.cmake: phony
 
 
 #############################################

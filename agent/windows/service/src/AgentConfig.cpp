@@ -387,8 +387,6 @@ std::filesystem::path ResolveRuntimePath(const std::filesystem::path& configured
   return GetModuleDirectory(moduleHandle) / configuredPath;
 }
 
-}  // namespace
-
 AgentConfig LoadAgentConfig() {
   return LoadAgentConfigForModule(nullptr);
 }

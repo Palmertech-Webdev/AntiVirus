@@ -105,12 +105,22 @@ add_executable(antivirus-endpoint-client WIN32
   ../tools/endpointui/src/EndpointClientMain.cpp
 )
 
-target_include_directories(antivirus-endpoint-client PRIVATE include)
+target_include_directories(antivirus-endpoint-client PRIVATE include ../third_party/webview2/include)
 target_link_libraries(antivirus-endpoint-client PRIVATE antivirus-agent-core comctl32 ole32 uxtheme dwmapi)
 target_compile_definitions(antivirus-endpoint-client PRIVATE UNICODE _UNICODE)
 target_link_options(antivirus-endpoint-client PRIVATE -municode)
 set_target_properties(antivirus-endpoint-client PROPERTIES OUTPUT_NAME "fenrir-endpoint-client")
 antivirus_apply_portable_runtime(antivirus-endpoint-client)
+
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/webview2/runtime/x64/WebView2Loader.dll" WEBVIEW2_LOADER_DLL)
+if(NOT EXISTS "${WEBVIEW2_LOADER_DLL}")
+  message(FATAL_ERROR "Could not locate WebView2Loader.dll in the vendored WebView2 runtime.")
+endif()
+add_custom_command(TARGET antivirus-endpoint-client POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${WEBVIEW2_LOADER_DLL}"
+          "$<TARGET_FILE_DIR:antivirus-endpoint-client>/WebView2Loader.dll"
+)
 
 add_executable(antivirus-scannercli
   ../tools/scannercli/src/ScannerCliMain.cpp
@@ -181,6 +191,7 @@ endif()
 file(TO_CMAKE_PATH "${INSTALLER_NATIVE_DIR}/include/SetupResourceIds.h" SETUP_RESOURCE_HEADER)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-agent-service.exe" SETUP_SERVICE_EXE)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-endpoint-client.exe" SETUP_ENDPOINT_CLIENT_EXE)
+file(TO_CMAKE_PATH "${WEBVIEW2_LOADER_DLL}" SETUP_WEBVIEW2_LOADER_DLL)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-amsi-provider.dll" SETUP_AMSI_PROVIDER_DLL)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-scannercli.exe" SETUP_SCANNERCLI_EXE)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-amsitestcli.exe" SETUP_AMSITESTCLI_EXE)
@@ -193,6 +204,7 @@ file(GENERATE OUTPUT ${INSTALLER_GENERATED_DIR}/SetupPayload.rc CONTENT
 "#include \"${SETUP_RESOURCE_HEADER}\"\n\
 IDR_PAYLOAD_SERVICE RCDATA \"${SETUP_SERVICE_EXE}\"\n\
 IDR_PAYLOAD_ENDPOINT_CLIENT RCDATA \"${SETUP_ENDPOINT_CLIENT_EXE}\"\n\
+IDR_PAYLOAD_WEBVIEW2_LOADER RCDATA \"${SETUP_WEBVIEW2_LOADER_DLL}\"\n\
 IDR_PAYLOAD_AMSI_PROVIDER RCDATA \"${SETUP_AMSI_PROVIDER_DLL}\"\n\
 IDR_PAYLOAD_SCANNERCLI RCDATA \"${SETUP_SCANNERCLI_EXE}\"\n\
 IDR_PAYLOAD_AMSITESTCLI RCDATA \"${SETUP_AMSITESTCLI_EXE}\"\n\
