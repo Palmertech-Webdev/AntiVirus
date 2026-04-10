@@ -120,6 +120,7 @@ struct ScanProgressPayload {
 
 struct LaunchOptions {
   bool backgroundMode{false};
+  bool manageExclusionsMode{false};
 };
 
 HANDLE g_instanceMutex = nullptr;
@@ -188,6 +189,7 @@ struct UiContext {
   bool trayAdded{false};
   bool allowExit{false};
   bool backgroundMode{false};
+  bool manageExclusionsMode{false};
   bool snapshotPrimed{false};
   std::size_t lastObservedThreatCount{0};
   LocalServiceState lastObservedServiceState{LocalServiceState::Unknown};
@@ -238,6 +240,8 @@ LaunchOptions ParseLaunchOptions() {
 
   options.backgroundMode =
       HasSwitch(arguments, L"--background") || HasSwitch(arguments, L"--tray") || HasSwitch(arguments, L"/background");
+  options.manageExclusionsMode = HasSwitch(arguments, L"--manage-exclusions") ||
+                                 HasSwitch(arguments, L"/manage-exclusions") || HasSwitch(arguments, L"--exclusions");
   return options;
 }
 
@@ -247,6 +251,97 @@ bool IsWindowInteractive(const UiContext& context) {
 
 bool HasSelectedItem(HWND listView) {
   return listView != nullptr && ListView_GetNextItem(listView, -1, LVNI_SELECTED) >= 0;
+}
+
+std::wstring TrimCopy(std::wstring value) {
+  const auto first = value.find_first_not_of(L" \t\r\n");
+  if (first == std::wstring::npos) {
+    return {};
+  }
+
+  const auto last = value.find_last_not_of(L" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+std::vector<std::filesystem::path> ParseExclusionEditorText(const std::wstring& text) {
+  std::vector<std::filesystem::path> exclusions;
+  std::wstring current;
+  std::wstringstream stream(text);
+  while (std::getline(stream, current)) {
+    current = TrimCopy(current);
+    if (!current.empty()) {
+      exclusions.emplace_back(current);
+    }
+  }
+
+  return exclusions;
+}
+
+std::wstring BuildExclusionsEditorText() {
+  std::wstringstream stream;
+  const auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
+  for (const auto& exclusion : exclusions) {
+    stream << exclusion.wstring() << L"\r\n";
+  }
+
+  return stream.str();
+}
+
+std::wstring BuildExclusionEditorSummary() {
+  std::wstringstream stream;
+  stream << L"Exclusions are saved for the Fenrir protection service and applied at system level.\r\n"
+         << L"Only add paths you trust, because excluded locations are skipped by scanning.";
+  return stream.str();
+}
+
+std::wstring GetCurrentExecutablePath() {
+  std::wstring buffer(MAX_PATH, L'\0');
+  const auto written = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+  if (written == 0) {
+    return {};
+  }
+
+  buffer.resize(written);
+  return buffer;
+}
+
+bool LaunchExclusionsEditor(HWND owner) {
+  const auto executablePath = GetCurrentExecutablePath();
+  if (executablePath.empty()) {
+    return false;
+  }
+
+  const auto result = reinterpret_cast<INT_PTR>(
+      ShellExecuteW(owner, L"runas", executablePath.c_str(), L"--manage-exclusions", nullptr, SW_SHOWNORMAL));
+  return result > 32;
+}
+
+bool SaveExclusionsFromEditor(HWND hwnd, UiContext& context) {
+  const auto length = GetWindowTextLengthW(context.detailEdit);
+  std::wstring buffer(static_cast<std::size_t>(std::max(length, 0)) + 1, L'\0');
+  GetWindowTextW(context.detailEdit, buffer.data(), static_cast<int>(buffer.size()));
+  if (!buffer.empty() && buffer.back() == L'\0') {
+    buffer.pop_back();
+  }
+
+  const auto exclusions = ParseExclusionEditorText(buffer);
+  if (!antivirus::agent::SaveConfiguredScanExclusions(exclusions)) {
+    MessageBoxW(hwnd, L"Unable to save exclusions to the Fenrir configuration.", kWindowTitle,
+                MB_OK | MB_ICONERROR);
+    return false;
+  }
+
+  if (!antivirus::agent::RestartAgentService()) {
+    MessageBoxW(hwnd,
+                L"Exclusions were saved, but Fenrir could not restart the protection service automatically. "
+                L"Please restart the service or sign out and back in to apply the new exclusions.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
+    return true;
+  }
+
+  MessageBoxW(hwnd, L"Exclusions saved and protection was restarted to apply them.", kWindowTitle,
+              MB_OK | MB_ICONINFORMATION);
+  return true;
 }
 
 std::wstring ProtectionHeadline(const EndpointClientSnapshot& snapshot) {
@@ -420,7 +515,7 @@ std::wstring PageSubtitle(const ClientPage page, const EndpointClientSnapshot& s
     case ClientPage::History:
       return L"Historical detections, scan sessions, and local agent actions for this endpoint.";
     case ClientPage::Settings:
-      return L"Local configuration, runtime paths, and endpoint client preferences for this device.";
+      return L"Local configuration, trusted exclusions, runtime paths, and endpoint client preferences for this device.";
     case ClientPage::Dashboard:
     default:
       if (snapshot.serviceState == LocalServiceState::NotInstalled) {
@@ -1006,6 +1101,7 @@ std::wstring BuildServiceOverviewText(const UiContext& context) {
 }
 
 std::wstring BuildSettingsOverviewText(const UiContext& context) {
+  const auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
   std::wstringstream stream;
   stream << L"Local configuration\r\n\r\n"
          << L"Control plane: " << NullableText(context.config.controlPlaneBaseUrl) << L"\r\n"
@@ -1014,10 +1110,12 @@ std::wstring BuildSettingsOverviewText(const UiContext& context) {
          << L"Telemetry queue: " << context.config.telemetryQueuePath.wstring() << L"\r\n"
          << L"Quarantine root: " << context.config.quarantineRootPath.wstring() << L"\r\n"
          << L"Evidence root: " << context.config.evidenceRootPath.wstring() << L"\r\n"
+         << L"Custom exclusions: " << exclusions.size() << L" path(s)\r\n"
          << L"Realtime port: " << NullableText(context.config.realtimeProtectionPortName) << L"\r\n"
          << L"Sync interval: " << context.config.syncIntervalSeconds << L" seconds\r\n"
          << L"Telemetry batch size: " << context.config.telemetryBatchSize << L"\r\n"
-         << L"Isolation loopback: " << (context.config.isolationAllowLoopback ? L"allowed" : L"blocked");
+         << L"Isolation loopback: " << (context.config.isolationAllowLoopback ? L"allowed" : L"blocked") << L"\r\n"
+         << L"Edit exclusions: administrator approval required";
   return stream.str();
 }
 
@@ -1036,6 +1134,9 @@ std::wstring DefaultDetailText(const UiContext& context) {
     case ClientPage::Service:
       return BuildServiceOverviewText(context);
     case ClientPage::Settings:
+      if (context.manageExclusionsMode) {
+        return BuildExclusionsEditorText();
+      }
       return BuildSettingsOverviewText(context);
     case ClientPage::Dashboard:
       if (context.snapshot.recentFindings.empty()) {
@@ -1126,29 +1227,23 @@ bool ServiceStateNeedsNotification(const LocalServiceState state) {
 
 std::wstring BuildThreatNotificationBody(const EndpointClientSnapshot& snapshot) {
   if (snapshot.recentThreats.empty()) {
-    if (!snapshot.recentThreats.empty()) {
-      const auto& threat = snapshot.recentThreats.front();
-      const auto displayPath = ThreatDisplayPath(threat);
-      const auto fileName = std::filesystem::path(displayPath).filename().wstring();
-      std::wstringstream stream;
-      stream << (fileName.empty() ? L"A local threat" : fileName) << L" was blocked.";
-      if (!displayPath.empty()) {
-        stream << L" Path: " << displayPath;
-      }
-      return stream.str();
-    }
-
     return L"The endpoint has local detections that need attention.";
   }
 
   const auto& record = snapshot.recentThreats.front();
   std::wstringstream stream;
+  const auto displayPath = record.subjectPath.empty() ? std::wstring{} : record.subjectPath.wstring();
   const auto displayTarget = record.subjectPath.filename().empty() ? record.subjectPath.wstring()
                                                                    : record.subjectPath.filename().wstring();
-  stream << NullableText(displayTarget, L"Suspicious content") << L" was " << NullableText(record.disposition, L"blocked")
-         << L".";
+  stream << L"Blocked: " << NullableText(displayTarget, L"Suspicious content") << L".";
+  if (!displayPath.empty()) {
+    stream << L"\r\nLocation: " << displayPath;
+  }
   if (snapshot.openThreatCount > 1) {
-    stream << L" " << snapshot.openThreatCount << L" unresolved local threats need review.";
+    stream << L"\r\n" << snapshot.openThreatCount
+           << L" blocked item(s) need review. Open Fenrir to decide whether they should stay quarantined or be removed.";
+  } else {
+    stream << L"\r\nReview the item in Fenrir to decide whether it should stay quarantined or be removed.";
   }
   return stream.str();
 }
@@ -1471,21 +1566,21 @@ COLORREF ResolveButtonTextColor(const UINT itemState) {
 void DrawOwnerButton(const DRAWITEMSTRUCT* draw, UiContext& context) {
   RECT rect = draw->rcItem;
   if (IsNavigationButton(static_cast<int>(draw->CtlID))) {
-    const auto fillColor = ResolveButtonFill(context, static_cast<int>(draw->CtlID), draw->itemState);
+    const auto selectedPage = PageForNavButtonId(static_cast<int>(draw->CtlID));
+    const auto selected = selectedPage.has_value() && selectedPage.value() == context.currentPage;
+    const auto fillColor = selected ? SurfaceColor() : WindowBackgroundColor();
     HBRUSH brush = CreateSolidBrush(fillColor);
     FillRect(draw->hDC, &rect, brush);
     DeleteObject(brush);
 
-    const auto selectedPage = PageForNavButtonId(static_cast<int>(draw->CtlID));
-    const auto selected = selectedPage.has_value() && selectedPage.value() == context.currentPage;
     wchar_t text[128]{};
     GetWindowTextW(draw->hwndItem, text, static_cast<int>(std::size(text)));
     SetBkMode(draw->hDC, TRANSPARENT);
     SetTextColor(draw->hDC, selected ? DarkTextColor() : MutedTextColor());
-    SelectObject(draw->hDC, context.bodyFont);
+    SelectObject(draw->hDC, selected ? context.headingFont : context.bodyFont);
     RECT textRect = rect;
     if (selected) {
-      RECT underline{rect.left + 12, rect.bottom - 3, rect.right - 12, rect.bottom - 1};
+      RECT underline{rect.left + 12, rect.bottom - 4, rect.right - 12, rect.bottom - 2};
       HBRUSH underlineBrush = CreateSolidBrush(AccentBlue());
       FillRect(draw->hDC, &underline, underlineBrush);
       DeleteObject(underlineBrush);
@@ -1544,14 +1639,24 @@ void UpdateActionButtons(UiContext& context) {
   const auto historyMode = context.currentPage == ClientPage::History;
   const auto settingsMode = context.currentPage == ClientPage::Settings;
 
+  if (settingsMode) {
+    SetWindowTextW(context.openQuarantineButton,
+                   context.manageExclusionsMode ? L"Save exclusions" : L"Edit exclusions");
+  } else {
+    SetWindowTextW(context.openQuarantineButton, L"Open quarantine folder");
+  }
+
   ShowWindow(context.quickScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.fullScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.customScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.refreshButton, (dashboardMode || threatsMode || quarantineMode || scansMode || historyMode || settingsMode)
-                                        ? SW_SHOW
-                                        : SW_HIDE);
-  ShowWindow(context.startServiceButton, needsServiceStart ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.openQuarantineButton, (dashboardMode || quarantineMode || threatsMode) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.refreshButton,
+             (!context.manageExclusionsMode &&
+              (dashboardMode || threatsMode || quarantineMode || scansMode || historyMode || settingsMode))
+                 ? SW_SHOW
+                 : SW_HIDE);
+  ShowWindow(context.startServiceButton, (!context.manageExclusionsMode && needsServiceStart) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.openQuarantineButton,
+             (settingsMode || dashboardMode || quarantineMode || threatsMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.restoreButton, quarantineMode ? SW_SHOW : SW_HIDE);
   ShowWindow(context.deleteButton, quarantineMode ? SW_SHOW : SW_HIDE);
   EnableWindow(context.restoreButton, quarantineMode && IsCurrentUserAdmin());
@@ -1632,6 +1737,13 @@ void RefreshSnapshot(UiContext& context) {
     PopulateQuarantineList(context);
     PopulateHistoryList(context);
     UpdateVisibleList(context);
+    if (context.manageExclusionsMode && context.currentPage == ClientPage::Settings) {
+      SendMessageW(context.detailEdit, EM_SETREADONLY, FALSE, 0);
+      SetWindowTextSafe(context.secondarySectionTitle, L"Exclusions editor");
+      SetWindowTextSafe(context.detailEdit, BuildExclusionsEditorText());
+      SetWindowTextSafe(context.scanStatusLabel, BuildExclusionEditorSummary());
+      SetWindowTextW(context.openQuarantineButton, L"Save exclusions");
+    }
     UpdateTrayIcon(context);
     EvaluateNotifications(context, refreshedSnapshot);
   } catch (const std::exception& error) {
@@ -1767,12 +1879,16 @@ void RunScanAsync(HWND hwnd, UiContext& context, const ScanPreset preset, const 
           });
 
       std::wstringstream summary;
-      summary << scanLabel << L" complete. " << result.targetCount << L" target(s) checked and " << result.findings.size()
-              << L" suspicious item(s) detected.";
-      if (!result.findings.empty() && result.remediationFailed) {
-        summary << L" Some remediation actions failed and need review.";
-      } else if (!result.findings.empty()) {
-        summary << L" Local remediation was applied where policy allowed it.";
+      if (result.findings.empty()) {
+        summary << scanLabel << L" complete. No threats were found.";
+      } else {
+        summary << scanLabel << L" complete. " << result.findings.size() << L" threat(s) blocked during "
+                << result.targetCount << L" target(s) checked.";
+        if (result.remediationFailed) {
+          summary << L" Some remediation actions failed and need review.";
+        } else {
+          summary << L" Fenrir blocked the detections and applied quarantine where policy allowed it.";
+        }
       }
 
       payload->summary = summary.str();
@@ -2150,6 +2266,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
       const auto* launchOptions = create != nullptr ? reinterpret_cast<LaunchOptions*>(create->lpCreateParams) : nullptr;
       context->backgroundMode = launchOptions != nullptr && launchOptions->backgroundMode;
+      context->manageExclusionsMode = launchOptions != nullptr && launchOptions->manageExclusionsMode;
       SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
       ApplyDarkWindowChrome(hwnd);
 
@@ -2217,16 +2334,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                                                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_SCAN_STATUS), nullptr, nullptr);
       context->progressBar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | PBS_SMOOTH,
                                               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_PROGRESS), nullptr, nullptr);
-      context->threatsList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
+      context->threatsList = CreateWindowExW(0, WC_LISTVIEWW, nullptr,
                                               WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                                               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_THREATS_LIST), nullptr, nullptr);
-      context->quarantineList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
+      context->quarantineList = CreateWindowExW(0, WC_LISTVIEWW, nullptr,
                                                 WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                                                 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_QUARANTINE_LIST), nullptr, nullptr);
-      context->historyList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
+      context->historyList = CreateWindowExW(0, WC_LISTVIEWW, nullptr,
                                               WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                                               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_HISTORY_LIST), nullptr, nullptr);
-      context->detailEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE |
+      context->detailEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE |
                                                                  ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
                                             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_DETAIL_EDIT), nullptr, nullptr);
       context->restoreButton = CreateWindowW(L"BUTTON", L"Restore", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -2278,9 +2395,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
       SetScanRunning(*context, false, L"Ready.");
       RefreshSnapshot(*context);
-      SelectPage(*context, ClientPage::Dashboard);
+      if (context->manageExclusionsMode) {
+        SelectPage(*context, ClientPage::Settings);
+        SendMessageW(context->detailEdit, EM_SETREADONLY, FALSE, 0);
+        SetWindowTextSafe(context->secondarySectionTitle, L"Exclusions editor");
+        SetWindowTextSafe(context->scanStatusLabel, BuildExclusionEditorSummary());
+        SetWindowTextSafe(context->detailEdit, BuildExclusionsEditorText());
+      } else {
+        SelectPage(*context, ClientPage::Dashboard);
+      }
+      ShowWindow(context->navServiceButton, SW_HIDE);
       LayoutControls(*context);
-      SetTimer(hwnd, kRefreshTimerId, kRefreshIntervalMs, nullptr);
+      if (!context->manageExclusionsMode) {
+        SetTimer(hwnd, kRefreshTimerId, kRefreshIntervalMs, nullptr);
+      }
       return 0;
     }
 
@@ -2388,6 +2516,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
           RefreshSnapshot(*context);
           return 0;
         case IDC_BUTTON_OPENQUARANTINE:
+          if (context->currentPage == ClientPage::Settings) {
+            if (context->manageExclusionsMode) {
+              if (SaveExclusionsFromEditor(hwnd, *context)) {
+                DestroyWindow(hwnd);
+              }
+              return 0;
+            }
+
+            if (!LaunchExclusionsEditor(hwnd)) {
+              MessageBoxW(hwnd, L"Unable to open the elevated exclusions editor.", kWindowTitle,
+                          MB_OK | MB_ICONWARNING);
+            }
+            return 0;
+          }
+
           SelectPage(*context, ClientPage::Quarantine);
           LayoutControls(*context);
           OpenQuarantineFolder(*context);
@@ -2511,9 +2654,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   OleInitialize(nullptr);
   const auto launchOptions = ParseLaunchOptions();
 
-  g_instanceMutex = CreateMutexW(nullptr, FALSE, kInstanceMutexName);
+  const wchar_t* mutexName =
+      launchOptions.manageExclusionsMode ? L"Local\\FenrirEndpointClientSingleton.ManageExclusions" : kInstanceMutexName;
+  g_instanceMutex = CreateMutexW(nullptr, FALSE, mutexName);
   if (g_instanceMutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
-    if (!launchOptions.backgroundMode) {
+    if (!launchOptions.backgroundMode && !launchOptions.manageExclusionsMode) {
       PostMessageW(HWND_BROADCAST, RestoreWindowMessageId(), 0, 0);
     }
     CloseHandle(g_instanceMutex);

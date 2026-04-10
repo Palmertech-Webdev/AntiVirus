@@ -391,7 +391,7 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
         .finding = std::move(finding)};
   }
 
-  if (finding.verdict.disposition == VerdictDisposition::Quarantine) {
+  if (policy.quarantineOnMalicious && !finding.path.empty()) {
     QuarantineStore quarantineStore(config_.quarantineRootPath, config_.runtimeDatabasePath);
     const auto quarantineResult = quarantineStore.QuarantineFile(finding);
     if (quarantineResult.success) {

@@ -36,6 +36,8 @@ struct EndpointClientSnapshot {
 LocalServiceState QueryAgentServiceState();
 std::wstring LocalServiceStateToString(LocalServiceState state);
 bool StartAgentService();
+bool StopAgentService();
+bool RestartAgentService();
 
 EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, std::size_t threatLimit = 25,
                                                   std::size_t quarantineLimit = 50, std::size_t findingLimit = 50,

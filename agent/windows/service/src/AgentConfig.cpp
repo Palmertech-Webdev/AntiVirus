@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <optional>
+#include <set>
 #include <system_error>
 
 #include "StringUtils.h"
@@ -15,6 +16,7 @@ namespace {
 constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kLegacyRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
+constexpr wchar_t kScanExcludePathsValueName[] = L"ScanExcludePaths";
 constexpr wchar_t kRuntimeRootValueName[] = L"RuntimeRoot";
 constexpr wchar_t kRuntimeDatabasePathValueName[] = L"RuntimeDatabasePath";
 constexpr wchar_t kInstallRootValueName[] = L"InstallRoot";
@@ -91,6 +93,31 @@ std::vector<std::wstring> ParseWideList(const std::wstring& rawValue) {
   return results;
 }
 
+std::wstring JoinWideList(const std::vector<std::filesystem::path>& values) {
+  std::wstring joined;
+  for (const auto& value : values) {
+    const auto text = value.wstring();
+    if (text.empty()) {
+      continue;
+    }
+
+    if (!joined.empty()) {
+      joined += L";";
+    }
+
+    joined += text;
+  }
+
+  return joined;
+}
+
+std::wstring NormalizeRegistryPathText(const std::wstring& value) {
+  std::wstring normalized = value;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return normalized;
+}
+
 std::filesystem::path GetModuleDirectory(HMODULE moduleHandle) {
   std::wstring buffer(MAX_PATH, L'\0');
   const auto written = GetModuleFileNameW(moduleHandle, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -156,6 +183,36 @@ bool WriteRegistryStringToRoot(HKEY hive, const wchar_t* registryRoot, const wch
 
 bool WriteRegistryString(HKEY hive, const wchar_t* valueName, const std::wstring& value) {
   return WriteRegistryStringToRoot(hive, kRegistryRoot, valueName, value);
+}
+
+void AppendRegistryExclusionsFromRoot(HKEY hive, const wchar_t* rootName,
+                                      std::vector<std::filesystem::path>& exclusions,
+                                      std::set<std::wstring>& seen) {
+  const auto rawValue = ReadRegistryStringFromRoot(hive, rootName, kScanExcludePathsValueName);
+  if (rawValue.empty()) {
+    return;
+  }
+
+  for (const auto& excludedPath : ParseWideList(rawValue)) {
+    if (excludedPath.empty()) {
+      continue;
+    }
+
+    const auto normalized = NormalizeRegistryPathText(excludedPath);
+    if (seen.insert(normalized).second) {
+      exclusions.emplace_back(excludedPath);
+    }
+  }
+}
+
+std::vector<std::filesystem::path> LoadConfiguredScanExclusionsFromRegistry() {
+  std::vector<std::filesystem::path> exclusions;
+  std::set<std::wstring> seen;
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    AppendRegistryExclusionsFromRoot(hive, kRegistryRoot, exclusions, seen);
+    AppendRegistryExclusionsFromRoot(hive, kLegacyRegistryRoot, exclusions, seen);
+  }
+  return exclusions;
 }
 
 std::optional<std::filesystem::path> ReadRegisteredRuntimeRoot() {
@@ -276,6 +333,23 @@ void PersistRuntimeRootMarker(const std::filesystem::path& runtimeRoot, const st
       return;
     }
   }
+}
+
+}  // namespace
+
+std::vector<std::filesystem::path> LoadConfiguredScanExclusions() {
+  return LoadConfiguredScanExclusionsFromRegistry();
+}
+
+bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& exclusions) {
+  const auto joined = JoinWideList(exclusions);
+  bool saved = false;
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    if (WriteRegistryStringToRoot(hive, kRegistryRoot, kScanExcludePathsValueName, joined)) {
+      saved = true;
+    }
+  }
+  return saved;
 }
 
 std::filesystem::path ResolveConfiguredPathWithinRuntimeRoot(const std::filesystem::path& configuredPath,
@@ -410,6 +484,11 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   config.scanExcludedPaths = {};
   for (const auto& excludedPath : ParseWideList(ReadEnvironmentVariable(L"ANTIVIRUS_SCAN_EXCLUDE_PATHS"))) {
     config.scanExcludedPaths.emplace_back(excludedPath);
+  }
+  for (const auto& excludedPath : LoadConfiguredScanExclusions()) {
+    if (!excludedPath.empty()) {
+      config.scanExcludedPaths.push_back(excludedPath);
+    }
   }
 
   const auto runtimeRootOverridden =

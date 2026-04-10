@@ -936,12 +936,7 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
           ScanVerdict{
               .disposition = verifiedKnownGood && score < kQuarantineThreshold
                                  ? VerdictDisposition::Allow
-                                 : score < kQuarantineThreshold && policy.quarantineOnMalicious
-                                       ? VerdictDisposition::Quarantine
-                                       : quarantineCandidate && policy.quarantineOnMalicious &&
-                                                 score >= kQuarantineThreshold
-                                             ? VerdictDisposition::Quarantine
-                                             : VerdictDisposition::Block,
+                                 : VerdictDisposition::Block,
               .confidence = static_cast<std::uint32_t>(std::clamp(score, 1, 99)),
               .tacticId = top != hits.end() ? top->tacticId : L"TA0002",
               .techniqueId = top != hits.end() ? top->techniqueId : GuessTechnique(file),
@@ -959,6 +954,10 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   }
   if (!file.signer.empty()) {
     finding.verdict.reasons.push_back({L"SIGNER_CONTEXT", L"Embedded signer: " + file.signer});
+  }
+  if (finding.verdict.disposition == VerdictDisposition::Block && quarantineCandidate) {
+    finding.verdict.reasons.push_back({L"BLOCK_FIRST",
+                                       L"Fenrir blocked this item immediately and can quarantine it during remediation."});
   }
   return finding;
 }

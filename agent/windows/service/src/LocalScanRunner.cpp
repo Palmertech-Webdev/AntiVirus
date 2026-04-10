@@ -37,7 +37,7 @@ void ApplyLocalRemediation(const AgentConfig& config, std::vector<ScanFinding>& 
 
   QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
   for (auto& finding : findings) {
-    if (finding.verdict.disposition != VerdictDisposition::Quarantine) {
+    if (finding.verdict.disposition == VerdictDisposition::Allow || finding.path.empty()) {
       continue;
     }
 

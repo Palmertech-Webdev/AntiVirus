@@ -32,5 +32,7 @@ struct AgentConfig {
 
 AgentConfig LoadAgentConfig();
 AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle);
+std::vector<std::filesystem::path> LoadConfiguredScanExclusions();
+bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& exclusions);
 
 }  // namespace antivirus::agent

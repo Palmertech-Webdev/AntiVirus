@@ -104,6 +104,55 @@ bool StartAgentService() {
   return GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
 }
 
+bool StopAgentService() {
+  ServiceHandle manager(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+  if (!manager) {
+    return false;
+  }
+
+  ServiceHandle service(OpenServiceW(manager.get(), kAgentServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS));
+  if (!service) {
+    return false;
+  }
+
+  SERVICE_STATUS status{};
+  if (!ControlService(service.get(), SERVICE_CONTROL_STOP, &status)) {
+    const auto error = GetLastError();
+    if (error != ERROR_SERVICE_NOT_ACTIVE) {
+      return false;
+    }
+  }
+
+  for (int attempt = 0; attempt < 30; ++attempt) {
+    SERVICE_STATUS_PROCESS current{};
+    DWORD bytesNeeded = 0;
+    if (!QueryServiceStatusEx(service.get(), SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&current),
+                              sizeof(current), &bytesNeeded)) {
+      return false;
+    }
+
+    if (current.dwCurrentState == SERVICE_STOPPED) {
+      return true;
+    }
+
+    Sleep(250);
+  }
+
+  return false;
+}
+
+bool RestartAgentService() {
+  const auto currentState = QueryAgentServiceState();
+  if (currentState == LocalServiceState::Running || currentState == LocalServiceState::StopPending ||
+      currentState == LocalServiceState::StartPending || currentState == LocalServiceState::Paused) {
+    if (!StopAgentService()) {
+      return false;
+    }
+  }
+
+  return StartAgentService();
+}
+
 EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, const std::size_t threatLimit,
                                                   const std::size_t quarantineLimit, const std::size_t findingLimit,
                                                   const std::size_t updateLimit) {
