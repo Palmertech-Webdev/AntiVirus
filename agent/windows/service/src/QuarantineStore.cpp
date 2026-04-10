@@ -1,11 +1,16 @@
 #include "QuarantineStore.h"
 
+#include <Windows.h>
+#include <aclapi.h>
+
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "RuntimeDatabase.h"
 #include "StringUtils.h"
@@ -184,6 +189,48 @@ std::filesystem::path ResolveDatabasePath(const std::filesystem::path& rootPath,
   return rootPath.parent_path() / L"agent-runtime.db";
 }
 
+bool ScheduleDeleteOnReboot(const std::filesystem::path& path) {
+  return MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT) != FALSE;
+}
+
+bool CreateKnownSid(const WELL_KNOWN_SID_TYPE type, std::array<BYTE, SECURITY_MAX_SID_SIZE>& buffer, PSID* sid) {
+  DWORD size = static_cast<DWORD>(buffer.size());
+  if (CreateWellKnownSid(type, nullptr, buffer.data(), &size) == FALSE) {
+    return false;
+  }
+
+  *sid = buffer.data();
+  return true;
+}
+
+bool LockDownPathForSystemOnly(const std::filesystem::path& path) {
+  std::array<BYTE, SECURITY_MAX_SID_SIZE> systemBuffer{};
+  PSID systemSid = nullptr;
+  if (!CreateKnownSid(WinLocalSystemSid, systemBuffer, &systemSid)) {
+    return false;
+  }
+
+  EXPLICIT_ACCESSW systemAccess{};
+  systemAccess.grfAccessPermissions = GENERIC_ALL;
+  systemAccess.grfAccessMode = SET_ACCESS;
+  systemAccess.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+  systemAccess.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  systemAccess.Trustee.TrusteeType = TRUSTEE_IS_USER;
+  systemAccess.Trustee.ptstrName = static_cast<LPWSTR>(systemSid);
+
+  PACL acl = nullptr;
+  const auto aclStatus = SetEntriesInAclW(1, &systemAccess, nullptr, &acl);
+  if (aclStatus != ERROR_SUCCESS) {
+    return false;
+  }
+
+  const auto securityStatus = SetNamedSecurityInfoW(
+      const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, acl, nullptr);
+  LocalFree(acl);
+  return securityStatus == ERROR_SUCCESS;
+}
+
 }  // namespace
 
 QuarantineStore::QuarantineStore(std::filesystem::path rootPath, std::filesystem::path databasePath)
@@ -200,6 +247,7 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
   try {
     std::filesystem::create_directories(rootPath_ / L"files");
     const auto destinationPath = BuildQuarantineFilePath(rootPath_, result.recordId, finding.path);
+    auto localStatus = L"quarantined";
 
     std::error_code error;
     std::filesystem::rename(finding.path, destinationPath, error);
@@ -214,12 +262,16 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
       error.clear();
       std::filesystem::remove(finding.path, error);
       if (error) {
-        std::filesystem::remove(destinationPath, error);
-        throw std::runtime_error("Removing the original file after quarantine copy failed");
+        const auto locked = LockDownPathForSystemOnly(finding.path);
+        const auto scheduled = ScheduleDeleteOnReboot(finding.path);
+        localStatus = scheduled ? L"quarantined-pending-delete" : L"quarantined-locked";
+        if (!locked && !scheduled) {
+          throw std::runtime_error("Original file could not be removed or locked after quarantine copy");
+        }
       }
     }
 
-    WriteMetadata(rootPath_, result.recordId, finding, destinationPath, L"quarantined");
+    WriteMetadata(rootPath_, result.recordId, finding, destinationPath, localStatus);
     RuntimeDatabase(databasePath_).UpsertQuarantineRecord(QuarantineIndexRecord{
         .recordId = result.recordId,
         .capturedAt = CurrentUtcTimestamp(),
@@ -228,7 +280,7 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
         .sha256 = finding.sha256,
         .sizeBytes = finding.sizeBytes,
         .techniqueId = finding.verdict.techniqueId,
-        .localStatus = L"quarantined"});
+        .localStatus = localStatus});
     result.success = true;
     result.quarantinedPath = destinationPath;
     return result;

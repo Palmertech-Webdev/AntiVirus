@@ -60,7 +60,7 @@ DWORD UsersAccessMask(const UsersAccessMode mode) {
 }
 
 bool ApplyProtectedAcl(const std::filesystem::path& path, const UsersAccessMode usersAccessMode,
-                       std::wstring* errorMessage) {
+                       const bool includeAdministrators, std::wstring* errorMessage) {
   std::error_code error;
   std::filesystem::create_directories(path, error);
   if (error) {
@@ -70,14 +70,14 @@ bool ApplyProtectedAcl(const std::filesystem::path& path, const UsersAccessMode 
     return false;
   }
 
-  std::array<BYTE, SECURITY_MAX_SID_SIZE> administratorsBuffer{};
   std::array<BYTE, SECURITY_MAX_SID_SIZE> systemBuffer{};
   std::array<BYTE, SECURITY_MAX_SID_SIZE> usersBuffer{};
-  PSID administratorsSid = nullptr;
   PSID systemSid = nullptr;
   PSID usersSid = nullptr;
-  if (!CreateKnownSid(WinBuiltinAdministratorsSid, administratorsBuffer, &administratorsSid) ||
-      !CreateKnownSid(WinLocalSystemSid, systemBuffer, &systemSid) ||
+  std::array<BYTE, SECURITY_MAX_SID_SIZE> administratorsBuffer{};
+  PSID administratorsSid = nullptr;
+  if (!CreateKnownSid(WinLocalSystemSid, systemBuffer, &systemSid) ||
+      (includeAdministrators && !CreateKnownSid(WinBuiltinAdministratorsSid, administratorsBuffer, &administratorsSid)) ||
       (usersAccessMode != UsersAccessMode::None && !CreateKnownSid(WinBuiltinUsersSid, usersBuffer, &usersSid))) {
     if (errorMessage != nullptr) {
       *errorMessage = L"Could not resolve well-known SIDs for ACL hardening";
@@ -86,16 +86,18 @@ bool ApplyProtectedAcl(const std::filesystem::path& path, const UsersAccessMode 
   }
 
   std::vector<EXPLICIT_ACCESSW> entries;
-  entries.reserve(usersAccessMode != UsersAccessMode::None ? 3 : 2);
+  entries.reserve((includeAdministrators ? 1U : 0U) + 1U + (usersAccessMode != UsersAccessMode::None ? 1U : 0U));
 
-  EXPLICIT_ACCESSW administratorsAccess{};
-  administratorsAccess.grfAccessPermissions = GENERIC_ALL;
-  administratorsAccess.grfAccessMode = SET_ACCESS;
-  administratorsAccess.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
-  administratorsAccess.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-  administratorsAccess.Trustee.TrusteeType = TRUSTEE_IS_GROUP;
-  administratorsAccess.Trustee.ptstrName = static_cast<LPWSTR>(administratorsSid);
-  entries.push_back(administratorsAccess);
+  if (includeAdministrators) {
+    EXPLICIT_ACCESSW administratorsAccess{};
+    administratorsAccess.grfAccessPermissions = GENERIC_ALL;
+    administratorsAccess.grfAccessMode = SET_ACCESS;
+    administratorsAccess.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    administratorsAccess.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    administratorsAccess.Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+    administratorsAccess.Trustee.ptstrName = static_cast<LPWSTR>(administratorsSid);
+    entries.push_back(administratorsAccess);
+  }
 
   EXPLICIT_ACCESSW systemAccess{};
   systemAccess.grfAccessPermissions = GENERIC_ALL;
@@ -321,11 +323,11 @@ HardeningManager::HardeningManager(const AgentConfig& config, std::filesystem::p
 bool HardeningManager::ApplyPostInstallHardening(const std::wstring& uninstallToken, std::wstring* errorMessage) const {
   std::wstring localError;
 
-  if (!ApplyProtectedAcl(installRoot_, UsersAccessMode::ReadExecute, &localError) ||
-      !ApplyProtectedAcl(config_.runtimeDatabasePath.parent_path(), UsersAccessMode::Modify, &localError) ||
-      !ApplyProtectedAcl(config_.quarantineRootPath, UsersAccessMode::None, &localError) ||
-      !ApplyProtectedAcl(config_.evidenceRootPath, UsersAccessMode::None, &localError) ||
-      !ApplyProtectedAcl(config_.updateRootPath, UsersAccessMode::None, &localError)) {
+  if (!ApplyProtectedAcl(installRoot_, UsersAccessMode::ReadExecute, true, &localError) ||
+      !ApplyProtectedAcl(config_.runtimeDatabasePath.parent_path(), UsersAccessMode::Modify, true, &localError) ||
+      !ApplyProtectedAcl(config_.quarantineRootPath, UsersAccessMode::None, false, &localError) ||
+      !ApplyProtectedAcl(config_.evidenceRootPath, UsersAccessMode::None, true, &localError) ||
+      !ApplyProtectedAcl(config_.updateRootPath, UsersAccessMode::None, true, &localError)) {
     if (errorMessage != nullptr) {
       *errorMessage = localError;
     }

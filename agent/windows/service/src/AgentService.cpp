@@ -712,7 +712,7 @@ std::wstring AgentService::ExecuteTargetedScan(const RemoteCommand& command) {
   EvidenceRecorder evidenceRecorder(config_.evidenceRootPath, config_.runtimeDatabasePath);
 
   for (auto& finding : findings) {
-    if (finding.verdict.disposition == VerdictDisposition::Quarantine) {
+    if (finding.verdict.disposition != VerdictDisposition::Allow) {
       const auto quarantineResult = quarantineStore.QuarantineFile(finding);
       if (quarantineResult.success) {
         finding.remediationStatus = RemediationStatus::Quarantined;

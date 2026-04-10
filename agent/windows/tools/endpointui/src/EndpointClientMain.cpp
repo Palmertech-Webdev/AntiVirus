@@ -2275,14 +2275,13 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       const actions = [];
       if (page === 'dashboard') {
         actions.push(`<button class="primary" data-action="scan" data-preset="quick">Quick scan</button>`);
-        actions.push(`<button data-action="openQuarantine">Open quarantine</button>`);
+        actions.push(`<button data-action="openQuarantine">Review quarantine</button>`);
         actions.push(`<button data-action="refresh">Refresh</button>`);
       } else if (page === 'threats') {
         actions.push(`<button data-action="refresh">Refresh</button>`);
-        actions.push(`<button data-action="openQuarantine">Open quarantine</button>`);
+        actions.push(`<button data-action="openQuarantine">Review quarantine</button>`);
       } else if (page === 'quarantine') {
         actions.push(`<button data-action="refresh">Refresh</button>`);
-        actions.push(`<button data-action="openQuarantine">Open folder</button>`);
       } else if (page === 'scans') {
         actions.push(`<button class="primary" data-action="scan" data-preset="quick">Quick scan</button>`);
         actions.push(`<button data-action="scan" data-preset="full">Full scan</button>`);
@@ -3683,7 +3682,7 @@ void UpdateActionButtons(UiContext& context) {
     SetWindowTextW(context.openQuarantineButton,
                    context.manageExclusionsMode ? L"Save exclusions" : L"Edit exclusions");
   } else {
-    SetWindowTextW(context.openQuarantineButton, L"Open quarantine folder");
+    SetWindowTextW(context.openQuarantineButton, L"Review quarantine");
   }
 
   ShowWindow(context.quickScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
@@ -3695,8 +3694,7 @@ void UpdateActionButtons(UiContext& context) {
                  ? SW_SHOW
                  : SW_HIDE);
   ShowWindow(context.startServiceButton, (!context.manageExclusionsMode && needsServiceStart) ? SW_SHOW : SW_HIDE);
-  ShowWindow(context.openQuarantineButton,
-             (settingsMode || dashboardMode || quarantineMode || threatsMode) ? SW_SHOW : SW_HIDE);
+  ShowWindow(context.openQuarantineButton, (settingsMode || dashboardMode || threatsMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.restoreButton, quarantineMode ? SW_SHOW : SW_HIDE);
   ShowWindow(context.deleteButton, quarantineMode ? SW_SHOW : SW_HIDE);
   EnableWindow(context.restoreButton, quarantineMode && IsCurrentUserAdmin());
@@ -3968,9 +3966,8 @@ void SelectPage(UiContext& context, const ClientPage page) {
   PublishWebViewState(context);
 }
 
-void OpenQuarantineFolder(const UiContext& context) {
-  std::filesystem::create_directories(context.config.quarantineRootPath);
-  ShellExecuteW(context.hwnd, L"open", context.config.quarantineRootPath.wstring().c_str(), nullptr, nullptr, SW_SHOWDEFAULT);
+void OpenQuarantineFolder(const UiContext&) {
+  // Quarantine is intentionally managed inside Fenrir. Direct folder access is disabled.
 }
 
 void ShowTrayMenu(UiContext& context) {
@@ -4251,7 +4248,6 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
 
   if (_wcsicmp(action.c_str(), L"openQuarantine") == 0) {
     SelectPage(context, ClientPage::Quarantine);
-    OpenQuarantineFolder(context);
     PublishWebViewState(context);
     return;
   }
@@ -4686,7 +4682,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_REFRESH), nullptr, nullptr);
       context->startServiceButton = CreateWindowW(L"BUTTON", L"Start protection", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                   0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_STARTSERVICE), nullptr, nullptr);
-      context->openQuarantineButton = CreateWindowW(L"BUTTON", L"Open quarantine folder", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+      context->openQuarantineButton = CreateWindowW(L"BUTTON", L"Review quarantine", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                     0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_BUTTON_OPENQUARANTINE), nullptr, nullptr);
       context->scanStatusLabel = CreateWindowW(L"STATIC", L"Ready.", WS_CHILD | WS_VISIBLE | SS_LEFT,
                                                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_SCAN_STATUS), nullptr, nullptr);
@@ -4897,7 +4893,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
           SelectPage(*context, ClientPage::Quarantine);
           LayoutControls(*context);
-          OpenQuarantineFolder(*context);
           return 0;
         case IDC_BUTTON_RESTORE:
           PerformQuarantineAction(*context, true);

@@ -195,7 +195,7 @@ void ApplyLocalRemediation(const antivirus::agent::AgentConfig& config, std::vec
 
   antivirus::agent::QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
   for (auto& finding : findings) {
-    if (finding.verdict.disposition != antivirus::agent::VerdictDisposition::Quarantine) {
+    if (finding.verdict.disposition == antivirus::agent::VerdictDisposition::Allow) {
       continue;
     }
 
