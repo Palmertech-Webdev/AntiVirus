@@ -529,7 +529,8 @@ export function buildServer(options: BuildServerOptions = {}) {
   }
 
   void app.register(cors, {
-    origin: true
+    origin: true,
+    methods: ["GET", "HEAD", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"]
   });
 
   app.get("/health", async () => ({

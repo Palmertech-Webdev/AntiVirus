@@ -18,7 +18,9 @@ Typical flow:
 3. Build and sign the minifilter with the WDK on a driver-capable workstation when kernel payloads are ready to ship.
 4. Run `BuildReleaseLayout.ps1` to stage the raw release tree when you need unpacked payload artifacts.
 5. Run `GenerateUpdateManifest.ps1` to create a rollback-aware platform or definitions package.
-6. Validate the staged endpoint with `antivirus-agent-service.exe --self-test`.
+6. Validate the staged endpoint with `fenrir-agent-service.exe --self-test`.
+
+If setup fails while registering the Windows service with `OpenSCManagerW failed with error 5`, restart `FenrirSetup.exe` from an elevated Administrator context.
 
 Example:
 

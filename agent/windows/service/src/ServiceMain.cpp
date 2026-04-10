@@ -20,7 +20,7 @@ constexpr wchar_t kServiceName[] = L"FenrirAgent";
 constexpr wchar_t kServiceDisplayName[] = L"Fenrir Agent";
 constexpr wchar_t kServiceDescription[] =
     L"Fenrir Windows endpoint protection agent for policy sync, telemetry, and on-demand scanning.";
-constexpr wchar_t kAmsiProviderDllName[] = L"antivirus-amsi-provider.dll";
+constexpr wchar_t kAmsiProviderDllName[] = L"fenrir-amsi-provider.dll";
 constexpr wchar_t kLocalSystemAccountName[] = L"LocalSystem";
 
 SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
@@ -149,7 +149,8 @@ bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToke
   const auto serviceCommandLine = L"\"" + modulePath + L"\"";
   const auto scManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE | SC_MANAGER_CONNECT);
   if (scManager == nullptr) {
-    std::wcerr << L"OpenSCManagerW failed with error " << GetLastError() << std::endl;
+    const auto error = GetLastError();
+    std::wcerr << L"OpenSCManagerW failed with error " << error << std::endl;
     return false;
   }
 
@@ -165,8 +166,9 @@ bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToke
                              SERVICE_QUERY_STATUS | SERVICE_STOP | SERVICE_START | DELETE | SERVICE_CHANGE_CONFIG |
                                  SERVICE_QUERY_CONFIG | READ_CONTROL | WRITE_DAC);
       if (service == nullptr) {
+        const auto error = GetLastError();
         CloseServiceHandle(scManager);
-        std::wcerr << L"OpenServiceW failed with error " << GetLastError() << std::endl;
+        std::wcerr << L"OpenServiceW failed with error " << error << std::endl;
         return false;
       }
       if (ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
@@ -443,7 +445,7 @@ int RunConsoleMode() {
 }
 
 void PrintUsage() {
-  std::wcout << L"Usage: antivirus-agent-service.exe [--console|--install [--elam-driver <path>]|--repair [--elam-driver <path>]|--upgrade <manifest>|--rollback-update <transaction>|--uninstall [--token <token>]|--wsc-status|--self-test|--register-amsi-provider|--unregister-amsi-provider|--help]" << std::endl;
+  std::wcout << L"Usage: fenrir-agent-service.exe [--console|--install [--elam-driver <path>]|--repair [--elam-driver <path>]|--upgrade <manifest>|--rollback-update <transaction>|--uninstall [--token <token>]|--wsc-status|--self-test|--register-amsi-provider|--unregister-amsi-provider|--help]" << std::endl;
   std::wcout << L"  --console   Run the agent loop interactively instead of under the SCM." << std::endl;
   std::wcout << L"  --install   Register the agent as an auto-start Windows service and apply hardening." << std::endl;
   std::wcout << L"  --repair    Reapply service hardening, AMSI registration, and protected runtime settings." << std::endl;

@@ -49,6 +49,7 @@ add_library(antivirus-agent-core STATIC
   src/ProcessDeltaTracker.cpp
   src/ProcessInventory.cpp
   src/ProcessSnapshotCollector.cpp
+  src/ReputationLookup.cpp
   src/QuarantineStore.cpp
   src/RealtimeProtectionBroker.cpp
   src/RemediationEngine.cpp

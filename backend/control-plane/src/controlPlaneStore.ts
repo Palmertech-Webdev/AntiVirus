@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { generateAlertsFromTelemetry, mergeGeneratedAlerts } from "./detectionEngine.ts";
@@ -250,6 +250,131 @@ function sortInstalledSoftware(items: InstalledSoftwareSummary[]) {
 
     return left.publisher.localeCompare(right.publisher);
   });
+}
+
+function mergeInstalledSoftwareLists(
+  existing: InstalledSoftwareSummary[],
+  incoming: InstalledSoftwareSummary[]
+) {
+  const softwareById = new Map(existing.map((item) => [item.id, item]));
+
+  for (const software of incoming) {
+    softwareById.set(software.id, software);
+  }
+
+  return sortInstalledSoftware([...softwareById.values()]);
+}
+
+function normalizeDeviceSerialNumber(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 && normalized !== "unknown-serial" ? normalized : null;
+}
+
+function latestNullableIso(values: Array<string | null | undefined>) {
+  let latest: string | null = null;
+
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+
+    if (latest === null || value > latest) {
+      latest = value;
+    }
+  }
+
+  return latest;
+}
+
+function mergeDeviceRecord(target: DeviceRecord, source: DeviceRecord) {
+  const sourceIsNewer = source.lastSeenAt >= target.lastSeenAt;
+
+  target.enrolledAt = source.enrolledAt < target.enrolledAt ? source.enrolledAt : target.enrolledAt;
+  target.lastSeenAt = sourceIsNewer ? source.lastSeenAt : target.lastSeenAt;
+  target.lastPolicySyncAt = latestNullableIso([target.lastPolicySyncAt, source.lastPolicySyncAt]);
+  target.lastTelemetryAt = latestNullableIso([target.lastTelemetryAt, source.lastTelemetryAt]);
+
+  if (sourceIsNewer) {
+    target.hostname = source.hostname;
+    target.osVersion = source.osVersion;
+    target.agentVersion = source.agentVersion;
+    target.platformVersion = source.platformVersion;
+    target.healthState = source.healthState;
+    target.isolated = source.isolated;
+    target.policyId = source.policyId;
+    target.policyName = source.policyName;
+  }
+
+  target.privateIpAddresses = mergeUniqueStrings([...target.privateIpAddresses, ...source.privateIpAddresses]);
+  target.publicIpAddress = source.publicIpAddress ?? target.publicIpAddress;
+  target.lastLoggedOnUser = source.lastLoggedOnUser ?? target.lastLoggedOnUser;
+  target.installedSoftware = mergeInstalledSoftwareLists(target.installedSoftware, source.installedSoftware);
+}
+
+function reassignDeviceScopedRecords<T extends { deviceId?: string; hostname?: string }>(
+  items: T[],
+  deviceIdMap: Map<string, string>,
+  hostnameByDeviceId: Map<string, string>
+) {
+  for (const item of items) {
+    if (!item.deviceId) {
+      continue;
+    }
+
+    const canonicalDeviceId = deviceIdMap.get(item.deviceId);
+    if (!canonicalDeviceId) {
+      continue;
+    }
+
+    item.deviceId = canonicalDeviceId;
+    const canonicalHostname = hostnameByDeviceId.get(canonicalDeviceId);
+    if (canonicalHostname) {
+      item.hostname = canonicalHostname;
+    }
+  }
+}
+
+function dedupeDevicesBySerial(state: ControlPlaneState) {
+  const canonicalBySerial = new Map<string, DeviceRecord>();
+  const deviceIdMap = new Map<string, string>();
+  const dedupedDevices: DeviceRecord[] = [];
+
+  for (const device of state.devices) {
+    const normalizedSerial = normalizeDeviceSerialNumber(device.serialNumber);
+    if (!normalizedSerial) {
+      dedupedDevices.push(device);
+      continue;
+    }
+
+    const canonical = canonicalBySerial.get(normalizedSerial);
+    if (!canonical) {
+      canonicalBySerial.set(normalizedSerial, device);
+      dedupedDevices.push(device);
+      continue;
+    }
+
+    mergeDeviceRecord(canonical, device);
+    deviceIdMap.set(device.id, canonical.id);
+  }
+
+  if (deviceIdMap.size === 0) {
+    return;
+  }
+
+  state.devices = dedupedDevices;
+  const hostnameByDeviceId = new Map(state.devices.map((item) => [item.id, item.hostname]));
+  reassignDeviceScopedRecords(state.alerts, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.telemetry, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.commands, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.quarantineItems, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.evidence, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.scanHistory, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.devicePosture, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.deviceRiskTelemetry, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.deviceScoreHistory, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.privilegeBaselines, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.privilegeEvents, deviceIdMap, hostnameByDeviceId);
+  reassignDeviceScopedRecords(state.privilegeStates, deviceIdMap, hostnameByDeviceId);
 }
 
 function isLoopbackAddress(value: string) {
@@ -1316,6 +1441,7 @@ function normalizeState(rawState: unknown, nowIso: string): ControlPlaneState {
       : []
   };
 
+  dedupeDevicesBySerial(state);
   syncPolicyAssignments(state);
   return state;
 }
@@ -1410,6 +1536,7 @@ function recomputePosture(posture: DevicePostureSummary) {
 }
 
 function trimState(state: ControlPlaneState) {
+  dedupeDevicesBySerial(state);
   syncPolicyAssignments(state);
   state.policies = sortPolicies(state.policies).map((policy) => ({
     ...policy,
@@ -2286,9 +2413,7 @@ export function createFileBackedControlPlaneStore(
   async function persistState(state: ControlPlaneState) {
     await mkdir(dirname(stateFilePath), { recursive: true });
     const nextPayload = `${JSON.stringify(state, null, 2)}\n`;
-    const tempFilePath = `${stateFilePath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tempFilePath, nextPayload, "utf8");
-    await rename(tempFilePath, stateFilePath);
+    await writeFile(stateFilePath, nextPayload, "utf8");
   }
 
   function isTransientJsonParseError(error: unknown) {
@@ -2333,7 +2458,9 @@ export function createFileBackedControlPlaneStore(
       }
     } catch (error) {
       const maybeNodeError = error as NodeJS.ErrnoException;
-      if (maybeNodeError.code !== "ENOENT") {
+      const isMissingStateFile = maybeNodeError.code === "ENOENT";
+      const isCorruptStateFile = error instanceof SyntaxError;
+      if (!isMissingStateFile && !isCorruptStateFile) {
         throw error;
       }
 
@@ -2728,8 +2855,30 @@ export function createFileBackedControlPlaneStore(
     async enrollDevice(request, observedRemoteAddress) {
       return mutateState(async (state) => {
         const issuedAt = now();
-        const deviceId = randomUUID();
         const defaultPolicy = state.policies.find((item) => item.isDefault) ?? state.policies[0];
+        const normalizedSerialNumber = normalizeDeviceSerialNumber(request.serialNumber);
+        const existingDevice =
+          normalizedSerialNumber === null
+            ? undefined
+            : state.devices.find((item) => normalizeDeviceSerialNumber(item.serialNumber) === normalizedSerialNumber);
+        const deviceId = existingDevice?.id ?? randomUUID();
+
+        if (existingDevice) {
+          existingDevice.hostname = request.hostname;
+          existingDevice.osVersion = request.osVersion;
+          existingDevice.lastSeenAt = issuedAt;
+          existingDevice.healthState = "healthy";
+          existingDevice.isolated = false;
+          applyObservedRemoteAddress(existingDevice, observedRemoteAddress);
+          recalculateDeviceScoreSnapshot(state, existingDevice, issuedAt);
+          return {
+            deviceId,
+            issuedAt,
+            policy: toPolicySummary(defaultPolicy),
+            commandChannelUrl
+          };
+        }
+
         const device: DeviceRecord = {
           id: deviceId,
           hostname: request.hostname,

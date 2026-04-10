@@ -23,8 +23,8 @@ namespace {
 
 constexpr wchar_t kAmsiProviderName[] = L"AntiVirus AMSI Provider";
 constexpr wchar_t kMinifilterServiceName[] = L"AntivirusMinifilter";
-constexpr wchar_t kServiceExecutableName[] = L"antivirus-agent-service.exe";
-constexpr wchar_t kAmsiProviderDllName[] = L"antivirus-amsi-provider.dll";
+constexpr wchar_t kServiceExecutableName[] = L"fenrir-agent-service.exe";
+constexpr wchar_t kAmsiProviderDllName[] = L"fenrir-amsi-provider.dll";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
 
 std::wstring JsonEscape(const std::wstring& value) { return Utf8ToWide(EscapeJsonString(value)); }
@@ -248,7 +248,7 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
            amsiProviderKey.has_value()
                ? L"AMSI registration is present at HKLM\\" + *amsiProviderKey
                : L"The AntiVirus AMSI provider is not registered in HKLM\\SOFTWARE\\Microsoft\\AMSI\\Providers.",
-           L"Run antivirus-agent-service.exe --register-amsi-provider from an elevated context.");
+           L"Run fenrir-agent-service.exe --register-amsi-provider from an elevated context.");
 
   if (PathExists(servicePath)) {
     const auto signedBinary = VerifyFileAuthenticodeSignature(servicePath);
@@ -265,7 +265,7 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
            hardeningStatus.registryConfigured && hardeningStatus.runtimePathsProtected ? SelfTestStatus::Pass
                                                                                       : SelfTestStatus::Warning,
            hardeningStatus.statusMessage.empty() ? L"Hardening status is available." : hardeningStatus.statusMessage,
-           L"Run antivirus-agent-service.exe --repair from an elevated context to reapply registry and ACL hardening.");
+           L"Run fenrir-agent-service.exe --repair from an elevated context to reapply registry and ACL hardening.");
 
   AddCheck(report, L"protected_service", L"Protected-service posture",
            hardeningStatus.launchProtectedConfigured
@@ -356,8 +356,8 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
              L"Check WFP dependencies, ACLs, and service privileges.");
   }
 
-  const auto minifilterInf = installRoot / L"AntivirusMinifilter.inf";
-  const auto minifilterSys = installRoot / L"AntivirusMinifilter.sys";
+  const auto minifilterInf = installRoot / L"driver" / L"AntivirusMinifilter.inf";
+  const auto minifilterSys = installRoot / L"driver" / L"AntivirusMinifilter.sys";
   const auto minifilterServiceState = QueryServiceState(kMinifilterServiceName);
   const auto minifilterArtifactsPresent = PathExists(minifilterInf) || PathExists(minifilterSys);
   AddCheck(report, L"minifilter", L"Minifilter package",
@@ -369,12 +369,12 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                                             : L"No built minifilter artifacts were found beside the agent binaries."),
            L"Build the driver with the WDK, sign the .sys/.cat, and stage AntivirusMinifilter.inf/.sys into the release package.");
 
-  const auto serviceState = QueryServiceState(L"AntiVirusAgent");
+  const auto serviceState = QueryServiceState(L"FenrirAgent");
   AddCheck(report, L"service_registration", L"Windows service registration",
            !serviceState.empty() ? SelfTestStatus::Pass : SelfTestStatus::Warning,
-           !serviceState.empty() ? L"The AntiVirusAgent service is registered with state " + serviceState + L"."
-                                 : L"The AntiVirusAgent service is not installed in the SCM on this host.",
-           L"Run antivirus-agent-service.exe --install from an elevated install context.");
+           !serviceState.empty() ? L"The FenrirAgent service is registered with state " + serviceState + L"."
+                                 : L"The FenrirAgent service is not installed in the SCM on this host.",
+           L"Run fenrir-agent-service.exe --install from an elevated install context.");
 
   if (std::filesystem::create_directories(config.updateRootPath) || PathExists(config.updateRootPath)) {
     AddCheck(report, L"update_root", L"Update staging root", SelfTestStatus::Pass,

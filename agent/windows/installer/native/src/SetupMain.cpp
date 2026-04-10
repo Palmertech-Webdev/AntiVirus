@@ -167,6 +167,7 @@ std::filesystem::path GetDefaultInstallRoot();
 std::filesystem::path QueryInstallRoot();
 bool ServiceExists();
 bool IsInstalledAt(const std::filesystem::path& installRoot);
+bool IsProcessElevated();
 bool EnsureDirectory(const std::filesystem::path& path, std::wstring* errorMessage = nullptr);
 bool ExtractResourceToFile(HINSTANCE instance, int resourceId, const std::filesystem::path& targetPath,
                            std::wstring* errorMessage);
@@ -349,6 +350,20 @@ bool ServiceExists() {
 bool IsInstalledAt(const std::filesystem::path& installRoot) {
   return ServiceExists() || std::filesystem::exists(installRoot / kServiceExeName) ||
          !ReadRegistryString(HKEY_LOCAL_MACHINE, kArpRegistryRoot, L"InstallLocation").empty();
+}
+
+bool IsProcessElevated() {
+  HANDLE token = nullptr;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == FALSE) {
+    return false;
+  }
+
+  TOKEN_ELEVATION elevation{};
+  DWORD size = 0;
+  const auto elevated = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) != FALSE &&
+                        elevation.TokenIsElevated != 0;
+  CloseHandle(token);
+  return elevated;
 }
 
 bool EnsureDirectory(const std::filesystem::path& path, std::wstring* errorMessage) {
@@ -920,6 +935,12 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
 
 void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
   std::wstring errorMessage;
+  if (!IsProcessElevated()) {
+    PostComplete(hwnd, false, false, false,
+                 L"Administrator rights are required to register the Fenrir Agent service. Restart the installer with elevation.");
+    return;
+  }
+
   if (!InstallPayloadFiles(hwnd, context, repair, &errorMessage)) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;

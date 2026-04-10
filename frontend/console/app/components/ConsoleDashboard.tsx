@@ -16,6 +16,62 @@ function severityClassName(value: string) {
   return `tone-${value}`;
 }
 
+function splitReputation(value: string | null | undefined) {
+  return value?.split(";").map((segment) => segment.trim()).filter(Boolean) ?? [];
+}
+
+function reputationTone(value: string) {
+  const normalized = value.toLowerCase();
+  if (normalized.includes("hashlookup-known-good") || normalized.includes("trusted-signed") || normalized.includes("trusted-path")) {
+    return "ready";
+  }
+
+  if (normalized.includes("hashlookup-unavailable")) {
+    return "warning";
+  }
+
+  if (normalized.includes("hashlookup-unknown") || normalized.includes("hashlookup-skipped")) {
+    return "unknown";
+  }
+
+  if (normalized.includes("ransom") || normalized.includes("malicious") || normalized.includes("known-bad") || normalized.includes("suspicious")) {
+    return "danger";
+  }
+
+  if (normalized.includes("unsigned") || normalized.includes("user-writable")) {
+    return "warning";
+  }
+
+  return "default";
+}
+
+function reputationLabel(value: string) {
+  const normalized = value.toLowerCase();
+  if (normalized === "hashlookup-known-good") {
+    return "hash lookup known good";
+  }
+  if (normalized === "hashlookup-known-good-cache") {
+    return "hash lookup known good (cached)";
+  }
+  if (normalized === "hashlookup-unknown") {
+    return "hash lookup no match";
+  }
+  if (normalized === "hashlookup-unknown-cache") {
+    return "hash lookup no match (cached)";
+  }
+  if (normalized === "hashlookup-unavailable") {
+    return "hash lookup unavailable";
+  }
+  if (normalized === "hashlookup-unavailable-cache") {
+    return "hash lookup unavailable (cached)";
+  }
+  if (normalized === "hashlookup-skipped") {
+    return "hash lookup skipped";
+  }
+
+  return value.replaceAll("hashlookup", "hash lookup").replaceAll("-", " ").replaceAll("_", " ").replace(/\s+/g, " ").trim();
+}
+
 export default function ConsoleDashboard() {
   const { snapshot, source, loading, refreshing, refreshSnapshot } = useConsoleData();
   const { snapshot: mailSnapshot } = useMailData();
@@ -361,6 +417,15 @@ export default function ConsoleDashboard() {
                   <span className="state-chip tone-default">{item.disposition}</span>
                 </div>
                 <p>{item.summary}</p>
+                {splitReputation(item.reputation).length > 0 ? (
+                  <div className="tag-row">
+                    {splitReputation(item.reputation).map((segment) => (
+                      <span key={`${item.recordId}-${segment}`} className={`state-chip tone-${reputationTone(segment)}`}>
+                        {reputationLabel(segment)}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
               </article>
             ))}
           </div>

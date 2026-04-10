@@ -17,6 +17,7 @@
 #include <system_error>
 
 #include "CryptoUtils.h"
+#include "ReputationLookup.h"
 #include "StringUtils.h"
 
 namespace antivirus::agent {
@@ -597,6 +598,20 @@ std::optional<FileData> LoadFileData(const std::filesystem::path& path) {
   return file;
 }
 
+std::wstring BuildReportedReputation(const std::wstring& internalReputation,
+                                     const ReputationLookupResult& reputationLookup) {
+  if (!reputationLookup.attempted) {
+    return internalReputation;
+  }
+
+  std::wstring reportedReputation = internalReputation;
+  if (!reportedReputation.empty()) {
+    reportedReputation += L";";
+  }
+  reportedReputation += DescribeReputationLookup(reputationLookup);
+  return reportedReputation;
+}
+
 std::wstring GuessTechnique(const FileData& file) {
   if (file.extension == L".ps1" || file.extension == L".psm1") return L"T1059.001";
   if (file.extension == L".bat" || file.extension == L".cmd") return L"T1059.003";
@@ -823,24 +838,37 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                        [](const auto& left, const auto& right) { return left.score < right.score; });
   const auto quarantineCandidate =
       file.pe || ExecutableExt(file.extension) || file.ole || file.zip || file.extension == L".hta";
+  const auto reputationLookup = policy.cloudLookupEnabled && !file.sha256.empty() && score >= kDetectThreshold
+                                    ? LookupPublicFileReputation(file.sha256)
+                                    : ReputationLookupResult{};
+  const auto verifiedKnownGood = reputationLookup.attempted && reputationLookup.knownGood;
   ScanFinding finding{
       .path = file.path,
       .sizeBytes = file.sizeBytes,
       .sha256 = file.sha256,
       .contentType = file.contentType,
-      .reputation = file.reputation,
+      .reputation = BuildReportedReputation(file.reputation, reputationLookup),
       .signer = file.signer,
       .heuristicScore = static_cast<std::uint32_t>(std::clamp(score, 0, 99)),
       .archiveEntryCount = file.archiveEntryCount,
       .verdict =
           ScanVerdict{
-              .disposition = quarantineCandidate && policy.quarantineOnMalicious && score >= kQuarantineThreshold
-                                 ? VerdictDisposition::Quarantine
-                                 : VerdictDisposition::Block,
+              .disposition = verifiedKnownGood && score < kQuarantineThreshold
+                                 ? VerdictDisposition::Allow
+                                 : score < kQuarantineThreshold && policy.quarantineOnMalicious
+                                       ? VerdictDisposition::Quarantine
+                                       : quarantineCandidate && policy.quarantineOnMalicious &&
+                                                 score >= kQuarantineThreshold
+                                             ? VerdictDisposition::Quarantine
+                                             : VerdictDisposition::Block,
               .confidence = static_cast<std::uint32_t>(std::clamp(score, 1, 99)),
               .tacticId = top != hits.end() ? top->tacticId : L"TA0002",
               .techniqueId = top != hits.end() ? top->techniqueId : GuessTechnique(file),
               .reasons = {}}};
+  if (reputationLookup.attempted) {
+    finding.verdict.reasons.push_back(
+        {verifiedKnownGood ? L"REPUTATION_VERIFIED" : L"REPUTATION_LOOKUP", reputationLookup.summary});
+  }
   for (const auto& hit : hits) {
     finding.verdict.reasons.push_back({hit.code, hit.message});
   }
@@ -981,16 +1009,21 @@ TelemetryRecord BuildScanFindingTelemetry(const ScanFinding& finding, const std:
   const auto techniqueId = finding.verdict.techniqueId.empty() ? L"unknown" : finding.verdict.techniqueId;
   const auto remediationStatus = RemediationStatusToString(finding.remediationStatus);
 
-  std::wstring summary = L"On-demand scan flagged ";
+  std::wstring summary = finding.verdict.disposition == VerdictDisposition::Allow ? L"On-demand scan verified "
+                                                                                  : L"On-demand scan flagged ";
   summary += finding.path.filename().wstring();
-  summary += L" for ";
-  summary += disposition;
-  if (finding.remediationStatus == RemediationStatus::Quarantined) {
-    summary += L" and moved it into local quarantine.";
-  } else if (finding.remediationStatus == RemediationStatus::Failed) {
-    summary += L", but remediation failed locally.";
+  if (finding.verdict.disposition == VerdictDisposition::Allow) {
+    summary += L" after reputation verification.";
   } else {
-    summary += L".";
+    summary += L" for ";
+    summary += disposition;
+    if (finding.remediationStatus == RemediationStatus::Quarantined) {
+      summary += L" and moved it into local quarantine.";
+    } else if (finding.remediationStatus == RemediationStatus::Failed) {
+      summary += L", but remediation failed locally.";
+    } else {
+      summary += L".";
+    }
   }
 
   std::wstring payload = L"{\"path\":\"";

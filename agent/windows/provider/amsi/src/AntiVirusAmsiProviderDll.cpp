@@ -56,7 +56,7 @@ extern "C" __declspec(dllexport) HRESULT __stdcall DllCanUnloadNow() {
 
 extern "C" __declspec(dllexport) HRESULT __stdcall DllRegisterServer() {
   const auto clsidString = AntiVirusAmsiProviderClsidString();
-  const auto modulePath = GetModulePath(GetModuleHandleW(L"antivirus-amsi-provider.dll"));
+  const auto modulePath = GetModulePath(GetModuleHandleW(L"fenrir-amsi-provider.dll"));
   if (clsidString.empty() || modulePath.empty()) {
     return E_FAIL;
   }

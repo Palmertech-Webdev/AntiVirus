@@ -8,7 +8,7 @@ import { buildServer } from "./app.ts";
 import { createFileBackedControlPlaneStore } from "./controlPlaneStore.ts";
 import { scoreDeviceRisk } from "./deviceRiskScoring.ts";
 import { createFileBackedMailStore } from "./mailStore.ts";
-import { createSeedState } from "./seedState.ts";
+import { createEmptyState, createSeedState } from "./seedState.ts";
 
 async function createTestApp() {
   const tempDir = await mkdtemp(join(tmpdir(), "antivirus-control-plane-"));
@@ -81,6 +81,42 @@ async function createTestAppWithState(rawState: object) {
   };
 }
 
+async function createTestAppWithRawState(rawStateText: string) {
+  const tempDir = await mkdtemp(join(tmpdir(), "antivirus-control-plane-"));
+  const stateFilePath = join(tempDir, "state.json");
+  const mailStateFilePath = join(tempDir, "mail-state.json");
+  await writeFile(stateFilePath, rawStateText, "utf8");
+
+  const store = createFileBackedControlPlaneStore({
+    stateFilePath,
+    commandChannelUrl: "wss://test.local/api/v1/commands",
+    now: (() => {
+      let tick = 0;
+      return () => `2026-04-08T10:20:${String(tick++).padStart(2, "0")}Z`;
+    })()
+  });
+  const mailStore = createFileBackedMailStore({
+    stateFilePath: mailStateFilePath,
+    seedDemoData: true,
+    now: (() => {
+      let tick = 0;
+      return () => `2026-04-08T10:30:${String(tick++).padStart(2, "0")}Z`;
+    })()
+  });
+  const app = buildServer({ store, mailStore });
+
+  await app.ready();
+
+  return {
+    app,
+    stateFilePath,
+    async cleanup() {
+      await app.close();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  };
+}
+
 function deviceAuthHeaders(enrollment: { deviceApiKey?: string }) {
   return enrollment.deviceApiKey ? { "x-device-api-key": enrollment.deviceApiKey } : {};
 }
@@ -110,6 +146,161 @@ test("dashboard loads seed state from persistent storage", async (t) => {
     devices: Array<{ hostname: string }>;
   };
   assert.equal(persisted.devices[0].hostname, "FINANCE-LAPTOP-07");
+});
+
+test("an empty control-plane state file recovers to a usable dashboard", async (t) => {
+  const harness = await createTestAppWithRawState("");
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const response = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(response.statusCode, 200);
+  const payload = response.json() as {
+    defaultPolicy: { name: string };
+    devices: Array<unknown>;
+  };
+  assert.equal(payload.defaultPolicy.name, "Business Baseline");
+  assert.equal(payload.devices.length, 0);
+
+  const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
+    devices: Array<unknown>;
+    defaultPolicy: { name: string };
+  };
+  assert.equal(persisted.defaultPolicy.name, "Business Baseline");
+  assert.equal(persisted.devices.length, 0);
+});
+
+test("enrolling the same serial number reuses the existing device record", async (t) => {
+  const harness = await createTestAppWithState(createEmptyState("2026-04-08T10:20:00.000Z"));
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const firstResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "PM-DELL",
+      osVersion: "Windows 10.0 Build 26200",
+      serialNumber: "LAB-DUPE-001"
+    }
+  });
+
+  assert.equal(firstResponse.statusCode, 201);
+  const firstEnrollment = firstResponse.json() as { deviceId: string };
+
+  const secondResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "PM-DELL",
+      osVersion: "Windows 10.0 Build 26200",
+      serialNumber: "LAB-DUPE-001"
+    }
+  });
+
+  assert.equal(secondResponse.statusCode, 201);
+  const secondEnrollment = secondResponse.json() as { deviceId: string };
+  assert.equal(secondEnrollment.deviceId, firstEnrollment.deviceId);
+
+  const dashboard = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(dashboard.statusCode, 200);
+  const dashboardPayload = dashboard.json() as { devices: Array<{ id: string; serialNumber: string }> };
+  assert.equal(dashboardPayload.devices.length, 1);
+  assert.equal(dashboardPayload.devices[0].id, firstEnrollment.deviceId);
+  assert.equal(dashboardPayload.devices[0].serialNumber, "LAB-DUPE-001");
+});
+
+test("duplicate stored device records collapse to one device on load", async (t) => {
+  const rawState = createEmptyState("2026-04-08T11:00:00.000Z") as any;
+  rawState.devices = [
+    {
+      id: "device-001",
+      hostname: "PM-DELL",
+      osVersion: "Windows 10.0 Build 26200",
+      agentVersion: "0.1.0-alpha",
+      platformVersion: "platform-0.1.0",
+      serialNumber: "SERIAL-1234",
+      enrolledAt: "2026-04-08T10:00:00.000Z",
+      lastSeenAt: "2026-04-08T10:05:00.000Z",
+      lastPolicySyncAt: null,
+      lastTelemetryAt: null,
+      healthState: "degraded",
+      isolated: false,
+      policyId: "policy-default",
+      policyName: "Business Baseline",
+      privateIpAddresses: ["10.252.0.102"],
+      publicIpAddress: null,
+      lastLoggedOnUser: null,
+      installedSoftware: []
+    },
+    {
+      id: "device-002",
+      hostname: "PM-DELL",
+      osVersion: "Windows 10.0 Build 26200",
+      agentVersion: "0.1.0-alpha",
+      platformVersion: "platform-0.1.0",
+      serialNumber: "SERIAL-1234",
+      enrolledAt: "2026-04-08T10:10:00.000Z",
+      lastSeenAt: "2026-04-08T10:20:00.000Z",
+      lastPolicySyncAt: "2026-04-08T10:18:00.000Z",
+      lastTelemetryAt: "2026-04-08T10:19:00.000Z",
+      healthState: "healthy",
+      isolated: false,
+      policyId: "policy-default",
+      policyName: "Business Baseline",
+      privateIpAddresses: ["10.252.0.103"],
+      publicIpAddress: null,
+      lastLoggedOnUser: "PM-DELL\\mattj",
+      installedSoftware: []
+    }
+  ];
+  rawState.telemetry = [
+    {
+      eventId: "telemetry-002",
+      deviceId: "device-002",
+      hostname: "PM-DELL",
+      eventType: "device.heartbeat",
+      source: "agent-service",
+      summary: "Heartbeat received.",
+      occurredAt: "2026-04-08T10:20:00.000Z",
+      ingestedAt: "2026-04-08T10:20:01.000Z",
+      payloadJson: "{}"
+    }
+  ];
+
+  const harness = await createTestAppWithRawState(JSON.stringify(rawState, null, 2));
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const dashboard = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/dashboard"
+  });
+
+  assert.equal(dashboard.statusCode, 200);
+  const dashboardPayload = dashboard.json() as { devices: Array<{ id: string; lastSeenAt: string }> };
+  assert.equal(dashboardPayload.devices.length, 1);
+  assert.equal(dashboardPayload.devices[0].id, "device-001");
+  assert.equal(dashboardPayload.devices[0].lastSeenAt, "2026-04-08T10:20:00.000Z");
+
+  const persisted = JSON.parse(await readFile(harness.stateFilePath, "utf8")) as {
+    devices: Array<{ id: string; lastSeenAt: string }>;
+    telemetry: Array<{ deviceId: string }>;
+  };
+  assert.equal(persisted.devices.length, 1);
+  assert.equal(persisted.devices[0].id, "device-001");
+  assert.equal(persisted.telemetry[0].deviceId, "device-001");
 });
 
 test("mail dashboard exposes seeded domains, messages, and quarantine records", async (t) => {

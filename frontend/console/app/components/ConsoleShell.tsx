@@ -23,15 +23,15 @@ interface ConsoleShellProps {
   onRefresh: () => void;
   refreshing: boolean;
   source: DataSource;
-  generatedAt: string;
+  generatedAt?: string | null;
   policyRevision: string;
   statusItems?: StatusItem[];
   drawer?: ReactNode;
   children: ReactNode;
 }
 
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString();
+function formatDateTime(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleString() : "Awaiting snapshot";
 }
 
 function sourceLabel(source: DataSource) {

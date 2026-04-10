@@ -7,8 +7,8 @@ param(
     [string]$Channel = 'stable',
     [string]$PackageSigner = '',
     [string[]]$Files = @(
-        'antivirus-agent-service.exe',
-        'antivirus-amsi-provider.dll',
+        'fenrir-agent-service.exe',
+        'fenrir-amsi-provider.dll',
         'signatures\default-signatures.tsv'
     )
 )

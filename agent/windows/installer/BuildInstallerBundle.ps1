@@ -1,5 +1,5 @@
 param(
-    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build-fenrir'),
+    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build'),
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\installer'),
     [switch]$Clean
 )

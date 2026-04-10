@@ -12,6 +12,7 @@
 
 #include "AmsiEvidenceRecorder.h"
 #include "CryptoUtils.h"
+#include "ReputationLookup.h"
 #include "QuarantineStore.h"
 #include "StringUtils.h"
 
@@ -314,7 +315,14 @@ std::vector<IndicatorHit> CollectIndicatorHits(const std::wstring& appNameLower,
 
 TelemetryRecord BuildAmsiDecisionTelemetry(const AmsiInspectionOutcome& outcome, const std::wstring& source,
                                            const std::wstring& deviceId) {
-  std::wstring summary = outcome.blocked ? L"AMSI blocked suspicious content for " : L"AMSI allowed content for ";
+  std::wstring summary;
+  if (outcome.finding.verdict.disposition == VerdictDisposition::Allow) {
+    summary = L"AMSI allowed content for ";
+  } else if (outcome.finding.verdict.disposition == VerdictDisposition::Quarantine) {
+    summary = L"AMSI quarantined suspicious content for ";
+  } else {
+    summary = L"AMSI blocked suspicious content for ";
+  }
   summary += outcome.appName.empty() ? L"an unknown host" : outcome.appName;
   summary += L".";
 
@@ -352,7 +360,14 @@ TelemetryRecord BuildAmsiFindingTelemetry(const AmsiInspectionOutcome& outcome, 
     subject = outcome.contentName.empty() ? L"in-memory content" : outcome.contentName;
   }
 
-  std::wstring summary = L"AMSI provider blocked ";
+  std::wstring summary;
+  if (outcome.finding.verdict.disposition == VerdictDisposition::Allow) {
+    summary = L"AMSI provider allowed ";
+  } else if (outcome.finding.verdict.disposition == VerdictDisposition::Quarantine) {
+    summary = L"AMSI provider quarantined ";
+  } else {
+    summary = L"AMSI provider blocked ";
+  }
   summary += subject;
   summary += L" for ";
   summary += outcome.appName.empty() ? L"an unknown host." : outcome.appName + L".";
@@ -456,11 +471,6 @@ AmsiInspectionOutcome InspectAmsiContent(const AmsiContentRequest& request, cons
     return outcome;
   }
 
-  outcome.detection = true;
-  outcome.blocked = true;
-  outcome.finding.verdict.disposition = VerdictDisposition::Block;
-  outcome.finding.verdict.confidence = static_cast<std::uint32_t>(std::min(score, 99));
-
   const auto topHit =
       std::max_element(hits.begin(), hits.end(),
                        [](const IndicatorHit& left, const IndicatorHit& right) { return left.score < right.score; });
@@ -472,23 +482,46 @@ AmsiInspectionOutcome InspectAmsiContent(const AmsiContentRequest& request, cons
     outcome.finding.verdict.techniqueId = GuessDefaultTechnique(appNameLower, contentNameLower);
   }
 
-  if (const auto quarantineCandidate = ResolveQuarantineCandidate(outcome.contentName);
-      quarantineCandidate.has_value() && policy.quarantineOnMalicious) {
-    outcome.finding.path = *quarantineCandidate;
-    outcome.finding.verdict.disposition = VerdictDisposition::Quarantine;
-    QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
-    const auto quarantineResult = quarantineStore.QuarantineFile(outcome.finding);
-    if (quarantineResult.success) {
-      outcome.finding.remediationStatus = RemediationStatus::Quarantined;
-      outcome.finding.quarantineRecordId = quarantineResult.recordId;
-      outcome.finding.quarantinedPath = quarantineResult.quarantinedPath;
-    } else {
-      outcome.finding.remediationStatus = RemediationStatus::Failed;
-      outcome.finding.remediationError =
-          quarantineResult.errorMessage.empty() ? L"AMSI quarantine failed for the backing file."
-                                                : quarantineResult.errorMessage;
-      outcome.finding.verdict.reasons.push_back({L"QUARANTINE_FAILED", outcome.finding.remediationError});
-      outcome.finding.verdict.disposition = VerdictDisposition::Block;
+  outcome.detection = true;
+
+  ReputationLookupResult reputationLookup{};
+  if (policy.cloudLookupEnabled && !outcome.finding.sha256.empty()) {
+    reputationLookup = LookupPublicFileReputation(outcome.finding.sha256);
+    outcome.finding.reputation = DescribeReputationLookup(reputationLookup);
+    outcome.finding.verdict.reasons.push_back(
+        {reputationLookup.knownGood ? L"REPUTATION_VERIFIED" : L"REPUTATION_LOOKUP", reputationLookup.summary});
+  } else {
+    outcome.finding.reputation = L"hashlookup-skipped";
+  }
+
+  const auto reputationAllows = reputationLookup.attempted && reputationLookup.knownGood && score < 70;
+  if (reputationAllows) {
+    outcome.blocked = false;
+    outcome.finding.verdict.disposition = VerdictDisposition::Allow;
+    outcome.finding.verdict.confidence = static_cast<std::uint32_t>(std::min(score, 54));
+  } else {
+    outcome.blocked = true;
+    outcome.finding.verdict.disposition = VerdictDisposition::Block;
+    outcome.finding.verdict.confidence = static_cast<std::uint32_t>(std::min(score, 99));
+
+    if (const auto quarantineCandidate = ResolveQuarantineCandidate(outcome.contentName);
+        quarantineCandidate.has_value() && policy.quarantineOnMalicious) {
+      outcome.finding.path = *quarantineCandidate;
+      outcome.finding.verdict.disposition = VerdictDisposition::Quarantine;
+      QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
+      const auto quarantineResult = quarantineStore.QuarantineFile(outcome.finding);
+      if (quarantineResult.success) {
+        outcome.finding.remediationStatus = RemediationStatus::Quarantined;
+        outcome.finding.quarantineRecordId = quarantineResult.recordId;
+        outcome.finding.quarantinedPath = quarantineResult.quarantinedPath;
+      } else {
+        outcome.finding.remediationStatus = RemediationStatus::Failed;
+        outcome.finding.remediationError =
+            quarantineResult.errorMessage.empty() ? L"AMSI quarantine failed for the backing file."
+                                                  : quarantineResult.errorMessage;
+        outcome.finding.verdict.reasons.push_back({L"QUARANTINE_FAILED", outcome.finding.remediationError});
+        outcome.finding.verdict.disposition = VerdictDisposition::Block;
+      }
     }
   }
 

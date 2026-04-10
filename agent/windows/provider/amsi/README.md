@@ -13,16 +13,16 @@ What it does today:
 
 Build outputs:
 
-- `antivirus-amsi-provider.dll`
-- `antivirus-amsitestcli.exe`
+- `fenrir-amsi-provider.dll`
+- `fenrir-amsitestcli.exe`
 
 Useful commands:
 
 ```powershell
-.\antivirus-agent-service.exe --register-amsi-provider
-.\antivirus-agent-service.exe --unregister-amsi-provider
-.\antivirus-amsitestcli.exe --notify --app PowerShell --text "Write-Host hello"
-.\antivirus-amsitestcli.exe --stream --app PowerShell --path C:\Temp\sample.ps1
+.\fenrir-agent-service.exe --register-amsi-provider
+.\fenrir-agent-service.exe --unregister-amsi-provider
+.\fenrir-amsitestcli.exe --notify --app PowerShell --text "Write-Host hello"
+.\fenrir-amsitestcli.exe --stream --app PowerShell --path C:\Temp\sample.ps1
 ```
 
 The provider is buildable in this repo now. Production rollout still needs installer wiring, registration during install, and validation against real PowerShell/Wscript/Office AMSI invocation paths.

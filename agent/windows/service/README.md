@@ -58,18 +58,18 @@ The purpose of this folder is to establish the internal contracts we will build 
 ## Commands
 
 ```powershell
-.\antivirus-agent-service.exe --console
-.\antivirus-agent-service.exe --install
-.\\antivirus-agent-service.exe --repair --elam-driver C:\Drivers\antivirus-elam.sys
-.\\antivirus-agent-service.exe --install --elam-driver C:\Drivers\antivirus-elam.sys
-.\\antivirus-agent-service.exe --upgrade C:\Temp\update.manifest
-.\\antivirus-agent-service.exe --rollback-update <transaction-id>
-.\antivirus-agent-service.exe --uninstall
-.\\antivirus-agent-service.exe --uninstall --token <secret>
-.\\antivirus-agent-service.exe --wsc-status
-.\\antivirus-agent-service.exe --self-test
-.\\antivirus-agent-service.exe --register-amsi-provider
-.\\antivirus-agent-service.exe --unregister-amsi-provider
+.\fenrir-agent-service.exe --console
+.\fenrir-agent-service.exe --install
+.\fenrir-agent-service.exe --repair --elam-driver C:\Drivers\antivirus-elam.sys
+.\fenrir-agent-service.exe --install --elam-driver C:\Drivers\antivirus-elam.sys
+.\fenrir-agent-service.exe --upgrade C:\Temp\update.manifest
+.\fenrir-agent-service.exe --rollback-update <transaction-id>
+.\fenrir-agent-service.exe --uninstall
+.\fenrir-agent-service.exe --uninstall --token <secret>
+.\fenrir-agent-service.exe --wsc-status
+.\fenrir-agent-service.exe --self-test
+.\fenrir-agent-service.exe --register-amsi-provider
+.\fenrir-agent-service.exe --unregister-amsi-provider
 .\antivirus-endpoint-client.exe
 .\antivirus-scannercli.exe --path C:\Users\Public\Downloads
 .\antivirus-scannercli.exe --no-remediation C:\Temp\samples
