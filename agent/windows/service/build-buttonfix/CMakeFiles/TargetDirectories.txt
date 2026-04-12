@@ -4,6 +4,7 @@ C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-butto
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-amsi-provider.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-agent-service.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-endpoint-client.dir
+C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-pam-client.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-scannercli.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-amsitestcli.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-buttonfix/CMakeFiles/antivirus-etwtestcli.dir

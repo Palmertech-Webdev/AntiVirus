@@ -350,6 +350,35 @@ interface BuildServerOptions {
   mailStore?: MailStore;
 }
 
+const DEFAULT_ALLOWED_CORS_ORIGINS = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:4000",
+  "http://127.0.0.1:4000"
+];
+
+const ALLOW_ADMIN_TOKEN_QUERY_PARAM = process.env.FENRIR_ALLOW_ADMIN_TOKEN_QUERY_PARAM === "true";
+const ALLOW_DEVICE_API_KEY_QUERY_PARAM = process.env.FENRIR_ALLOW_DEVICE_API_KEY_QUERY_PARAM === "true";
+const ALLOW_UNAUTHENTICATED_DEVICE_TRAFFIC = process.env.FENRIR_ALLOW_UNAUTHENTICATED_DEVICE_TRAFFIC === "true";
+const ALLOW_ALL_CORS_ORIGINS = process.env.FENRIR_ALLOW_ALL_CORS_ORIGINS === "true";
+
+function normalizeCorsOrigin(origin: string) {
+  return origin.trim().toLowerCase();
+}
+
+function parseAllowedCorsOrigins() {
+  const configured = process.env.FENRIR_ALLOWED_CORS_ORIGINS
+    ?.split(",")
+    .map((entry) => normalizeCorsOrigin(entry))
+    .filter((entry) => entry.length > 0);
+
+  if (!configured || configured.length === 0) {
+    return new Set(DEFAULT_ALLOWED_CORS_ORIGINS.map((origin) => normalizeCorsOrigin(origin)));
+  }
+
+  return new Set(configured);
+}
+
 function sendValidationError(reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }, details: unknown) {
   return reply.code(400).send({
     error: "invalid_request",
@@ -447,15 +476,17 @@ function extractAdminSessionToken(request: { headers: Record<string, unknown>; r
     return authHeader.slice("Bearer ".length).trim();
   }
 
-  const rawUrl = request.raw.url;
-  if (typeof rawUrl === "string") {
-    const queryStart = rawUrl.indexOf("?");
-    if (queryStart >= 0) {
-      const query = rawUrl.slice(queryStart + 1);
-      const params = new URLSearchParams(query);
-      const queryToken = params.get("adminSessionToken");
-      if (queryToken && queryToken.length > 0) {
-        return queryToken;
+  if (ALLOW_ADMIN_TOKEN_QUERY_PARAM) {
+    const rawUrl = request.raw.url;
+    if (typeof rawUrl === "string") {
+      const queryStart = rawUrl.indexOf("?");
+      if (queryStart >= 0) {
+        const query = rawUrl.slice(queryStart + 1);
+        const params = new URLSearchParams(query);
+        const queryToken = params.get("adminSessionToken");
+        if (queryToken && queryToken.length > 0) {
+          return queryToken;
+        }
       }
     }
   }
@@ -598,15 +629,17 @@ export function buildServer(options: BuildServerOptions = {}) {
       return authHeader.slice("Bearer ".length).trim();
     }
 
-    const rawUrl = request.raw.url;
-    if (typeof rawUrl === "string") {
-      const queryStart = rawUrl.indexOf("?");
-      if (queryStart >= 0) {
-        const query = rawUrl.slice(queryStart + 1);
-        const params = new URLSearchParams(query);
-        const queryKey = params.get("deviceApiKey");
-        if (queryKey && queryKey.length > 0) {
-          return queryKey;
+    if (ALLOW_DEVICE_API_KEY_QUERY_PARAM) {
+      const rawUrl = request.raw.url;
+      if (typeof rawUrl === "string") {
+        const queryStart = rawUrl.indexOf("?");
+        if (queryStart >= 0) {
+          const query = rawUrl.slice(queryStart + 1);
+          const params = new URLSearchParams(query);
+          const queryKey = params.get("deviceApiKey");
+          if (queryKey && queryKey.length > 0) {
+            return queryKey;
+          }
         }
       }
     }
@@ -632,7 +665,15 @@ export function buildServer(options: BuildServerOptions = {}) {
     }
 
     if (!expectedKey && !presentedKey) {
-      return true;
+      if (ALLOW_UNAUTHENTICATED_DEVICE_TRAFFIC) {
+        return true;
+      }
+
+      reply.code(401).send({
+        error: "device_api_key_required",
+        deviceId
+      });
+      return false;
     }
 
     if (!expectedKey || !presentedKey || presentedKey !== expectedKey) {
@@ -646,8 +687,16 @@ export function buildServer(options: BuildServerOptions = {}) {
     return true;
   }
 
+  const allowedCorsOrigins = parseAllowedCorsOrigins();
   void app.register(cors, {
-    origin: true,
+    origin(origin, callback) {
+      if (!origin || ALLOW_ALL_CORS_ORIGINS) {
+        callback(null, true);
+        return;
+      }
+
+      callback(null, allowedCorsOrigins.has(normalizeCorsOrigin(origin)));
+    },
     methods: ["GET", "HEAD", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"]
   });
 

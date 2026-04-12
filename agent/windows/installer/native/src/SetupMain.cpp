@@ -34,6 +34,7 @@ constexpr wchar_t kRunValueName[] = L"FenrirEndpointClient";
 constexpr wchar_t kInstallFolderName[] = L"Fenrir Endpoint";
 constexpr wchar_t kServiceExeName[] = L"fenrir-agent-service.exe";
 constexpr wchar_t kEndpointExeName[] = L"fenrir-endpoint-client.exe";
+constexpr wchar_t kPamExeName[] = L"fenrir-pam.exe";
 constexpr wchar_t kAmsiDllName[] = L"fenrir-amsi-provider.dll";
 constexpr wchar_t kScannerCliName[] = L"fenrir-scannercli.exe";
 constexpr wchar_t kAmsiTestCliName[] = L"fenrir-amsitestcli.exe";
@@ -43,6 +44,8 @@ constexpr wchar_t kWinpthreadDllName[] = L"libwinpthread-1.dll";
 constexpr wchar_t kWebView2LoaderDllName[] = L"WebView2Loader.dll";
 constexpr wchar_t kSetupExeName[] = L"FenrirSetup.exe";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
+constexpr wchar_t kDriverInfRelativePath[] = L"driver\\AntivirusMinifilter.inf";
+constexpr wchar_t kDriverReadmeRelativePath[] = L"driver\\README.md";
 constexpr wchar_t kToolsRelativePath[] = L"tools\\fenrir-scannercli.exe";
 constexpr wchar_t kToolsAmsiTestCliRelativePath[] = L"tools\\fenrir-amsitestcli.exe";
 constexpr wchar_t kToolsEtwTestCliRelativePath[] = L"tools\\fenrir-etwtestcli.exe";
@@ -879,6 +882,7 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
   if (repair) {
     PostLog(hwnd, L"Stopping the running endpoint client before replacing payloads");
     StopMatchingProcess(installRoot / kEndpointExeName);
+    StopMatchingProcess(installRoot / kPamExeName);
 
     std::wstring stopError;
     PostLog(hwnd, L"Stopping the protection service before replacing payloads");
@@ -892,7 +896,8 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
 
   if (!EnsureDirectory(installRoot, errorMessage) ||
       !EnsureDirectory(installRoot / L"tools", errorMessage) ||
-      !EnsureDirectory(installRoot / L"signatures", errorMessage)) {
+      !EnsureDirectory(installRoot / L"signatures", errorMessage) ||
+      !EnsureDirectory(installRoot / L"driver", errorMessage)) {
     return false;
   }
 
@@ -906,15 +911,18 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
   const std::vector<PayloadItem> payloadItems{
       {IDR_PAYLOAD_SERVICE, kServiceExeName, 15, L"Installing service binary"},
       {IDR_PAYLOAD_ENDPOINT_CLIENT, kEndpointExeName, 25, L"Installing endpoint client"},
-      {IDR_PAYLOAD_AMSI_PROVIDER, kAmsiDllName, 35, L"Installing AMSI provider"},
-      {IDR_PAYLOAD_SCANNERCLI, kToolsRelativePath, 45, L"Installing diagnostic scanner"},
-      {IDR_PAYLOAD_AMSITESTCLI, kToolsAmsiTestCliRelativePath, 50, L"Installing AMSI diagnostic tool"},
-      {IDR_PAYLOAD_ETWTESTCLI, kToolsEtwTestCliRelativePath, 54, L"Installing ETW diagnostic tool"},
-      {IDR_PAYLOAD_WFPTESTCLI, kToolsWfpTestCliRelativePath, 58, L"Installing WFP diagnostic tool"},
-      {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 62, L"Installing runtime dependencies"},
-      {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 66, L"Installing tool runtime dependencies"},
-      {IDR_PAYLOAD_WEBVIEW2_LOADER, kWebView2LoaderDllName, 68, L"Installing WebView2 runtime loader"},
-      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 72, L"Installing signature bundle"},
+      {IDR_PAYLOAD_PAM_CLIENT, kPamExeName, 35, L"Installing PAM tool"},
+      {IDR_PAYLOAD_AMSI_PROVIDER, kAmsiDllName, 45, L"Installing AMSI provider"},
+      {IDR_PAYLOAD_SCANNERCLI, kToolsRelativePath, 55, L"Installing diagnostic scanner"},
+      {IDR_PAYLOAD_AMSITESTCLI, kToolsAmsiTestCliRelativePath, 60, L"Installing AMSI diagnostic tool"},
+      {IDR_PAYLOAD_ETWTESTCLI, kToolsEtwTestCliRelativePath, 64, L"Installing ETW diagnostic tool"},
+      {IDR_PAYLOAD_WFPTESTCLI, kToolsWfpTestCliRelativePath, 68, L"Installing WFP diagnostic tool"},
+      {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 72, L"Installing runtime dependencies"},
+      {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 76, L"Installing tool runtime dependencies"},
+      {IDR_PAYLOAD_WEBVIEW2_LOADER, kWebView2LoaderDllName, 80, L"Installing WebView2 runtime loader"},
+      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 84, L"Installing signature bundle"},
+      {IDR_PAYLOAD_DRIVER_INF, kDriverInfRelativePath, 88, L"Installing minifilter deployment metadata"},
+      {IDR_PAYLOAD_DRIVER_README, kDriverReadmeRelativePath, 90, L"Installing minifilter documentation"},
   };
 
   for (const auto& item : payloadItems) {

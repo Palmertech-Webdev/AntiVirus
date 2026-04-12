@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import {
@@ -3457,7 +3457,26 @@ export function createFileBackedControlPlaneStore(
   async function persistState(state: ControlPlaneState) {
     await mkdir(dirname(stateFilePath), { recursive: true });
     const nextPayload = `${JSON.stringify(state, null, 2)}\n`;
-    await writeFile(stateFilePath, nextPayload, "utf8");
+    const tempPath = `${stateFilePath}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, nextPayload, "utf8");
+
+    try {
+      await rename(tempPath, stateFilePath);
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code === "EEXIST" || nodeError.code === "EPERM") {
+        await rm(stateFilePath, { force: true });
+        try {
+          await rename(tempPath, stateFilePath);
+        } catch (replaceError) {
+          await rm(tempPath, { force: true });
+          throw replaceError;
+        }
+      } else {
+        await rm(tempPath, { force: true });
+        throw error;
+      }
+    }
   }
 
   function isTransientJsonParseError(error: unknown) {
@@ -3485,6 +3504,18 @@ export function createFileBackedControlPlaneStore(
     }
   }
 
+  async function backupCorruptStateFile() {
+    const backupPath = `${stateFilePath}.corrupt-${Date.now()}.json`;
+    try {
+      await rename(stateFilePath, backupPath);
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code !== "ENOENT" && nodeError.code !== "EPERM" && nodeError.code !== "EACCES") {
+        throw error;
+      }
+    }
+  }
+
   async function persistStateSerialized(state: ControlPlaneState) {
     persistChain = persistChain.then(() => persistState(state));
     await persistChain;
@@ -3506,6 +3537,10 @@ export function createFileBackedControlPlaneStore(
       const isCorruptStateFile = error instanceof SyntaxError;
       if (!isMissingStateFile && !isCorruptStateFile) {
         throw error;
+      }
+
+      if (isCorruptStateFile) {
+        await backupCorruptStateFile();
       }
 
       cachedState = seedDemoData ? createSeedState(now()) : createEmptyState(now());

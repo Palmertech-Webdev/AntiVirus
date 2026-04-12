@@ -88,17 +88,21 @@ function Find-MinGwRuntimeDll {
 }
 
 $windowsRoot = Split-Path $PSScriptRoot -Parent
-$buildRoot = (Resolve-Path $BuildRoot).Path
+$serviceSourceRoot = Join-Path $windowsRoot 'service'
+$buildRoot = [System.IO.Path]::GetFullPath($BuildRoot)
 $outputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 
 if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
-    $outputFull = [System.IO.Path]::GetFullPath($outputRoot)
-    $buildFull = [System.IO.Path]::GetFullPath($buildRoot)
-    Get-ChildItem -LiteralPath $outputRoot -Force | Where-Object {
-        $itemFull = [System.IO.Path]::GetFullPath($_.FullName)
-        -not $itemFull.StartsWith($buildFull, [System.StringComparison]::OrdinalIgnoreCase)
-    } | Remove-Item -Recurse -Force
+    Remove-Item -LiteralPath $outputRoot -Recurse -Force
 }
+
+Ensure-Directory -Path $buildRoot
+
+if (-not (Test-Path -LiteralPath (Join-Path $buildRoot 'CMakeCache.txt'))) {
+    cmake -S $serviceSourceRoot -B $buildRoot | Out-Host
+}
+
+cmake --build $buildRoot --target antivirus-agent-service antivirus-endpoint-client antivirus-pam-client antivirus-amsi-provider antivirus-scannercli antivirus-amsitestcli antivirus-etwtestcli antivirus-wfptestcli | Out-Host
 
 Ensure-Directory -Path $outputRoot
 Ensure-Directory -Path (Join-Path $outputRoot 'tools')
@@ -109,6 +113,7 @@ Ensure-Directory -Path (Join-Path $outputRoot 'docs')
 $artifactMap = @(
     @{ Source = (Join-Path $buildRoot 'fenrir-agent-service.exe'); Target = (Join-Path $outputRoot 'fenrir-agent-service.exe') },
     @{ Source = (Join-Path $buildRoot 'fenrir-endpoint-client.exe'); Target = (Join-Path $outputRoot 'fenrir-endpoint-client.exe') },
+    @{ Source = (Join-Path $buildRoot 'fenrir-pam.exe'); Target = (Join-Path $outputRoot 'fenrir-pam.exe') },
     @{ Source = (Join-Path $buildRoot 'WebView2Loader.dll'); Target = (Join-Path $outputRoot 'WebView2Loader.dll') },
     @{ Source = (Join-Path $buildRoot 'fenrir-amsi-provider.dll'); Target = (Join-Path $outputRoot 'fenrir-amsi-provider.dll') },
     @{ Source = (Join-Path $buildRoot 'fenrir-scannercli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-scannercli.exe') },

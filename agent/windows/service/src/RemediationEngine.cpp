@@ -361,11 +361,33 @@ RemediationOutcome RemediationEngine::RemediatePath(const std::filesystem::path&
           mutableFinding.remediationStatus = RemediationStatus::Quarantined;
           mutableFinding.quarantineRecordId = quarantineResult.recordId;
           mutableFinding.quarantinedPath = quarantineResult.quarantinedPath;
+          mutableFinding.verdict.reasons.push_back(
+              {L"QUARANTINE_APPLIED", L"Fenrir moved this artifact into local quarantine."});
+          if (!quarantineResult.localStatus.empty()) {
+            mutableFinding.verdict.reasons.push_back(
+                {L"QUARANTINE_STATUS", L"Quarantine status: " + quarantineResult.localStatus + L"."});
+          }
+          if (!quarantineResult.verificationDetail.empty()) {
+            mutableFinding.verdict.reasons.push_back({L"QUARANTINE_VERIFIED", quarantineResult.verificationDetail});
+          }
           outcome.quarantineApplied = true;
           outcome.quarantineRecordId = quarantineResult.recordId;
         } else {
+          if (!quarantineResult.recordId.empty()) {
+            mutableFinding.quarantineRecordId = quarantineResult.recordId;
+            mutableFinding.quarantinedPath = quarantineResult.quarantinedPath;
+          }
           mutableFinding.remediationStatus = RemediationStatus::Failed;
           mutableFinding.remediationError = quarantineResult.errorMessage;
+          if (!quarantineResult.localStatus.empty()) {
+            mutableFinding.verdict.reasons.push_back(
+                {L"QUARANTINE_STATUS", L"Quarantine status: " + quarantineResult.localStatus + L"."});
+          }
+          if (!quarantineResult.verificationDetail.empty()) {
+            mutableFinding.verdict.reasons.push_back(
+                {L"QUARANTINE_VERIFICATION_FAILED", quarantineResult.verificationDetail});
+          }
+          mutableFinding.verdict.reasons.push_back({L"QUARANTINE_FAILED", mutableFinding.remediationError});
         }
       }
 

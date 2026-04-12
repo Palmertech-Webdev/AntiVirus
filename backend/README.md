@@ -55,3 +55,15 @@ The repository now includes a runnable `control-plane` scaffold for:
 - `POST /api/v1/devices/:deviceId/telemetry`
 
 State is persisted to a JSON file in `backend/control-plane/data/state.json` by default. Set `CONTROL_PLANE_STATE_FILE` to override that path for local experiments or tests.
+
+## Phase 0 Security Baseline (Control Plane)
+
+- The control plane now defaults to `HOST=127.0.0.1` (loopback-only) unless you explicitly set `HOST`.
+- If you bind to a non-loopback host, startup is blocked when bootstrap admin secrets are still default.
+- Device and admin query-string tokens are disabled by default:
+  - `adminSessionToken` in URL is rejected unless `FENRIR_ALLOW_ADMIN_TOKEN_QUERY_PARAM=true`
+  - `deviceApiKey` in URL is rejected unless `FENRIR_ALLOW_DEVICE_API_KEY_QUERY_PARAM=true`
+- Device endpoints now require an API key by default (`FENRIR_ALLOW_UNAUTHENTICATED_DEVICE_TRAFFIC=true` can be used for temporary legacy compatibility).
+- CORS now defaults to local origins only (`localhost`/`127.0.0.1` on ports `3000` and `4000`).
+  - Override list via `FENRIR_ALLOWED_CORS_ORIGINS` (comma-separated origins)
+  - Open all origins only with `FENRIR_ALLOW_ALL_CORS_ORIGINS=true`

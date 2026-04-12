@@ -178,7 +178,7 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
 
   snapshot.activeQuarantineCount = std::count_if(
       quarantineItems.begin(), quarantineItems.end(),
-      [](const QuarantineIndexRecord& record) { return _wcsicmp(record.localStatus.c_str(), L"quarantined") == 0; });
+      [](const QuarantineIndexRecord& record) { return record.localStatus.rfind(L"quarantined", 0) == 0; });
 
   for (const auto& finding : findings) {
     if (snapshot.recentFindings.size() < findingLimit) {

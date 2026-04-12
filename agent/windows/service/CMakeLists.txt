@@ -65,7 +65,7 @@ add_library(antivirus-agent-core STATIC
 )
 
 target_include_directories(antivirus-agent-core PUBLIC include ../shared/include ../sensor/etw/include ../sensor/wfp/include)
-target_link_libraries(antivirus-agent-core PUBLIC antivirus-sqlite3 winhttp ole32 oleaut32 bcrypt advapi32 tdh crypt32 wintrust fwpuclnt iphlpapi shell32 ws2_32 wtsapi32)
+target_link_libraries(antivirus-agent-core PUBLIC antivirus-sqlite3 winhttp ole32 oleaut32 bcrypt advapi32 tdh crypt32 wintrust fwpuclnt iphlpapi shell32 ws2_32 wtsapi32 userenv)
 antivirus_apply_portable_runtime(antivirus-agent-core)
 
 add_library(antivirus-amsi-provider-core STATIC
@@ -121,6 +121,18 @@ add_custom_command(TARGET antivirus-endpoint-client POST_BUILD
           "${WEBVIEW2_LOADER_DLL}"
           "$<TARGET_FILE_DIR:antivirus-endpoint-client>/WebView2Loader.dll"
 )
+
+add_executable(antivirus-pam-client WIN32
+  ../tools/pamui/src/pamui.rc
+  ../tools/pamui/src/PamClientMain.cpp
+)
+
+target_include_directories(antivirus-pam-client PRIVATE include)
+target_link_libraries(antivirus-pam-client PRIVATE comdlg32 comctl32 shell32)
+target_compile_definitions(antivirus-pam-client PRIVATE UNICODE _UNICODE)
+target_link_options(antivirus-pam-client PRIVATE -municode)
+set_target_properties(antivirus-pam-client PROPERTIES OUTPUT_NAME "fenrir-pam")
+antivirus_apply_portable_runtime(antivirus-pam-client)
 
 add_executable(antivirus-scannercli
   ../tools/scannercli/src/ScannerCliMain.cpp
@@ -191,6 +203,7 @@ endif()
 file(TO_CMAKE_PATH "${INSTALLER_NATIVE_DIR}/include/SetupResourceIds.h" SETUP_RESOURCE_HEADER)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-agent-service.exe" SETUP_SERVICE_EXE)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-endpoint-client.exe" SETUP_ENDPOINT_CLIENT_EXE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-pam.exe" SETUP_PAM_EXE)
 file(TO_CMAKE_PATH "${WEBVIEW2_LOADER_DLL}" SETUP_WEBVIEW2_LOADER_DLL)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-amsi-provider.dll" SETUP_AMSI_PROVIDER_DLL)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-scannercli.exe" SETUP_SCANNERCLI_EXE)
@@ -198,12 +211,15 @@ file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-amsitestcli.exe" SETUP_AM
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-etwtestcli.exe" SETUP_ETWTESTCLI_EXE)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/fenrir-wfptestcli.exe" SETUP_WFPTESTCLI_EXE)
 file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../signatures/default-signatures.tsv" SETUP_SIGNATURES_FILE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../driver/minifilter/AntivirusMinifilter.inf" SETUP_DRIVER_INF_FILE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../driver/minifilter/README.md" SETUP_DRIVER_README_FILE)
 file(TO_CMAKE_PATH "${SETUP_WINPTHREAD_DLL}" SETUP_WINPTHREAD_DLL_CMAKE)
 
 file(GENERATE OUTPUT ${INSTALLER_GENERATED_DIR}/SetupPayload.rc CONTENT
 "#include \"${SETUP_RESOURCE_HEADER}\"\n\
 IDR_PAYLOAD_SERVICE RCDATA \"${SETUP_SERVICE_EXE}\"\n\
 IDR_PAYLOAD_ENDPOINT_CLIENT RCDATA \"${SETUP_ENDPOINT_CLIENT_EXE}\"\n\
+IDR_PAYLOAD_PAM_CLIENT RCDATA \"${SETUP_PAM_EXE}\"\n\
 IDR_PAYLOAD_WEBVIEW2_LOADER RCDATA \"${SETUP_WEBVIEW2_LOADER_DLL}\"\n\
 IDR_PAYLOAD_AMSI_PROVIDER RCDATA \"${SETUP_AMSI_PROVIDER_DLL}\"\n\
 IDR_PAYLOAD_SCANNERCLI RCDATA \"${SETUP_SCANNERCLI_EXE}\"\n\
@@ -211,6 +227,8 @@ IDR_PAYLOAD_AMSITESTCLI RCDATA \"${SETUP_AMSITESTCLI_EXE}\"\n\
 IDR_PAYLOAD_ETWTESTCLI RCDATA \"${SETUP_ETWTESTCLI_EXE}\"\n\
 IDR_PAYLOAD_WFPTESTCLI RCDATA \"${SETUP_WFPTESTCLI_EXE}\"\n\
 IDR_PAYLOAD_SIGNATURES RCDATA \"${SETUP_SIGNATURES_FILE}\"\n\
+IDR_PAYLOAD_DRIVER_INF RCDATA \"${SETUP_DRIVER_INF_FILE}\"\n\
+IDR_PAYLOAD_DRIVER_README RCDATA \"${SETUP_DRIVER_README_FILE}\"\n\
 IDR_PAYLOAD_WINPTHREAD RCDATA \"${SETUP_WINPTHREAD_DLL_CMAKE}\"\n")
 
 add_executable(antivirus-setup WIN32
@@ -222,6 +240,7 @@ add_executable(antivirus-setup WIN32
 add_dependencies(antivirus-setup
   antivirus-agent-service
   antivirus-endpoint-client
+  antivirus-pam-client
   antivirus-amsi-provider
   antivirus-scannercli
   antivirus-amsitestcli

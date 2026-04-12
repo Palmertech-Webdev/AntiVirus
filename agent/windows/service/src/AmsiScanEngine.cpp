@@ -514,11 +514,34 @@ AmsiInspectionOutcome InspectAmsiContent(const AmsiContentRequest& request, cons
         outcome.finding.remediationStatus = RemediationStatus::Quarantined;
         outcome.finding.quarantineRecordId = quarantineResult.recordId;
         outcome.finding.quarantinedPath = quarantineResult.quarantinedPath;
+        outcome.finding.verdict.reasons.push_back(
+            {L"QUARANTINE_APPLIED", L"Fenrir moved the backing artifact into local quarantine."});
+        if (!quarantineResult.localStatus.empty()) {
+          outcome.finding.verdict.reasons.push_back(
+              {L"QUARANTINE_STATUS", L"Quarantine status: " + quarantineResult.localStatus + L"."});
+        }
+        if (!quarantineResult.verificationDetail.empty()) {
+          outcome.finding.verdict.reasons.push_back({L"QUARANTINE_VERIFIED", quarantineResult.verificationDetail});
+        }
       } else {
+        if (!quarantineResult.recordId.empty()) {
+          outcome.finding.quarantineRecordId = quarantineResult.recordId;
+        }
+        if (!quarantineResult.quarantinedPath.empty()) {
+          outcome.finding.quarantinedPath = quarantineResult.quarantinedPath;
+        }
         outcome.finding.remediationStatus = RemediationStatus::Failed;
         outcome.finding.remediationError =
             quarantineResult.errorMessage.empty() ? L"AMSI quarantine failed for the backing file."
                                                   : quarantineResult.errorMessage;
+        if (!quarantineResult.localStatus.empty()) {
+          outcome.finding.verdict.reasons.push_back(
+              {L"QUARANTINE_STATUS", L"Quarantine status: " + quarantineResult.localStatus + L"."});
+        }
+        if (!quarantineResult.verificationDetail.empty()) {
+          outcome.finding.verdict.reasons.push_back(
+              {L"QUARANTINE_VERIFICATION_FAILED", quarantineResult.verificationDetail});
+        }
         outcome.finding.verdict.reasons.push_back({L"QUARANTINE_FAILED", outcome.finding.remediationError});
         outcome.finding.verdict.disposition = VerdictDisposition::Block;
       }

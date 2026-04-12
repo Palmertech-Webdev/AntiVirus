@@ -50,8 +50,12 @@ class AgentService {
 
   std::vector<std::filesystem::path> BuildMonitoredRoots() const;
   void RunSyncLoop(AgentRunMode mode);
-  bool WaitForNextCycle(AgentRunMode mode, int nextCycle) const;
+  bool WaitForNextCycle(AgentRunMode mode, int nextCycle);
   bool ShouldStop() const;
+  void ProcessPamRequests();
+  std::filesystem::path GetPamRequestPath() const;
+  std::vector<std::filesystem::path> GetPamRequestPaths() const;
+  std::filesystem::path GetPamAuditJournalPath() const;
 
   void SyncWithControlPlane(int cycle);
   void EnsureEnrollment();
@@ -77,7 +81,6 @@ class AgentService {
   void PrintStatus() const;
   void QueueEndpointStatusTelemetry();
   void QueueDeviceInventoryTelemetry(int cycle);
-  void ProcessPrivilegeRequestJournal();
   void DrainProcessTelemetry();
   void DrainRealtimeProtectionTelemetry();
   void DrainNetworkTelemetry();
@@ -108,6 +111,7 @@ class AgentService {
   bool lastHardeningCheckFailed_{false};
   bool lastTelemetryFlushFailed_{false};
   HANDLE stopEvent_{nullptr};
+  HANDLE pamRequestEvent_{nullptr};
 };
 
 }  // namespace antivirus::agent

@@ -1,5 +1,8 @@
 #include "AgentService.h"
 
+#include <WtsApi32.h>
+#include <userenv.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -9,6 +12,7 @@
 #include <iostream>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -39,9 +43,25 @@ struct ProcessExecutionResult {
   std::wstring output;
 };
 
-std::filesystem::path GetPrivilegeRequestJournalPath(const AgentConfig& config) {
-  return config.runtimeDatabasePath.parent_path() / L"privilege-requests.jsonl";
-}
+constexpr wchar_t kPamRequestEventName[] = L"Global\\FenrirPamRequestReady";
+constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
+constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
+
+struct PamRequestPayload {
+  std::wstring requestedAt;
+  std::wstring requester;
+  std::wstring action;
+  std::wstring targetPath;
+  std::wstring arguments;
+  std::wstring reason;
+};
+
+struct PamLaunchPlan {
+  std::wstring executablePath;
+  std::wstring arguments;
+  std::wstring targetPath;
+  std::optional<std::uint32_t> maxRuntimeSeconds;
+};
 
 std::string EscapeRegex(const std::string& value) {
   std::string escaped;
@@ -182,6 +202,98 @@ bool PathStartsWith(std::wstring path, std::wstring prefix) {
   return path == prefix.substr(0, prefix.size() - 1) || path.starts_with(prefix);
 }
 
+std::optional<EventEnvelope> BuildBehaviorEventFromProcessTelemetry(const TelemetryRecord& record,
+                                                                    const std::wstring& deviceId) {
+  if (record.eventType == L"process.started") {
+    const auto imagePath = ExtractPayloadString(record.payloadJson, "imagePath").value_or(L"");
+    const auto imageName = ExtractPayloadString(record.payloadJson, "imageName").value_or(L"");
+    if (imagePath.empty() && imageName.empty()) {
+      return std::nullopt;
+    }
+
+    EventEnvelope event{
+        .kind = EventKind::ProcessStart,
+        .deviceId = deviceId,
+        .correlationId = record.eventId,
+        .targetPath = imagePath.empty() ? imageName : imagePath,
+        .sha256 = {},
+        .process =
+            ProcessContext{
+                .imagePath = imagePath,
+                .commandLine = ExtractPayloadString(record.payloadJson, "commandLine").value_or(L""),
+                .parentImagePath = ExtractPayloadString(record.payloadJson, "parentImagePath").value_or(L""),
+                .userSid = ExtractPayloadString(record.payloadJson, "userSid").value_or(L""),
+                .signer = ExtractPayloadString(record.payloadJson, "signer").value_or(L"")},
+        .occurredAt = std::chrono::system_clock::now()};
+    return event;
+  }
+
+  if (record.eventType == L"image.loaded") {
+    const auto modulePath = ExtractPayloadString(record.payloadJson, "imagePath").value_or(L"");
+    if (modulePath.empty()) {
+      return std::nullopt;
+    }
+
+    EventEnvelope event{
+        .kind = EventKind::FileOpen,
+        .deviceId = deviceId,
+        .correlationId = record.eventId,
+        .targetPath = modulePath,
+        .sha256 = {},
+        .process =
+            ProcessContext{
+                .imagePath = ExtractPayloadString(record.payloadJson, "processImagePath").value_or(L""),
+                .commandLine = {},
+                .parentImagePath = {},
+                .userSid = {},
+                .signer = ExtractPayloadString(record.payloadJson, "signer").value_or(L"")},
+        .occurredAt = std::chrono::system_clock::now()};
+    return event;
+  }
+
+  return std::nullopt;
+}
+
+std::optional<EventEnvelope> BuildBehaviorEventFromNetworkTelemetry(const TelemetryRecord& record,
+                                                                    const std::wstring& deviceId) {
+  if (record.eventType != L"network.connection.blocked" && record.eventType != L"network.connection.snapshot") {
+    return std::nullopt;
+  }
+
+  const auto remoteAddress = ExtractPayloadString(record.payloadJson, "remoteAddress").value_or(L"");
+  const auto remotePort = ExtractPayloadUInt32(record.payloadJson, "remotePort").value_or(0);
+  if (remoteAddress.empty()) {
+    return std::nullopt;
+  }
+
+  auto processImagePath = ExtractPayloadString(record.payloadJson, "processImagePath").value_or(L"");
+  if (processImagePath.empty()) {
+    processImagePath = ExtractPayloadString(record.payloadJson, "appId").value_or(L"");
+  }
+
+  std::wstring targetPath = remoteAddress;
+  if (remotePort > 0) {
+    targetPath += L":";
+    targetPath += std::to_wstring(remotePort);
+  }
+
+  EventEnvelope event{
+      .kind = EventKind::NetworkConnect,
+      .deviceId = deviceId,
+      .correlationId = record.eventId,
+      .targetPath = std::move(targetPath),
+      .sha256 = {},
+      .process =
+          ProcessContext{
+              .imagePath = std::move(processImagePath),
+              .commandLine = {},
+              .parentImagePath = {},
+              .userSid = ExtractPayloadString(record.payloadJson, "userSid").value_or(L""),
+              .signer = {}},
+      .occurredAt = std::chrono::system_clock::now()};
+  return event;
+}
+
 bool TerminateProcessById(const DWORD pid) {
   if (pid == 0 || pid == GetCurrentProcessId()) {
     return false;
@@ -297,11 +409,527 @@ std::filesystem::path WriteRuntimeScriptFile(const std::filesystem::path& jobsRo
   return scriptPath;
 }
 
+std::wstring FormatWindowsError(const DWORD errorCode) {
+  wchar_t* messageBuffer = nullptr;
+  const auto flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+  const auto messageLength =
+      FormatMessageW(flags, nullptr, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                     reinterpret_cast<LPWSTR>(&messageBuffer), 0, nullptr);
+  if (messageLength == 0 || messageBuffer == nullptr) {
+    return L"Windows error " + std::to_wstring(errorCode);
+  }
+
+  std::wstring message(messageBuffer, messageLength);
+  LocalFree(messageBuffer);
+  while (!message.empty() &&
+         (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' ' || message.back() == L'\t')) {
+    message.pop_back();
+  }
+  return message;
+}
+
+std::wstring EscapePamJsonValue(const std::wstring& value) {
+  std::wostringstream stream;
+  for (const auto ch : value) {
+    switch (ch) {
+      case L'\\':
+        stream << L"\\\\";
+        break;
+      case L'"':
+        stream << L"\\\"";
+        break;
+      case L'\r':
+        stream << L"\\r";
+        break;
+      case L'\n':
+        stream << L"\\n";
+        break;
+      case L'\t':
+        stream << L"\\t";
+        break;
+      default:
+        stream << ch;
+        break;
+    }
+  }
+  return stream.str();
+}
+
+std::wstring QuoteCommandLineArgument(const std::wstring& argument) {
+  if (argument.empty()) {
+    return L"\"\"";
+  }
+
+  if (argument.find_first_of(L" \t\n\v\"") == std::wstring::npos) {
+    return argument;
+  }
+
+  std::wstring quoted;
+  quoted.push_back(L'"');
+
+  int pendingBackslashes = 0;
+  for (const auto ch : argument) {
+    if (ch == L'\\') {
+      ++pendingBackslashes;
+      continue;
+    }
+
+    if (ch == L'"') {
+      quoted.append(static_cast<std::size_t>((pendingBackslashes * 2) + 1), L'\\');
+      quoted.push_back(L'"');
+      pendingBackslashes = 0;
+      continue;
+    }
+
+    if (pendingBackslashes != 0) {
+      quoted.append(static_cast<std::size_t>(pendingBackslashes), L'\\');
+      pendingBackslashes = 0;
+    }
+    quoted.push_back(ch);
+  }
+
+  if (pendingBackslashes != 0) {
+    quoted.append(static_cast<std::size_t>(pendingBackslashes * 2), L'\\');
+  }
+  quoted.push_back(L'"');
+  return quoted;
+}
+
+std::wstring BuildCreateProcessCommandLine(const std::wstring& executablePath, const std::wstring& arguments) {
+  std::wstring commandLine = QuoteCommandLineArgument(executablePath);
+  if (!arguments.empty()) {
+    commandLine.push_back(L' ');
+    commandLine += arguments;
+  }
+  return commandLine;
+}
+
+std::wstring GetSystemBinaryPath(const wchar_t* relativePath) {
+  std::wstring buffer(MAX_PATH, L'\0');
+  const auto written = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+  if (written == 0) {
+    return {};
+  }
+
+  buffer.resize(written);
+  return (std::filesystem::path(buffer) / relativePath).wstring();
+}
+
+bool ParsePamRequestPayload(const std::wstring& payload, PamRequestPayload* request, std::wstring* errorMessage) {
+  if (request == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM request parser received a null request target.";
+    }
+    return false;
+  }
+
+  const auto action = ExtractPayloadString(payload, "action");
+  if (!action.has_value() || action->empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM request payload is missing an action.";
+    }
+    return false;
+  }
+
+  const auto targetPath = ExtractPayloadString(payload, "targetPath");
+  if (!targetPath.has_value() || targetPath->empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM request payload is missing a target path.";
+    }
+    return false;
+  }
+
+  request->action = *action;
+  request->targetPath = *targetPath;
+  request->arguments = ExtractPayloadString(payload, "arguments").value_or(L"");
+  request->reason = ExtractPayloadString(payload, "reason").value_or(L"User approved a local Fenrir PAM request");
+  request->requestedAt = ExtractPayloadString(payload, "requestedAt").value_or(CurrentUtcTimestamp());
+  request->requester = ExtractPayloadString(payload, "requester").value_or(L"unknown");
+  return true;
+}
+
+bool BuildPamLaunchPlan(const PamRequestPayload& request, PamLaunchPlan* launchPlan, std::wstring* errorMessage) {
+  if (launchPlan == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM launch plan target was null.";
+    }
+    return false;
+  }
+
+  const auto action = ToLowerCopy(request.action);
+  const auto timedScopedAction = action == L"run_application_timed" || action == L"elevate_2m";
+  if (action == L"run_powershell") {
+    launchPlan->executablePath = GetSystemBinaryPath(LR"(WindowsPowerShell\v1.0\powershell.exe)");
+    launchPlan->arguments = L"-NoLogo";
+    launchPlan->targetPath = launchPlan->executablePath;
+    return !launchPlan->executablePath.empty();
+  }
+
+  if (action == L"run_cmd") {
+    launchPlan->executablePath = GetSystemBinaryPath(L"cmd.exe");
+    launchPlan->targetPath = launchPlan->executablePath;
+    return !launchPlan->executablePath.empty();
+  }
+
+  if (action == L"run_disk_cleanup") {
+    launchPlan->executablePath = GetSystemBinaryPath(L"cleanmgr.exe");
+    launchPlan->targetPath = launchPlan->executablePath;
+    return !launchPlan->executablePath.empty();
+  }
+
+  if (action == L"run_application" || timedScopedAction) {
+    const std::filesystem::path targetPath(request.targetPath);
+    if (targetPath.empty()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir PAM did not receive an application path to elevate.";
+      }
+      return false;
+    }
+
+    std::error_code existsError;
+    if (!std::filesystem::exists(targetPath, existsError) || existsError) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir PAM could not find the selected application on disk.";
+      }
+      return false;
+    }
+
+    const auto extension = ToLowerCopy(targetPath.extension().wstring());
+    if (extension == L".ps1") {
+      launchPlan->executablePath = GetSystemBinaryPath(LR"(WindowsPowerShell\v1.0\powershell.exe)");
+      if (launchPlan->executablePath.empty()) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Fenrir PAM could not resolve PowerShell to launch the selected script.";
+        }
+        return false;
+      }
+
+      launchPlan->arguments = L"-NoLogo -NoProfile -ExecutionPolicy Bypass -File " +
+                              QuoteCommandLineArgument(targetPath.wstring());
+      if (!request.arguments.empty()) {
+        launchPlan->arguments += L" ";
+        launchPlan->arguments += request.arguments;
+      }
+    } else if (extension == L".cmd" || extension == L".bat") {
+      launchPlan->executablePath = GetSystemBinaryPath(L"cmd.exe");
+      if (launchPlan->executablePath.empty()) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Fenrir PAM could not resolve Command Prompt to launch the selected script.";
+        }
+        return false;
+      }
+
+      launchPlan->arguments = L"/c " + QuoteCommandLineArgument(targetPath.wstring());
+      if (!request.arguments.empty()) {
+        launchPlan->arguments += L" ";
+        launchPlan->arguments += request.arguments;
+      }
+    } else {
+      launchPlan->executablePath = targetPath.wstring();
+      launchPlan->arguments = request.arguments;
+    }
+
+    launchPlan->targetPath = targetPath.wstring();
+    if (timedScopedAction) {
+      launchPlan->maxRuntimeSeconds = 120;
+    }
+    return true;
+  }
+
+  if (errorMessage != nullptr) {
+    *errorMessage = L"Fenrir PAM received an unsupported elevation action.";
+  }
+  return false;
+}
+
+bool TryReadPamRequestPayload(const std::filesystem::path& requestPath, std::wstring* payload, std::wstring* errorMessage) {
+  std::ifstream input(requestPath, std::ios::binary);
+  if (!input.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM could not open the pending request payload.";
+    }
+    return false;
+  }
+
+  const std::string utf8Payload((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  if (!input.good() && !input.eof()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM encountered an I/O error while reading the request payload.";
+    }
+    return false;
+  }
+
+  if (utf8Payload.empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM received an empty request payload.";
+    }
+    return false;
+  }
+
+  if (payload != nullptr) {
+    *payload = Utf8ToWide(utf8Payload);
+  }
+  return true;
+}
+
+bool AppendPamAuditEntry(const std::filesystem::path& journalPath, const PamRequestPayload& request,
+                         const PamLaunchPlan& launchPlan, const std::wstring& decision,
+                         const std::wstring& detailMessage) {
+  std::error_code createError;
+  std::filesystem::create_directories(journalPath.parent_path(), createError);
+  if (createError) {
+    return false;
+  }
+
+  std::ofstream output(journalPath, std::ios::binary | std::ios::app);
+  if (!output.is_open()) {
+    return false;
+  }
+
+  const std::wstring line = L"{\"timestamp\":\"" + EscapePamJsonValue(CurrentUtcTimestamp()) + L"\",\"requestedAt\":\"" +
+                            EscapePamJsonValue(request.requestedAt) + L"\",\"requester\":\"" +
+                            EscapePamJsonValue(request.requester) + L"\",\"action\":\"" +
+                            EscapePamJsonValue(request.action) + L"\",\"target\":\"" +
+                            EscapePamJsonValue(launchPlan.targetPath.empty() ? request.targetPath : launchPlan.targetPath) +
+                            L"\",\"reason\":\"" + EscapePamJsonValue(request.reason) + L"\",\"decision\":\"" +
+                            EscapePamJsonValue(decision) + L"\",\"detail\":\"" + EscapePamJsonValue(detailMessage) + L"\"}\n";
+  const auto utf8Line = WideToUtf8(line);
+  output.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
+  output.flush();
+  return output.good();
+}
+
+DWORD ResolveInteractiveSessionId() {
+  const auto consoleSessionId = WTSGetActiveConsoleSessionId();
+  if (consoleSessionId != 0xFFFFFFFF) {
+    return consoleSessionId;
+  }
+
+  PWTS_SESSION_INFOW sessions = nullptr;
+  DWORD sessionCount = 0;
+  if (WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &sessionCount) != FALSE) {
+    DWORD activeSessionId = 0xFFFFFFFF;
+    for (DWORD index = 0; index < sessionCount; ++index) {
+      if (sessions[index].State == WTSActive) {
+        activeSessionId = sessions[index].SessionId;
+        break;
+      }
+    }
+    WTSFreeMemory(sessions);
+    return activeSessionId;
+  }
+
+  return 0xFFFFFFFF;
+}
+
+std::optional<std::filesystem::path> ResolveActiveUserPamRequestPath() {
+  const auto sessionId = ResolveInteractiveSessionId();
+  if (sessionId == 0xFFFFFFFF) {
+    return std::nullopt;
+  }
+
+  HANDLE userToken = nullptr;
+  if (WTSQueryUserToken(sessionId, &userToken) == FALSE) {
+    return std::nullopt;
+  }
+
+  DWORD requiredLength = 0;
+  GetUserProfileDirectoryW(userToken, nullptr, &requiredLength);
+  if (requiredLength == 0) {
+    CloseHandle(userToken);
+    return std::nullopt;
+  }
+
+  std::wstring profileDirectory(requiredLength, L'\0');
+  if (GetUserProfileDirectoryW(userToken, profileDirectory.data(), &requiredLength) == FALSE) {
+    CloseHandle(userToken);
+    return std::nullopt;
+  }
+  CloseHandle(userToken);
+
+  while (!profileDirectory.empty() && profileDirectory.back() == L'\0') {
+    profileDirectory.pop_back();
+  }
+  if (profileDirectory.empty()) {
+    return std::nullopt;
+  }
+
+  return std::filesystem::path(profileDirectory) / L"AppData" / L"Local" / L"FenrirAgent" / L"runtime" /
+         kPamRequestFileName;
+}
+
+std::vector<std::filesystem::path> ResolvePamRequestPathsFromUserProfiles() {
+  std::vector<std::filesystem::path> requestPaths;
+
+  const auto systemDrive = ReadEnvironmentVariable(L"SystemDrive");
+  const auto usersRoot = std::filesystem::path(systemDrive.empty() ? L"C:\\" : systemDrive) / L"Users";
+  std::error_code rootError;
+  if (!std::filesystem::exists(usersRoot, rootError) || rootError) {
+    return requestPaths;
+  }
+
+  for (const auto& entry : std::filesystem::directory_iterator(usersRoot, rootError)) {
+    if (rootError) {
+      break;
+    }
+    if (!entry.is_directory()) {
+      continue;
+    }
+
+    const auto name = ToLowerCopy(entry.path().filename().wstring());
+    if (name.empty() || name == L"default" || name == L"default user" || name == L"public" || name == L"all users") {
+      continue;
+    }
+
+    requestPaths.push_back(entry.path() / L"AppData" / L"Local" / L"FenrirAgent" / L"runtime" / kPamRequestFileName);
+  }
+
+  return requestPaths;
+}
+
+bool LaunchPamProcessAsSystem(const PamLaunchPlan& launchPlan, DWORD* processId, std::wstring* errorMessage) {
+  if (launchPlan.executablePath.empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM did not receive an executable to launch.";
+    }
+    return false;
+  }
+
+  const auto sessionId = ResolveInteractiveSessionId();
+  if (sessionId == 0xFFFFFFFF) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM could not identify an active interactive session.";
+    }
+    return false;
+  }
+
+  HANDLE serviceToken = nullptr;
+  if (OpenProcessToken(GetCurrentProcess(),
+                       TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT |
+                           TOKEN_ADJUST_SESSIONID,
+                       &serviceToken) == FALSE) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM could not open the service security token: " +
+                      FormatWindowsError(GetLastError());
+    }
+    return false;
+  }
+
+  HANDLE primaryToken = nullptr;
+  if (DuplicateTokenEx(serviceToken, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary, &primaryToken) ==
+      FALSE) {
+    const auto error = GetLastError();
+    CloseHandle(serviceToken);
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM could not duplicate a primary launch token: " + FormatWindowsError(error);
+    }
+    return false;
+  }
+  CloseHandle(serviceToken);
+
+  DWORD mutableSessionId = sessionId;
+  if (SetTokenInformation(primaryToken, TokenSessionId, &mutableSessionId, sizeof(mutableSessionId)) == FALSE) {
+    const auto error = GetLastError();
+    CloseHandle(primaryToken);
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM could not bind the launch token to the active session: " +
+                      FormatWindowsError(error);
+    }
+    return false;
+  }
+
+  LPVOID environmentBlock = nullptr;
+  const auto environmentReady = CreateEnvironmentBlock(&environmentBlock, primaryToken, FALSE) != FALSE;
+  const auto workingDirectory = std::filesystem::path(launchPlan.executablePath).parent_path();
+  const auto commandLine = BuildCreateProcessCommandLine(launchPlan.executablePath, launchPlan.arguments);
+  std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+  mutableCommandLine.push_back(L'\0');
+
+  STARTUPINFOW startupInfo{};
+  startupInfo.cb = sizeof(startupInfo);
+  startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+  startupInfo.wShowWindow = SW_SHOWNORMAL;
+  startupInfo.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
+
+  PROCESS_INFORMATION processInfo{};
+  const auto creationFlags = CREATE_NEW_CONSOLE | (environmentReady ? CREATE_UNICODE_ENVIRONMENT : 0);
+  const auto created = CreateProcessAsUserW(
+      primaryToken, launchPlan.executablePath.c_str(), mutableCommandLine.data(), nullptr, nullptr, FALSE,
+      creationFlags, environmentReady ? environmentBlock : nullptr,
+      workingDirectory.empty() ? nullptr : workingDirectory.c_str(), &startupInfo, &processInfo);
+
+  if (environmentReady && environmentBlock != nullptr) {
+    DestroyEnvironmentBlock(environmentBlock);
+  }
+  CloseHandle(primaryToken);
+
+  if (!created) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM failed to launch the approved request: " + FormatWindowsError(GetLastError());
+    }
+    return false;
+  }
+
+  if (processId != nullptr) {
+    *processId = processInfo.dwProcessId;
+  }
+  CloseHandle(processInfo.hThread);
+  CloseHandle(processInfo.hProcess);
+  return true;
+}
+
+void StartPamTimedProcessGuard(const std::filesystem::path& journalPath, const PamRequestPayload& request,
+                               const PamLaunchPlan& launchPlan, const DWORD processId) {
+  if (!launchPlan.maxRuntimeSeconds.has_value() || launchPlan.maxRuntimeSeconds.value_or(0) == 0 || processId == 0) {
+    return;
+  }
+
+  const auto timeoutSeconds = *launchPlan.maxRuntimeSeconds;
+  std::thread([journalPath, request, launchPlan, processId, timeoutSeconds]() {
+    const HANDLE processHandle =
+        OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (processHandle == nullptr) {
+      AppendPamAuditEntry(journalPath, request, launchPlan, L"timed-guard-failed",
+                          L"Fenrir could not monitor the timed elevation process: " +
+                              FormatWindowsError(GetLastError()));
+      return;
+    }
+
+    const auto waitResult = WaitForSingleObject(processHandle, timeoutSeconds * 1000);
+    if (waitResult == WAIT_TIMEOUT) {
+      if (TerminateProcess(processHandle, 0xF3) == FALSE) {
+        AppendPamAuditEntry(journalPath, request, launchPlan, L"expired-termination-failed",
+                            L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
+                                L" seconds, but process termination failed: " +
+                                FormatWindowsError(GetLastError()));
+      } else {
+        AppendPamAuditEntry(journalPath, request, launchPlan, L"expired",
+                            L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
+                                L" seconds and the process was terminated.");
+      }
+    } else if (waitResult == WAIT_OBJECT_0) {
+      AppendPamAuditEntry(journalPath, request, launchPlan, L"completed",
+                          L"Timed elevation process exited before the 2 minute cutoff.");
+    } else {
+      AppendPamAuditEntry(journalPath, request, launchPlan, L"timed-guard-failed",
+                          L"Fenrir timed elevation guard encountered a wait error: " +
+                              FormatWindowsError(GetLastError()));
+    }
+
+    CloseHandle(processHandle);
+  }).detach();
+}
+
 }  // namespace
 
 AgentService::AgentService() = default;
 
 AgentService::~AgentService() {
+  if (pamRequestEvent_ != nullptr) {
+    CloseHandle(pamRequestEvent_);
+    pamRequestEvent_ = nullptr;
+  }
+
   if (stopEvent_ != nullptr) {
     CloseHandle(stopEvent_);
     stopEvent_ = nullptr;
@@ -315,6 +943,9 @@ int AgentService::Run(const AgentRunMode mode) {
       if (stopEvent_ == nullptr) {
         throw std::runtime_error("Unable to create the agent stop event");
       }
+    }
+    if (pamRequestEvent_ == nullptr) {
+      pamRequestEvent_ = CreateEventW(nullptr, FALSE, FALSE, kPamRequestEventName);
     }
 
     config_ = LoadAgentConfig();
@@ -351,6 +982,11 @@ int AgentService::Run(const AgentRunMode mode) {
     StartCommandLoop();
     QueueTelemetryEvent(L"service.started", L"agent-service", L"The endpoint agent boot sequence started.",
                         L"{\"phase\":\"bootstrap\"}");
+    if (pamRequestEvent_ == nullptr) {
+      QueueTelemetryEvent(L"privilege.elevation.event.unavailable", L"pam-broker",
+                          L"The local PAM request signal could not be initialized; falling back to file polling.",
+                          L"{\"eventName\":\"Global\\\\FenrirPamRequestReady\"}");
+    }
     RunSyncLoop(mode);
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
@@ -401,23 +1037,154 @@ std::vector<std::filesystem::path> AgentService::BuildMonitoredRoots() const {
   return roots;
 }
 
+std::filesystem::path AgentService::GetPamRequestPath() const {
+  auto runtimeRoot = config_.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = config_.runtimeDatabasePath;
+  }
+  return runtimeRoot / kPamRequestFileName;
+}
+
+std::vector<std::filesystem::path> AgentService::GetPamRequestPaths() const {
+  std::vector<std::filesystem::path> requestPaths;
+  std::set<std::filesystem::path> seenPaths;
+
+  const auto addRequestPath = [&requestPaths, &seenPaths](const std::filesystem::path& path) {
+    if (path.empty()) {
+      return;
+    }
+    if (seenPaths.insert(path).second) {
+      requestPaths.push_back(path);
+    }
+  };
+
+  addRequestPath(GetPamRequestPath());
+
+  if (const auto activeUserRequestPath = ResolveActiveUserPamRequestPath();
+      activeUserRequestPath.has_value() && !activeUserRequestPath->empty()) {
+    addRequestPath(*activeUserRequestPath);
+  }
+
+  for (const auto& profileRequestPath : ResolvePamRequestPathsFromUserProfiles()) {
+    addRequestPath(profileRequestPath);
+  }
+
+  return requestPaths;
+}
+
+std::filesystem::path AgentService::GetPamAuditJournalPath() const {
+  auto runtimeRoot = config_.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = config_.runtimeDatabasePath;
+  }
+  return runtimeRoot / kPamAuditFileName;
+}
+
+void AgentService::ProcessPamRequests() {
+  const auto journalPath = GetPamAuditJournalPath();
+
+  while (!ShouldStop()) {
+    bool processedAnyRequests = false;
+
+    for (const auto& requestPath : GetPamRequestPaths()) {
+      std::error_code existsError;
+      if (!std::filesystem::exists(requestPath, existsError) || existsError) {
+        continue;
+      }
+      processedAnyRequests = true;
+
+      std::wstring payload;
+      std::wstring readError;
+      if (!TryReadPamRequestPayload(requestPath, &payload, &readError)) {
+        // The writer may still be finalizing the payload; keep the file for the next poll.
+        continue;
+      }
+
+      PamRequestPayload request{};
+      std::wstring parseError;
+      if (!ParsePamRequestPayload(payload, &request, &parseError)) {
+        PamLaunchPlan rejectedLaunch{
+            .targetPath = request.targetPath.empty() ? L"<invalid-payload>" : request.targetPath};
+        AppendPamAuditEntry(journalPath, request, rejectedLaunch, L"denied", parseError);
+        QueueTelemetryEvent(
+            L"privilege.elevation.request.rejected", L"pam-broker",
+            L"Fenrir rejected a malformed local PAM request payload.",
+            std::wstring(L"{\"reason\":\"") + Utf8ToWide(EscapeJsonString(parseError)) + L"\"}");
+        std::error_code removeError;
+        std::filesystem::remove(requestPath, removeError);
+        continue;
+      }
+
+      PamLaunchPlan launchPlan{};
+      std::wstring validationError;
+      if (!BuildPamLaunchPlan(request, &launchPlan, &validationError)) {
+        AppendPamAuditEntry(journalPath, request, launchPlan, L"denied", validationError);
+        QueueTelemetryEvent(
+            L"privilege.elevation.request.denied", L"pam-broker",
+            L"Fenrir denied a local PAM request during policy validation.",
+            std::wstring(L"{\"requester\":\"") + Utf8ToWide(EscapeJsonString(request.requester)) +
+                L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(validationError)) + L"\"}");
+        std::error_code removeError;
+        std::filesystem::remove(requestPath, removeError);
+        continue;
+      }
+
+      std::wstring launchError;
+      DWORD launchedProcessId = 0;
+      const auto launched = LaunchPamProcessAsSystem(launchPlan, &launchedProcessId, &launchError);
+      const auto decision = launched ? L"approved" : L"denied";
+      const auto detail = launched ? (L"Launched process id " + std::to_wstring(launchedProcessId)) : launchError;
+      AppendPamAuditEntry(journalPath, request, launchPlan, decision, detail);
+
+      if (launched) {
+        StartPamTimedProcessGuard(journalPath, request, launchPlan, launchedProcessId);
+        QueueTelemetryEvent(
+            L"privilege.elevation.request.approved", L"pam-broker",
+            L"Fenrir approved and launched a local PAM elevation request.",
+            std::wstring(L"{\"requester\":\"") + Utf8ToWide(EscapeJsonString(request.requester)) +
+                L"\",\"targetPath\":\"" + Utf8ToWide(EscapeJsonString(launchPlan.targetPath)) +
+                L"\",\"processId\":" + std::to_wstring(launchedProcessId) +
+                L",\"timed\":"
+                + (launchPlan.maxRuntimeSeconds.has_value() ? L"true" : L"false") + L"}");
+      } else {
+        QueueTelemetryEvent(
+            L"privilege.elevation.request.denied", L"pam-broker",
+            L"Fenrir denied a local PAM request because process launch failed.",
+            std::wstring(L"{\"requester\":\"") + Utf8ToWide(EscapeJsonString(request.requester)) +
+                L"\",\"targetPath\":\"" + Utf8ToWide(EscapeJsonString(launchPlan.targetPath)) +
+                L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(launchError)) + L"\"}");
+      }
+
+      std::error_code removeError;
+      std::filesystem::remove(requestPath, removeError);
+    }
+
+    if (!processedAnyRequests) {
+      return;
+    }
+  }
+}
+
 void AgentService::RunSyncLoop(const AgentRunMode mode) {
   const auto configuredIterations = std::max(config_.syncIterations, 1);
   int cycle = 1;
 
   while (!ShouldStop()) {
+    ProcessPamRequests();
     QueueCycleTelemetry(cycle);
     QueueDeviceInventoryTelemetry(cycle);
-    ProcessPrivilegeRequestJournal();
     EnforceBlockedSoftware();
+    ProcessPamRequests();
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
     SyncWithControlPlane(cycle);
+    ProcessPamRequests();
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
     PollAndExecuteCommands(cycle);
+    ProcessPamRequests();
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
@@ -441,7 +1208,7 @@ void AgentService::RunSyncLoop(const AgentRunMode mode) {
   }
 }
 
-bool AgentService::WaitForNextCycle(const AgentRunMode mode, const int nextCycle) const {
+bool AgentService::WaitForNextCycle(const AgentRunMode mode, const int nextCycle) {
   if (ShouldStop()) {
     return false;
   }
@@ -452,7 +1219,41 @@ bool AgentService::WaitForNextCycle(const AgentRunMode mode, const int nextCycle
   }
 
   const auto waitMilliseconds = static_cast<DWORD>(std::max(config_.syncIntervalSeconds, 1) * 1000);
-  return WaitForSingleObject(stopEvent_, waitMilliseconds) != WAIT_OBJECT_0;
+  const auto waitDeadline = GetTickCount64() + waitMilliseconds;
+
+  while (!ShouldStop()) {
+    const auto now = GetTickCount64();
+    if (now >= waitDeadline) {
+      ProcessPamRequests();
+      return !ShouldStop();
+    }
+
+    const auto remaining = static_cast<DWORD>(waitDeadline - now);
+    const auto waitChunk = std::min<DWORD>(remaining, 1000);
+
+    if (pamRequestEvent_ != nullptr) {
+      HANDLE waitHandles[] = {stopEvent_, pamRequestEvent_};
+      const auto waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, waitChunk);
+      if (waitResult == WAIT_OBJECT_0) {
+        return false;
+      }
+      if (waitResult == WAIT_OBJECT_0 + 1) {
+        ProcessPamRequests();
+        continue;
+      }
+      if (waitResult == WAIT_FAILED) {
+        return !ShouldStop();
+      }
+    } else {
+      if (WaitForSingleObject(stopEvent_, waitChunk) == WAIT_OBJECT_0) {
+        return false;
+      }
+    }
+
+    ProcessPamRequests();
+  }
+
+  return false;
 }
 
 bool AgentService::ShouldStop() const {
@@ -723,10 +1524,33 @@ std::wstring AgentService::ExecuteTargetedScan(const RemoteCommand& command) {
         finding.remediationStatus = RemediationStatus::Quarantined;
         finding.quarantineRecordId = quarantineResult.recordId;
         finding.quarantinedPath = quarantineResult.quarantinedPath;
+        finding.verdict.reasons.push_back(
+            {L"QUARANTINE_APPLIED", L"Fenrir moved this artifact into local quarantine."});
+        if (!quarantineResult.localStatus.empty()) {
+          finding.verdict.reasons.push_back(
+              {L"QUARANTINE_STATUS", L"Quarantine status: " + quarantineResult.localStatus + L"."});
+        }
+        if (!quarantineResult.verificationDetail.empty()) {
+          finding.verdict.reasons.push_back({L"QUARANTINE_VERIFIED", quarantineResult.verificationDetail});
+        }
       } else {
+        if (!quarantineResult.recordId.empty()) {
+          finding.quarantineRecordId = quarantineResult.recordId;
+        }
+        if (!quarantineResult.quarantinedPath.empty()) {
+          finding.quarantinedPath = quarantineResult.quarantinedPath;
+        }
         finding.remediationStatus = RemediationStatus::Failed;
         finding.remediationError =
             quarantineResult.errorMessage.empty() ? L"Unable to move the file into quarantine" : quarantineResult.errorMessage;
+        if (!quarantineResult.localStatus.empty()) {
+          finding.verdict.reasons.push_back(
+              {L"QUARANTINE_STATUS", L"Quarantine status: " + quarantineResult.localStatus + L"."});
+        }
+        if (!quarantineResult.verificationDetail.empty()) {
+          finding.verdict.reasons.push_back(
+              {L"QUARANTINE_VERIFICATION_FAILED", quarantineResult.verificationDetail});
+        }
         finding.verdict.reasons.push_back({L"QUARANTINE_FAILED", finding.remediationError});
       }
     }
@@ -1046,11 +1870,13 @@ void AgentService::PublishHeartbeat(const int cycle) {
   const auto wfpIsolationActive = networkIsolationManager_ && networkIsolationManager_->IsolationActive();
   const auto wfpUnavailable =
       policy_.networkContainmentEnabled && (!networkIsolationManager_ || !networkIsolationManager_->EngineReady());
+  const auto realtimeUnavailable = policy_.realtimeProtectionEnabled &&
+                                   (!realtimeProtectionBroker_ || !realtimeProtectionBroker_->IsRealtimeCoverageHealthy());
 
   state_.isolated = wfpIsolationActive;
   state_.healthState = wfpIsolationActive
                            ? L"isolated"
-                           : ((wfpUnavailable || lastControlPlaneSyncFailed_ || lastTelemetryFlushFailed_ ||
+                           : ((wfpUnavailable || realtimeUnavailable || lastControlPlaneSyncFailed_ || lastTelemetryFlushFailed_ ||
                                lastHardeningCheckFailed_)
                                   ? L"degraded"
                                   : L"healthy");
@@ -1215,50 +2041,6 @@ void AgentService::QueueDeviceInventoryTelemetry(const int cycle) {
                       BuildDeviceInventoryPayload(snapshot));
 }
 
-void AgentService::ProcessPrivilegeRequestJournal() {
-  const auto journalPath = GetPrivilegeRequestJournalPath(config_);
-  std::error_code existsError;
-  if (!std::filesystem::exists(journalPath, existsError)) {
-    return;
-  }
-
-  std::ifstream journal(journalPath);
-  if (!journal.is_open()) {
-    return;
-  }
-
-  std::string line;
-  std::vector<std::string> remaining;
-  while (std::getline(journal, line)) {
-    if (line.empty()) {
-      continue;
-    }
-
-    const auto journalLine = Utf8ToWide(line);
-    const auto targetPath = ExtractPayloadString(journalLine, "targetPath").value_or(L"");
-    const auto reason = ExtractPayloadString(journalLine, "reason").value_or(L"One-time elevation");
-    const auto requester = ExtractPayloadString(journalLine, "requestedBy").value_or(L"console");
-    const auto decision = ExtractPayloadString(journalLine, "decision").value_or(L"approved");
-
-    if (decision != L"approved") {
-      continue;
-    }
-
-    QueueTelemetryEvent(L"privilege.elevation.requested", L"pam-broker",
-                        std::wstring(L"One-time elevation was approved for ") + targetPath + L".",
-                        std::wstring(L"{\"targetPath\":\"") + Utf8ToWide(EscapeJsonString(targetPath)) +
-                            L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(reason)) +
-                            L"\",\"requestedBy\":\"" + Utf8ToWide(EscapeJsonString(requester)) + L"\"}");
-    QueueTelemetryEvent(L"privilege.elevation.approved", L"pam-broker",
-                        std::wstring(L"Fenrir approved a just-in-time elevation for ") + targetPath + L".",
-                        std::wstring(L"{\"targetPath\":\"") + Utf8ToWide(EscapeJsonString(targetPath)) +
-                            L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(reason)) +
-                            L"\",\"requestedBy\":\"" + Utf8ToWide(EscapeJsonString(requester)) + L"\"}");
-  }
-
-  std::wofstream truncate(journalPath, std::ios::trunc);
-}
-
 void AgentService::DrainProcessTelemetry() {
   if (!processEtwSensor_) {
     return;
@@ -1270,6 +2052,13 @@ void AgentService::DrainProcessTelemetry() {
   }
 
   for (const auto& record : telemetry) {
+    if (realtimeProtectionBroker_) {
+      if (const auto behaviorEvent = BuildBehaviorEventFromProcessTelemetry(record, state_.deviceId);
+          behaviorEvent.has_value()) {
+        realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
+      }
+    }
+
     if (record.eventType == L"process.started") {
       const auto pid = ExtractPayloadUInt32(record.payloadJson, "pid");
       const auto imageName = ExtractPayloadString(record.payloadJson, "imageName").value_or(L"");
@@ -1347,9 +2136,20 @@ void AgentService::DrainNetworkTelemetry() {
   }
 
   const auto telemetry = networkIsolationManager_->DrainTelemetry();
-  if (!telemetry.empty()) {
-    QueueTelemetryRecords(telemetry);
+  if (telemetry.empty()) {
+    return;
   }
+
+  if (realtimeProtectionBroker_) {
+    for (const auto& record : telemetry) {
+      if (const auto behaviorEvent = BuildBehaviorEventFromNetworkTelemetry(record, state_.deviceId);
+          behaviorEvent.has_value()) {
+        realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
+      }
+    }
+  }
+
+  QueueTelemetryRecords(telemetry);
 }
 
 void AgentService::QueueCycleTelemetry(const int cycle) {

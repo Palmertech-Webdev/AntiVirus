@@ -19,9 +19,15 @@ const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 export const DEFAULT_ADMIN_USERNAME = process.env.FENRIR_ADMIN_USERNAME?.trim() || "admin@fenrir.local";
 export const DEFAULT_ADMIN_DISPLAY_NAME = process.env.FENRIR_ADMIN_DISPLAY_NAME?.trim() || "Fenrir Platform Admin";
-export const DEFAULT_ADMIN_PASSWORD = process.env.FENRIR_ADMIN_PASSWORD ?? "Fenrir!Admin123";
+export const DEFAULT_ADMIN_PASSWORD = process.env.FENRIR_ADMIN_PASSWORD && process.env.FENRIR_ADMIN_PASSWORD.length > 0
+  ? process.env.FENRIR_ADMIN_PASSWORD
+  : "Fenrir!Admin123";
 export const DEFAULT_ADMIN_MFA_SECRET = process.env.FENRIR_ADMIN_MFA_SECRET?.trim() || "JBSWY3DPEHPK3PXP";
 export const DEFAULT_ADMIN_ROLES: AdminRole[] = ["admin"];
+export const DEFAULT_ADMIN_PASSWORD_VALUE = "Fenrir!Admin123";
+export const DEFAULT_ADMIN_MFA_SECRET_VALUE = "JBSWY3DPEHPK3PXP";
+export const USING_DEFAULT_ADMIN_PASSWORD = DEFAULT_ADMIN_PASSWORD === DEFAULT_ADMIN_PASSWORD_VALUE;
+export const USING_DEFAULT_ADMIN_MFA_SECRET = DEFAULT_ADMIN_MFA_SECRET === DEFAULT_ADMIN_MFA_SECRET_VALUE;
 
 export function createPasswordSalt() {
   return randomBytes(16).toString("hex");

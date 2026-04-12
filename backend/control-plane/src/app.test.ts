@@ -552,7 +552,7 @@ test("enrollment, heartbeat, and policy check-in persist device state", async (t
   assert.notEqual(enrolledDevice.lastPolicySyncAt, null);
 });
 
-test("unknown devices receive a 404 on heartbeat", async (t) => {
+test("unknown devices require a device API key on heartbeat", async (t) => {
   const harness = await createTestApp();
   t.after(async () => {
     await harness.cleanup();
@@ -569,8 +569,61 @@ test("unknown devices receive a 404 on heartbeat", async (t) => {
     }
   });
 
-  assert.equal(response.statusCode, 404);
-  assert.equal(response.json().error, "device_not_found");
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().error, "device_api_key_required");
+});
+
+test("admin session tokens in query strings are rejected by default", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const token = harness.adminHeaders["x-admin-session-token"];
+  assert.equal(typeof token, "string");
+
+  const response = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/admin/auth/me?adminSessionToken=${encodeURIComponent(token)}`
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().error, "admin_auth_required");
+});
+
+test("device API keys in query strings are rejected by default", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const enrollResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/enroll",
+    payload: {
+      hostname: "LAB-ENDPOINT-QUERY-AUTH",
+      osVersion: "Windows 11 24H2",
+      serialNumber: "LAB-QUERY-AUTH-001"
+    }
+  });
+
+  assert.equal(enrollResponse.statusCode, 201);
+  const enrollment = enrollResponse.json() as { deviceId: string; deviceApiKey?: string };
+  assert.equal(typeof enrollment.deviceApiKey, "string");
+
+  const heartbeatResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/devices/${enrollment.deviceId}/heartbeat?deviceApiKey=${encodeURIComponent(enrollment.deviceApiKey ?? "")}`,
+    payload: {
+      agentVersion: "0.1.1-alpha",
+      platformVersion: "platform-0.1.1",
+      healthState: "healthy",
+      isolated: false
+    }
+  });
+
+  assert.equal(heartbeatResponse.statusCode, 401);
+  assert.equal(heartbeatResponse.json().error, "invalid_device_api_key");
 });
 
 test("telemetry batches persist and can be queried back", async (t) => {

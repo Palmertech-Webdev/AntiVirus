@@ -1222,179 +1222,6 @@ function renderTelemetryTab(
   );
 }
 
-interface PrivilegeTabProps {
-  actionBusy: string | null;
-  device: DeviceDetail["device"] | null;
-  privilegeBaseline: DeviceDetail["privilegeBaseline"];
-  privilegeEvents: DeviceDetail["privilegeEvents"];
-  privilegeState: DeviceDetail["privilegeState"];
-  privilegeReason: string;
-  privilegeTargetPath: string;
-  runAction: (label: string, action: () => Promise<unknown>) => Promise<void>;
-  setPrivilegeReason: (value: string) => void;
-  setPrivilegeTargetPath: (value: string) => void;
-}
-
-function renderPrivilegeTab({
-  actionBusy,
-  device,
-  privilegeBaseline,
-  privilegeEvents,
-  privilegeState,
-  privilegeReason,
-  privilegeTargetPath,
-  runAction,
-  setPrivilegeReason,
-  setPrivilegeTargetPath
-}: PrivilegeTabProps) {
-  return (
-    <section className="grid grid-2">
-      <article className="surface-card">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Privilege state</p>
-            <h3>No-standing-admin controls</h3>
-          </div>
-        </div>
-        <dl className="definition-grid">
-          <div>
-            <dt>Hardening</dt>
-            <dd>{privilegeState ? privilegeState.privilegeHardeningMode.replaceAll("_", " ") : "Not assessed"}</dd>
-          </div>
-          <div>
-            <dt>PAM enforcement</dt>
-            <dd>{privilegeState ? (privilegeState.pamEnforcementEnabled ? "Enabled" : "Disabled") : "Not assessed"}</dd>
-          </div>
-          <div>
-            <dt>Recovery path</dt>
-            <dd>{privilegeState ? (privilegeState.recoveryPathExists ? "Escrowed" : "Missing") : "Not assessed"}</dd>
-          </div>
-          <div>
-            <dt>Standing admin</dt>
-            <dd>
-              {privilegeState
-                ? `${privilegeState.standingAdminPresentFlag ? "Present" : "None"} (${privilegeState.unapprovedAdminAccountCount} unapproved)`
-                : "Not assessed"}
-            </dd>
-          </div>
-          <div>
-            <dt>Direct admin logons</dt>
-            <dd>{privilegeState ? privilegeState.directAdminLogonAttemptCount_7d : "Not assessed"}</dd>
-          </div>
-          <div>
-            <dt>Break-glass used</dt>
-            <dd>{privilegeState ? (privilegeState.breakGlassAccountUsageIndicator ? "Yes" : "No") : "Not assessed"}</dd>
-          </div>
-        </dl>
-
-        <div className="field-grid">
-          <label className="field-group field-span-2">
-            <span>Elevation target path</span>
-            <input
-              className="admin-input"
-              value={privilegeTargetPath}
-              onChange={(event) => setPrivilegeTargetPath(event.target.value)}
-              placeholder="C:\\Users\\Public\\Downloads\\installer.exe"
-            />
-          </label>
-          <label className="field-group field-span-2">
-            <span>Reason</span>
-            <input className="admin-input" value={privilegeReason} onChange={(event) => setPrivilegeReason(event.target.value)} />
-          </label>
-        </div>
-
-        <div className="form-actions">
-          <button
-            type="button"
-            className="primary-link"
-            disabled={Boolean(actionBusy) || !device}
-            onClick={() =>
-              device &&
-              void runAction("Enforce privilege hardening", () =>
-                enforceDevicePrivilegeHardening(device.id, { reason: privilegeReason })
-              )
-            }
-          >
-            Enforce hardening
-          </button>
-          <button
-            type="button"
-            className="secondary-link"
-            disabled={Boolean(actionBusy) || !device}
-            onClick={() =>
-              device &&
-              void runAction("Recover privilege hardening", () =>
-                recoverDevicePrivilegeHardening(device.id, { reason: privilegeReason })
-              )
-            }
-          >
-            Recover access
-          </button>
-          <button
-            type="button"
-            className="secondary-link"
-            disabled={Boolean(actionBusy) || !device || !privilegeTargetPath.trim()}
-            onClick={() =>
-              device &&
-              privilegeTargetPath.trim() &&
-              void runAction("Request elevation", () =>
-                queuePrivilegeElevation(device.id, {
-                  issuedBy: "console",
-                  targetPath: privilegeTargetPath.trim(),
-                  reason: privilegeReason,
-                  requestedBy: device.lastLoggedOnUser ?? "console"
-                })
-              )
-            }
-          >
-            Request JIT elevation
-          </button>
-        </div>
-      </article>
-
-      <article className="surface-card">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Privilege timeline</p>
-            <h3>Baseline and recent events</h3>
-          </div>
-        </div>
-
-        <MiniCardList>
-          {privilegeBaseline ? (
-            <article className="mini-card">
-              <strong>Baseline captured</strong>
-              <p>
-                {privilegeBaseline.breakGlassAccountName} · {privilegeBaseline.localAdministrators.length} local admins
-              </p>
-              <span className="mini-meta">{formatDateTime(privilegeBaseline.capturedAt)}</span>
-            </article>
-          ) : (
-            <p className="empty-state">No privilege baseline has been captured yet.</p>
-          )}
-
-          {privilegeEvents.length === 0 ? (
-            <p className="empty-state">No privilege events have been recorded yet.</p>
-          ) : (
-            privilegeEvents.slice(0, 8).map((event) => (
-              <article key={event.id} className="mini-card">
-                <div className="row-between">
-                  <strong>{event.kind.replaceAll(".", " ")}</strong>
-                  <span className={`state-chip tone-${event.severity}`}>{event.severity}</span>
-                </div>
-                <p>{event.summary}</p>
-                <span className="mini-meta">
-                  {formatDateTime(event.recordedAt)} · {event.actor}
-                </span>
-              </article>
-            ))
-          )}
-        </MiniCardList>
-      </article>
-    </section>
-  );
-}
-
 export default function DeviceDetailView({ deviceId }: { deviceId: string }) {
   const [detail, setDetail] = useState<DeviceDetail | null>(null);
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
@@ -1407,8 +1234,6 @@ export default function DeviceDetailView({ deviceId }: { deviceId: string }) {
   const [selectedSoftwareIds, setSelectedSoftwareIds] = useState<string[]>([]);
   const [remediationPath, setRemediationPath] = useState("");
   const [updatePackagePath, setUpdatePackagePath] = useState("");
-  const [privilegeTargetPath, setPrivilegeTargetPath] = useState("");
-  const [privilegeReason, setPrivilegeReason] = useState("Install approved software");
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const requestInFlightRef = useRef<Promise<void> | null>(null);
@@ -1833,20 +1658,6 @@ export default function DeviceDetailView({ deviceId }: { deviceId: string }) {
           })
         : null}
       {activeTab === "telemetry" ? renderTelemetryTab(commands, scanHistory, telemetry) : null}
-      {activeTab === "privilege"
-        ? renderPrivilegeTab({
-            actionBusy,
-            device,
-            privilegeBaseline: detail?.privilegeBaseline ?? null,
-            privilegeEvents: detail?.privilegeEvents ?? [],
-            privilegeState: detail?.privilegeState ?? null,
-            privilegeReason,
-            privilegeTargetPath,
-            runAction,
-            setPrivilegeReason,
-            setPrivilegeTargetPath
-          })
-        : null}
     </ConsoleShell>
   );
 }

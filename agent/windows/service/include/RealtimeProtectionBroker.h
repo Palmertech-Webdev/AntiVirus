@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <atomic>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -36,8 +37,10 @@ class RealtimeProtectionBroker {
 
   void SetPolicy(const PolicySnapshot& policy);
   void SetDeviceId(std::wstring deviceId);
+  bool IsRealtimeCoverageHealthy() const;
 
   RealtimeInspectionOutcome InspectFile(const RealtimeFileScanRequest& request);
+  void ObserveBehaviorEvent(const EventEnvelope& event);
   ScanVerdict EvaluateEvent(const EventEnvelope& event);
   std::vector<TelemetryRecord> DrainTelemetry();
 
@@ -56,6 +59,8 @@ class RealtimeProtectionBroker {
   std::vector<TelemetryRecord> pendingTelemetry_{};
   HANDLE stopEvent_{nullptr};
   HANDLE workerThread_{nullptr};
+  std::atomic<bool> workerActive_{false};
+  std::atomic<bool> portConnected_{false};
 };
 
 }  // namespace antivirus::agent

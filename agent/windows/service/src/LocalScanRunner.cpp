@@ -4,18 +4,38 @@
 
 #include <algorithm>
 #include <array>
+#include <cwctype>
 #include <filesystem>
 #include <set>
 #include <system_error>
 
 #include "EvidenceRecorder.h"
 #include "QuarantineStore.h"
+#include "RemediationEngine.h"
 #include "RuntimeDatabase.h"
 #include "StringUtils.h"
 #include "TelemetryQueueStore.h"
 
 namespace antivirus::agent {
 namespace {
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool RequiresProcessContainment(const ScanFinding& finding) {
+  if (finding.path.empty()) {
+    return false;
+  }
+
+  const auto extension = ToLowerCopy(finding.path.extension().wstring());
+  return extension == L".exe" || extension == L".dll" || extension == L".scr" || extension == L".msi" ||
+         extension == L".com" || extension == L".ps1" || extension == L".psm1" || extension == L".cmd" ||
+         extension == L".bat" || extension == L".js" || extension == L".jse" || extension == L".vbs" ||
+         extension == L".vbe" || extension == L".hta" || extension == L".lnk";
+}
 
 void QueueTelemetry(const AgentConfig& config, const PolicySnapshot& policy, const std::vector<ScanFinding>& findings,
                     const std::size_t targetCount, const std::wstring& source) {
@@ -36,21 +56,64 @@ void ApplyLocalRemediation(const AgentConfig& config, std::vector<ScanFinding>& 
   }
 
   QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
+  RemediationEngine remediationEngine(config);
   for (auto& finding : findings) {
     if (finding.verdict.disposition == VerdictDisposition::Allow || finding.path.empty()) {
       continue;
     }
 
-    const auto result = quarantineStore.QuarantineFile(finding);
+    if (RequiresProcessContainment(finding)) {
+      const auto containment = remediationEngine.TerminateProcessesForPath(finding.path, true);
+      if (containment.processesTerminated > 0) {
+        finding.verdict.reasons.push_back(
+            {L"PROCESS_TREE_CONTAINED",
+             L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+                 L" related process(es) before quarantine."});
+      }
+    }
+
+    auto result = quarantineStore.QuarantineFile(finding);
+    if (!result.success && RequiresProcessContainment(finding)) {
+      const auto retryContainment = remediationEngine.TerminateProcessesForPath(finding.path, true);
+      if (retryContainment.processesTerminated > 0) {
+        finding.verdict.reasons.push_back(
+            {L"PROCESS_TREE_CONTAINED_RETRY",
+             L"Fenrir terminated " + std::to_wstring(retryContainment.processesTerminated) +
+                 L" additional process(es) before retrying quarantine."});
+      }
+      result = quarantineStore.QuarantineFile(finding);
+    }
+
+    if (!result.recordId.empty()) {
+      finding.quarantineRecordId = result.recordId;
+    }
+    if (!result.quarantinedPath.empty()) {
+      finding.quarantinedPath = result.quarantinedPath;
+    }
+
     if (result.success) {
       finding.remediationStatus = RemediationStatus::Quarantined;
-      finding.quarantinedPath = result.quarantinedPath;
-      finding.quarantineRecordId = result.recordId;
+      finding.verdict.reasons.push_back(
+          {L"QUARANTINE_APPLIED", L"Fenrir moved this artifact into local quarantine."});
+      if (!result.localStatus.empty()) {
+        finding.verdict.reasons.push_back(
+            {L"QUARANTINE_STATUS", L"Quarantine status: " + result.localStatus + L"."});
+      }
+      if (!result.verificationDetail.empty()) {
+        finding.verdict.reasons.push_back({L"QUARANTINE_VERIFIED", result.verificationDetail});
+      }
       continue;
     }
 
     finding.remediationStatus = RemediationStatus::Failed;
     finding.remediationError = result.errorMessage.empty() ? L"Unknown quarantine error" : result.errorMessage;
+    if (!result.localStatus.empty()) {
+      finding.verdict.reasons.push_back(
+          {L"QUARANTINE_STATUS", L"Quarantine status: " + result.localStatus + L"."});
+    }
+    if (!result.verificationDetail.empty()) {
+      finding.verdict.reasons.push_back({L"QUARANTINE_VERIFICATION_FAILED", result.verificationDetail});
+    }
     finding.verdict.reasons.push_back({L"QUARANTINE_FAILED", finding.remediationError});
   }
 }

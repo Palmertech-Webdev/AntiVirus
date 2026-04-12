@@ -27,6 +27,11 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - An external signature-bundle path so detection content can ship independently of the core agent binary
 - A real-time verdict broker that can accept minifilter-style file create/open/write/execute requests
 - Real-time block/quarantine decisions flowing through the same evidence and telemetry pipeline as on-demand scans
+- Context-aware real-time behavior-chain scoring using process image, parent image, command-line, and lure-path signals
+- Cross-event behavior-chain correlation over rolling process-lineage windows to raise confidence on staged attacks
+- ETW process and WFP network telemetry now feed that same behavior-correlation history so sequence detections carry runtime context
+- Quarantine retry with process-tree containment when active malware handles prevent first-pass file quarantine
+- Quarantine post-action verification (removed/locked/pending-delete states) with JSONL remediation journaling for audit
 - A native AMSI scan engine shared by the AMSI provider DLL for script and fileless content inspection
 - AMSI provider registration helpers exposed through `--register-amsi-provider` and `--unregister-amsi-provider`
 - A native ETW process sensor for real-time process start/exit and image-load telemetry with user-mode enrichment

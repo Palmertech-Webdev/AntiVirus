@@ -10,8 +10,12 @@ namespace antivirus::agent {
 struct QuarantineResult {
   bool attempted{false};
   bool success{false};
+  bool neutralized{false};
+  bool originalArtifactPresent{false};
   std::wstring recordId;
   std::filesystem::path quarantinedPath;
+  std::wstring localStatus;
+  std::wstring verificationDetail;
   std::wstring errorMessage;
 };
 

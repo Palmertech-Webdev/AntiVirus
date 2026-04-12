@@ -1,6 +1,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -11,6 +12,7 @@
 #include "LocalStateStore.h"
 #include "QuarantineStore.h"
 #include "RealtimeProtectionBroker.h"
+#include "RemediationEngine.h"
 #include "ScanEngine.h"
 #include "StringUtils.h"
 #include "TelemetryQueueStore.h"
@@ -27,6 +29,24 @@ struct CliOptions {
   std::vector<std::filesystem::path> exclusions;
   std::vector<std::filesystem::path> targets;
 };
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool RequiresProcessContainment(const antivirus::agent::ScanFinding& finding) {
+  if (finding.path.empty()) {
+    return false;
+  }
+
+  const auto extension = ToLowerCopy(finding.path.extension().wstring());
+  return extension == L".exe" || extension == L".dll" || extension == L".scr" || extension == L".msi" ||
+         extension == L".com" || extension == L".ps1" || extension == L".psm1" || extension == L".cmd" ||
+         extension == L".bat" || extension == L".js" || extension == L".jse" || extension == L".vbs" ||
+         extension == L".vbe" || extension == L".hta" || extension == L".lnk";
+}
 
 void PrintUsage() {
   std::wcout << L"Usage: antivirus-scannercli.exe [--json] [--no-telemetry] [--no-remediation] [--exclude <path>] [--realtime-op <create|open|write|execute>] [--path <target>] <target>..."
@@ -194,16 +214,40 @@ void ApplyLocalRemediation(const antivirus::agent::AgentConfig& config, std::vec
   }
 
   antivirus::agent::QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
+  antivirus::agent::RemediationEngine remediationEngine(config);
   for (auto& finding : findings) {
     if (finding.verdict.disposition == antivirus::agent::VerdictDisposition::Allow) {
       continue;
     }
 
-    const auto result = quarantineStore.QuarantineFile(finding);
+    if (RequiresProcessContainment(finding)) {
+      const auto containment = remediationEngine.TerminateProcessesForPath(finding.path, true);
+      if (containment.processesTerminated > 0) {
+        finding.verdict.reasons.push_back(
+            {L"PROCESS_TREE_CONTAINED",
+             L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+                 L" related process(es) before quarantine."});
+      }
+    }
+
+    auto result = quarantineStore.QuarantineFile(finding);
+    if (!result.success && RequiresProcessContainment(finding)) {
+      const auto retryContainment = remediationEngine.TerminateProcessesForPath(finding.path, true);
+      if (retryContainment.processesTerminated > 0) {
+        finding.verdict.reasons.push_back(
+            {L"PROCESS_TREE_CONTAINED_RETRY",
+             L"Fenrir terminated " + std::to_wstring(retryContainment.processesTerminated) +
+                 L" additional process(es) before retrying quarantine."});
+      }
+      result = quarantineStore.QuarantineFile(finding);
+    }
+
     if (result.success) {
       finding.remediationStatus = antivirus::agent::RemediationStatus::Quarantined;
       finding.quarantinedPath = result.quarantinedPath;
       finding.quarantineRecordId = result.recordId;
+      finding.verdict.reasons.push_back(
+          {L"QUARANTINE_APPLIED", L"Fenrir moved this artifact into local quarantine."});
     } else {
       finding.remediationStatus = antivirus::agent::RemediationStatus::Failed;
       finding.remediationError = result.errorMessage.empty() ? L"Unknown quarantine error" : result.errorMessage;

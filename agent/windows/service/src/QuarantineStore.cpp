@@ -6,6 +6,7 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -231,6 +232,117 @@ bool LockDownPathForSystemOnly(const std::filesystem::path& path) {
   return securityStatus == ERROR_SUCCESS;
 }
 
+struct NeutralizationVerification {
+  bool neutralized{false};
+  bool originalPresent{false};
+  std::wstring localStatus;
+  std::wstring detail;
+};
+
+std::mutex gQuarantineJournalMutex;
+
+bool CanOpenForExecution(const std::filesystem::path& path) {
+  const HANDLE handle =
+      CreateFileW(path.c_str(), FILE_EXECUTE | FILE_READ_ATTRIBUTES,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  CloseHandle(handle);
+  return true;
+}
+
+NeutralizationVerification VerifyNeutralizationState(const std::filesystem::path& originalPath,
+                                                     const std::wstring& currentStatus) {
+  std::error_code existsError;
+  const bool originalPresent = std::filesystem::exists(originalPath, existsError);
+  if (existsError) {
+    return NeutralizationVerification{
+        .neutralized = false,
+        .originalPresent = true,
+        .localStatus = L"quarantined-verification-error",
+        .detail = L"Fenrir could not verify the original path after quarantine."};
+  }
+
+  if (!originalPresent) {
+    return NeutralizationVerification{
+        .neutralized = true,
+        .originalPresent = false,
+        .localStatus = L"quarantined-verified-removed",
+        .detail = L"Original artifact removed from the source path."};
+  }
+
+  if (_wcsicmp(currentStatus.c_str(), L"quarantined-pending-delete") == 0) {
+    return NeutralizationVerification{
+        .neutralized = true,
+        .originalPresent = true,
+        .localStatus = L"quarantined-pending-delete",
+        .detail = L"Original artifact remains on disk until the scheduled reboot deletion executes."};
+  }
+
+  if (_wcsicmp(currentStatus.c_str(), L"quarantined-locked") == 0) {
+    if (!CanOpenForExecution(originalPath)) {
+      return NeutralizationVerification{
+          .neutralized = true,
+          .originalPresent = true,
+          .localStatus = L"quarantined-verified-locked",
+          .detail = L"Original artifact path remains but execution access is blocked by lockdown."};
+    }
+
+    return NeutralizationVerification{
+        .neutralized = false,
+        .originalPresent = true,
+        .localStatus = L"quarantined-locked-unverified",
+        .detail = L"Original artifact is still executable after lockdown and requires additional remediation."};
+  }
+
+  if (ScheduleDeleteOnReboot(originalPath)) {
+    return NeutralizationVerification{
+        .neutralized = true,
+        .originalPresent = true,
+        .localStatus = L"quarantined-pending-delete",
+        .detail = L"Original artifact was still present; Fenrir scheduled delete-on-reboot."};
+  }
+
+  return NeutralizationVerification{
+      .neutralized = false,
+      .originalPresent = true,
+      .localStatus = L"quarantined-original-still-present",
+      .detail = L"Original artifact is still present after quarantine and no delete-on-reboot fallback was applied."};
+}
+
+void AppendQuarantineJournalEntry(const std::filesystem::path& rootPath, const std::wstring& action,
+                                  const std::wstring& recordId, const std::filesystem::path& originalPath,
+                                  const std::filesystem::path& quarantinedPath, const std::wstring& localStatus,
+                                  const bool success, const std::wstring& detail) {
+  const std::scoped_lock lock(gQuarantineJournalMutex);
+
+  std::error_code createError;
+  const auto recordsDirectory = rootPath / L"records";
+  std::filesystem::create_directories(recordsDirectory, createError);
+  if (createError) {
+    return;
+  }
+
+  std::ofstream output(recordsDirectory / L"quarantine-journal.jsonl", std::ios::binary | std::ios::app);
+  if (!output.is_open()) {
+    return;
+  }
+
+  const std::wstring line = L"{\"recordedAt\":\"" + CurrentUtcTimestamp() + L"\",\"action\":\"" +
+                            Utf8ToWide(EscapeJsonString(action)) + L"\",\"recordId\":\"" +
+                            Utf8ToWide(EscapeJsonString(recordId)) + L"\",\"originalPath\":\"" +
+                            Utf8ToWide(EscapeJsonString(originalPath.wstring())) + L"\",\"quarantinedPath\":\"" +
+                            Utf8ToWide(EscapeJsonString(quarantinedPath.wstring())) + L"\",\"localStatus\":\"" +
+                            Utf8ToWide(EscapeJsonString(localStatus)) + L"\",\"success\":" +
+                            (success ? L"true" : L"false") + L",\"detail\":\"" +
+                            Utf8ToWide(EscapeJsonString(detail)) + L"\"}\n";
+  const auto utf8Line = WideToUtf8(line);
+  output.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
+}
+
 }  // namespace
 
 QuarantineStore::QuarantineStore(std::filesystem::path rootPath, std::filesystem::path databasePath)
@@ -240,8 +352,12 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
   QuarantineResult result{
       .attempted = true,
       .success = false,
+      .neutralized = false,
+      .originalArtifactPresent = false,
       .recordId = GenerateGuidString(),
       .quarantinedPath = {},
+      .localStatus = L"quarantine-failed",
+      .verificationDetail = {},
       .errorMessage = {}};
 
   try {
@@ -271,7 +387,13 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
       }
     }
 
-    WriteMetadata(rootPath_, result.recordId, finding, destinationPath, localStatus);
+    const auto verification = VerifyNeutralizationState(finding.path, localStatus);
+    result.localStatus = verification.localStatus;
+    result.neutralized = verification.neutralized;
+    result.originalArtifactPresent = verification.originalPresent;
+    result.verificationDetail = verification.detail;
+
+    WriteMetadata(rootPath_, result.recordId, finding, destinationPath, result.localStatus);
     RuntimeDatabase(databasePath_).UpsertQuarantineRecord(QuarantineIndexRecord{
         .recordId = result.recordId,
         .capturedAt = CurrentUtcTimestamp(),
@@ -280,12 +402,22 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
         .sha256 = finding.sha256,
         .sizeBytes = finding.sizeBytes,
         .techniqueId = finding.verdict.techniqueId,
-        .localStatus = localStatus});
-    result.success = true;
+        .localStatus = result.localStatus});
+    result.success = result.neutralized;
     result.quarantinedPath = destinationPath;
+    if (!result.success) {
+      result.errorMessage = result.verificationDetail.empty()
+                                ? L"Fenrir could not verify original artifact neutralization after quarantine."
+                                : result.verificationDetail;
+    }
+    AppendQuarantineJournalEntry(
+        rootPath_, L"quarantine", result.recordId, finding.path, destinationPath, result.localStatus, result.success,
+        result.success ? L"Fenrir quarantined and verified the artifact." : result.errorMessage);
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());
+    AppendQuarantineJournalEntry(rootPath_, L"quarantine", result.recordId, finding.path, result.quarantinedPath,
+                                 result.localStatus, false, result.errorMessage);
     return result;
   }
 }
@@ -376,9 +508,13 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
         .localStatus = entry.localStatus});
     result.success = true;
     result.quarantinedPath = entry.quarantinedPath;
+    AppendQuarantineJournalEntry(rootPath_, L"restore", entry.recordId, entry.originalPath, entry.quarantinedPath,
+                                 entry.localStatus, true, L"Fenrir restored the quarantined artifact.");
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());
+    AppendQuarantineJournalEntry(rootPath_, L"restore", result.recordId, result.originalPath, result.quarantinedPath,
+                                 L"restore-failed", false, result.errorMessage);
     return result;
   }
 }
@@ -416,9 +552,13 @@ QuarantineActionResult QuarantineStore::DeleteRecord(const std::wstring& recordI
         .localStatus = entry.localStatus});
     result.success = true;
     result.quarantinedPath = std::filesystem::path();
+    AppendQuarantineJournalEntry(rootPath_, L"delete", entry.recordId, entry.originalPath, result.quarantinedPath,
+                                 entry.localStatus, true, L"Fenrir deleted the quarantined artifact record.");
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());
+    AppendQuarantineJournalEntry(rootPath_, L"delete", result.recordId, result.originalPath, result.quarantinedPath,
+                                 L"delete-failed", false, result.errorMessage);
     return result;
   }
 }

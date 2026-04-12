@@ -12,10 +12,10 @@
 #include <atomic>
 #include <array>
 #include <functional>
+#include <fstream>
 #include <iomanip>
 #include <cstdint>
 #include <cwctype>
-#include <fstream>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -47,6 +47,8 @@ constexpr wchar_t kWindowClassName[] = L"FenrirEndpointClientWindow";
 constexpr wchar_t kWindowTitle[] = L"Fenrir Protection Centre";
 constexpr wchar_t kInstanceMutexName[] = L"Local\\FenrirEndpointClientSingleton";
 constexpr wchar_t kRestoreWindowMessageName[] = L"FenrirEndpointClient.RestoreWindow";
+constexpr wchar_t kPamRequestEventName[] = L"Global\\FenrirPamRequestReady";
+constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kScanCompleteMessage = WM_APP + 2;
 constexpr UINT kScanProgressMessage = WM_APP + 3;
@@ -91,14 +93,13 @@ enum : int {
   IDM_TRAY_OPEN = 2001,
   IDM_TRAY_QUICKSCAN = 2002,
   IDM_TRAY_FULLSCAN = 2003,
-  IDM_TRAY_QUARANTINE = 2004,
-  IDM_TRAY_PAM = 2005,
-  IDM_TRAY_ADMIN_POWERSHELL = 2006,
-  IDM_TRAY_ADMIN_CMD = 2007,
-  IDM_TRAY_ADMIN_DISKCLEANUP = 2008,
-  IDM_TRAY_ADMIN_APP = 2009,
-  IDM_TRAY_ADMIN_ELEVATE_2M = 2010,
-  IDM_TRAY_EXIT = 2011
+  IDM_TRAY_PAM_POWERSHELL = 2004,
+  IDM_TRAY_PAM_CMD = 2005,
+  IDM_TRAY_PAM_DISKCLEANUP = 2006,
+  IDM_TRAY_PAM_APP = 2007,
+  IDM_TRAY_PAM_ELEVATE_2M = 2008,
+  IDM_TRAY_QUARANTINE = 2009,
+  IDM_TRAY_EXIT = 2010
 };
 
 enum class ScanPreset {
@@ -124,8 +125,7 @@ enum class ClientPage : int {
   Scans = 3,
   Service = 4,
   History = 5,
-  Settings = 6,
-  Pam = 7
+  Settings = 6
 };
 
 struct ScanCompletePayload {
@@ -669,6 +669,237 @@ bool LaunchExclusionsEditor(HWND owner) {
   return result > 32;
 }
 
+std::filesystem::path GetCurrentExecutableDirectory() {
+  std::wstring buffer(MAX_PATH, L'\0');
+  const auto written = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+  if (written == 0) {
+    return std::filesystem::current_path();
+  }
+
+  buffer.resize(written);
+  const auto executablePath = std::filesystem::path(buffer);
+  return executablePath.has_parent_path() ? executablePath.parent_path() : std::filesystem::current_path();
+}
+
+std::wstring GetCurrentUserName() {
+  std::array<wchar_t, 256> buffer{};
+  DWORD size = static_cast<DWORD>(buffer.size());
+  if (GetUserNameW(buffer.data(), &size) == FALSE) {
+    return L"unknown";
+  }
+
+  if (size > 0 && buffer[size - 1] == L'\0') {
+    --size;
+  }
+  return std::wstring(buffer.data(), size);
+}
+
+std::wstring EscapePamJsonValue(const std::wstring& value) {
+  return antivirus::agent::Utf8ToWide(antivirus::agent::EscapeJsonString(value));
+}
+
+std::filesystem::path GetPerUserPamRequestPath() {
+  const auto localAppData = antivirus::agent::ReadEnvironmentVariable(L"LOCALAPPDATA");
+  if (localAppData.empty()) {
+    return {};
+  }
+
+  return std::filesystem::path(localAppData) / L"FenrirAgent" / L"runtime" / kPamRequestFileName;
+}
+
+std::filesystem::path GetPamRequestPath(const UiContext& context) {
+  const auto perUserPath = GetPerUserPamRequestPath();
+  if (!perUserPath.empty()) {
+    return perUserPath;
+  }
+
+  auto runtimeRoot = context.config.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = GetCurrentExecutableDirectory() / L"runtime";
+  }
+  return runtimeRoot / kPamRequestFileName;
+}
+
+std::wstring GetSystemBinaryPath(const wchar_t* relativePath) {
+  std::wstring buffer(MAX_PATH, L'\0');
+  const auto written = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+  if (written == 0) {
+    return {};
+  }
+
+  buffer.resize(written);
+  return (std::filesystem::path(buffer) / relativePath).wstring();
+}
+
+bool PromptForPamTarget(HWND owner, std::wstring* targetPath) {
+  if (targetPath == nullptr) {
+    return false;
+  }
+
+  std::array<wchar_t, 32768> buffer{};
+  OPENFILENAMEW dialog{};
+  dialog.lStructSize = sizeof(dialog);
+  dialog.hwndOwner = owner;
+  dialog.lpstrFilter =
+      L"Applications and scripts (*.exe;*.com;*.bat;*.cmd;*.ps1)\0*.exe;*.com;*.bat;*.cmd;*.ps1\0All files (*.*)\0*.*\0\0";
+  dialog.lpstrFile = buffer.data();
+  dialog.nMaxFile = static_cast<DWORD>(buffer.size());
+  dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+  dialog.lpstrTitle = L"Select an application to run with Fenrir PAM";
+
+  if (!GetOpenFileNameW(&dialog)) {
+    return false;
+  }
+
+  *targetPath = buffer.data();
+  return !targetPath->empty();
+}
+
+bool QueuePamRequest(UiContext& context, const std::wstring& action, const std::wstring& targetPath,
+                     const std::wstring& arguments, const std::wstring& reason, std::wstring* errorMessage) {
+  if (targetPath.empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM did not receive a valid target path.";
+    }
+    return false;
+  }
+
+  const auto requestPath = GetPamRequestPath(context);
+  std::error_code directoryError;
+  std::filesystem::create_directories(requestPath.parent_path(), directoryError);
+  if (directoryError) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not create the PAM runtime directory.";
+    }
+    return false;
+  }
+
+  const auto requestedAt = antivirus::agent::CurrentUtcTimestamp();
+  const auto requester = GetCurrentUserName();
+  const auto tempPath = requestPath.wstring() + L".new";
+
+  const std::wstring payload =
+      L"{\"requestedAt\":\"" + EscapePamJsonValue(requestedAt) + L"\",\"requester\":\"" +
+      EscapePamJsonValue(requester) + L"\",\"action\":\"" + EscapePamJsonValue(action) + L"\",\"targetPath\":\"" +
+      EscapePamJsonValue(targetPath) + L"\",\"arguments\":\"" + EscapePamJsonValue(arguments) + L"\",\"reason\":\"" +
+      EscapePamJsonValue(reason) + L"\"}";
+
+  {
+    std::ofstream stream(std::filesystem::path(tempPath), std::ios::binary | std::ios::trunc);
+    if (!stream.is_open()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir could not write the PAM request payload.";
+      }
+      return false;
+    }
+
+    const auto utf8Payload = antivirus::agent::WideToUtf8(payload);
+    stream.write(utf8Payload.data(), static_cast<std::streamsize>(utf8Payload.size()));
+    stream.flush();
+    if (!stream.good()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir could not flush the PAM request payload.";
+      }
+      return false;
+    }
+  }
+
+  if (MoveFileExW(tempPath.c_str(), requestPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
+    DeleteFileW(tempPath.c_str());
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not finalize the PAM request payload.";
+    }
+    return false;
+  }
+
+  const auto requestEvent = CreateEventW(nullptr, FALSE, FALSE, kPamRequestEventName);
+  if (requestEvent != nullptr) {
+    SetEvent(requestEvent);
+    CloseHandle(requestEvent);
+  }
+
+  return true;
+}
+
+bool SubmitPamRequestFromTray(HWND hwnd, UiContext& context, const std::wstring& action,
+                              const std::wstring& targetPath, const std::wstring& arguments,
+                              const std::wstring& reason) {
+  std::wstring errorMessage;
+  if (QueuePamRequest(context, action, targetPath, arguments, reason, &errorMessage)) {
+    return true;
+  }
+
+  const auto message = errorMessage.empty() ? L"Fenrir could not queue this PAM request right now." : errorMessage;
+  MessageBoxW(hwnd, message.c_str(), kWindowTitle, MB_OK | MB_ICONWARNING);
+  return false;
+}
+
+bool SubmitPowerShellPamRequest(HWND hwnd, UiContext& context) {
+  const auto targetPath = GetSystemBinaryPath(LR"(WindowsPowerShell\v1.0\powershell.exe)");
+  if (targetPath.empty()) {
+    MessageBoxW(hwnd, L"Fenrir could not resolve the PowerShell path for PAM elevation.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_powershell", targetPath, L"-NoLogo",
+                                  L"User approved built-in PAM tool launch");
+}
+
+bool SubmitCommandPromptPamRequest(HWND hwnd, UiContext& context) {
+  const auto targetPath = GetSystemBinaryPath(L"cmd.exe");
+  if (targetPath.empty()) {
+    MessageBoxW(hwnd, L"Fenrir could not resolve the Command Prompt path for PAM elevation.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_cmd", targetPath, L"",
+                                  L"User approved built-in PAM tool launch");
+}
+
+bool SubmitDiskCleanupPamRequest(HWND hwnd, UiContext& context) {
+  const auto targetPath = GetSystemBinaryPath(L"cleanmgr.exe");
+  if (targetPath.empty()) {
+    MessageBoxW(hwnd, L"Fenrir could not resolve Disk Cleanup for PAM elevation.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_disk_cleanup", targetPath, L"",
+                                  L"User approved built-in PAM tool launch");
+}
+
+bool SubmitApplicationPamRequest(HWND hwnd, UiContext& context) {
+  std::wstring targetPath;
+  if (!PromptForPamTarget(hwnd, &targetPath)) {
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_application", targetPath, L"",
+                                  L"User approved one-time custom PAM elevation");
+}
+
+bool SubmitTimedPamRequest(HWND hwnd, UiContext& context) {
+  std::wstring targetPath;
+  if (!PromptForPamTarget(hwnd, &targetPath)) {
+    return false;
+  }
+
+  const auto confirmation =
+      MessageBoxW(hwnd,
+                  (L"Fenrir will run this target with elevated rights for up to 2 minutes:\r\n\r\n" +
+                   targetPath + L"\r\n\r\nContinue?")
+                      .c_str(),
+                  kWindowTitle, MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+  if (confirmation != IDOK) {
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_application_timed", targetPath, L"",
+                                  L"User approved a 2 minute process-scoped PAM elevation");
+}
+
 bool SaveExclusionsFromEditor(HWND hwnd, UiContext& context) {
   const auto length = GetWindowTextLengthW(context.detailEdit);
   std::wstring buffer(static_cast<std::size_t>(std::max(length, 0)) + 1, L'\0');
@@ -880,8 +1111,6 @@ std::wstring BuildBrandCardText(const EndpointClientSnapshot& snapshot) {
 
 std::wstring PageTitle(const ClientPage page) {
   switch (page) {
-    case ClientPage::Pam:
-      return L"PAM";
     case ClientPage::Threats:
       return L"Threats";
     case ClientPage::Quarantine:
@@ -902,8 +1131,6 @@ std::wstring PageTitle(const ClientPage page) {
 
 std::wstring PageKey(const ClientPage page) {
   switch (page) {
-    case ClientPage::Pam:
-      return L"pam";
     case ClientPage::Threats:
       return L"threats";
     case ClientPage::Quarantine:
@@ -924,8 +1151,6 @@ std::wstring PageKey(const ClientPage page) {
 
 std::wstring PageSubtitle(const ClientPage page, const EndpointClientSnapshot& snapshot) {
   switch (page) {
-    case ClientPage::Pam:
-      return L"Use trusted, one-time elevation from the tray and review local privilege state and recovery posture.";
     case ClientPage::Threats:
       return L"Investigate active detections, review evidence, and decide what needs action.";
     case ClientPage::Quarantine:
@@ -949,8 +1174,6 @@ std::wstring PageSubtitle(const ClientPage page, const EndpointClientSnapshot& s
 
 std::wstring PrimarySectionTitle(const ClientPage page) {
   switch (page) {
-    case ClientPage::Pam:
-      return L"Privilege access";
     case ClientPage::Threats:
       return L"Threat queue";
     case ClientPage::Quarantine:
@@ -971,8 +1194,6 @@ std::wstring PrimarySectionTitle(const ClientPage page) {
 
 std::wstring SecondarySectionTitle(const ClientPage page) {
   switch (page) {
-    case ClientPage::Pam:
-      return L"Elevation detail";
     case ClientPage::Quarantine:
       return L"Item detail";
     case ClientPage::Threats:
@@ -1545,131 +1766,8 @@ std::wstring BuildSettingsOverviewText(const UiContext& context) {
   return stream.str();
 }
 
-std::filesystem::path GetPrivilegeRequestJournalPath(const UiContext& context) {
-  return context.config.runtimeDatabasePath.parent_path() / L"privilege-requests.jsonl";
-}
-
-std::wstring ExtractJsonField(const std::wstring& text, const std::wstring& field) {
-  const auto token = L"\"" + field + L"\":\"";
-  const auto start = text.find(token);
-  if (start == std::wstring::npos) {
-    return {};
-  }
-
-  std::wstring value;
-  bool escape = false;
-  for (auto index = start + token.size(); index < text.size(); ++index) {
-    const auto ch = text[index];
-    if (escape) {
-      switch (ch) {
-        case L'\\': value.push_back(L'\\'); break;
-        case L'"': value.push_back(L'"'); break;
-        case L'n': value.push_back(L'\n'); break;
-        case L'r': value.push_back(L'\r'); break;
-        case L't': value.push_back(L'\t'); break;
-        default: value.push_back(ch); break;
-      }
-      escape = false;
-      continue;
-    }
-    if (ch == L'\\') {
-      escape = true;
-      continue;
-    }
-    if (ch == L'"') {
-      return value;
-    }
-    value.push_back(ch);
-  }
-
-  return {};
-}
-
-struct PamJournalEntry {
-  std::wstring timestamp;
-  std::wstring targetPath;
-  std::wstring reason;
-  std::wstring requestedBy;
-  std::wstring decision;
-};
-
-std::wstring CurrentTimestampText() {
-  SYSTEMTIME time{};
-  GetLocalTime(&time);
-  wchar_t buffer[64] = {};
-  if (swprintf_s(buffer, L"%04u-%02u-%02u %02u:%02u:%02u", time.wYear, time.wMonth, time.wDay, time.wHour,
-                 time.wMinute, time.wSecond) < 0) {
-    return L"(unknown)";
-  }
-  return buffer;
-}
-
-std::vector<PamJournalEntry> LoadPamJournalEntries(const UiContext& context) {
-  std::vector<PamJournalEntry> entries;
-  const auto journalPath = GetPrivilegeRequestJournalPath(context);
-  std::ifstream stream(journalPath);
-  if (!stream.is_open()) {
-    return entries;
-  }
-
-  std::string line;
-  while (std::getline(stream, line)) {
-    auto wideLine = TrimCopy(antivirus::agent::Utf8ToWide(line));
-    if (wideLine.empty()) {
-      continue;
-    }
-
-    PamJournalEntry entry;
-    entry.timestamp = ExtractJsonField(wideLine, L"timestamp");
-    entry.targetPath = ExtractJsonField(wideLine, L"targetPath");
-    entry.reason = ExtractJsonField(wideLine, L"reason");
-    entry.requestedBy = ExtractJsonField(wideLine, L"requestedBy");
-    entry.decision = ExtractJsonField(wideLine, L"decision");
-    entries.push_back(std::move(entry));
-  }
-
-  return entries;
-}
-
-std::wstring BuildPamOverviewText(const UiContext& context) {
-  const auto admin = IsCurrentUserAdmin() ? L"yes" : L"no";
-  const auto journal = LoadPamJournalEntries(context);
-  std::wstringstream stream;
-  stream << L"Privilege access\r\n\r\n"
-         << L"Current user is administrator: " << admin << L"\r\n"
-         << L"Standing admin posture: " << (IsCurrentUserAdmin() ? L"elevated locally" : L"standard user") << L"\r\n"
-         << L"Privileged requests recorded: " << journal.size() << L"\r\n"
-         << L"Recovery posture: tray approvals are journaled locally for service review\r\n"
-         << L"Quick actions: PowerShell, Command Prompt, Disk Cleanup, or custom elevation";
-  return stream.str();
-}
-
-std::wstring BuildPamDetailText(const UiContext& context) {
-  const auto journal = LoadPamJournalEntries(context);
-  std::wstringstream stream;
-  stream << L"Local PAM detail\r\n\r\n"
-         << L"Use the tray menu to request trusted elevation for built-in admin tools or a custom executable.\r\n"
-         << L"Approved requests are written to the local journal and picked up by the service on sync.\r\n"
-         << L"Each request records a timestamp, target, reason, and decision for audit review.";
-  if (!journal.empty()) {
-    const auto& latest = journal.front();
-    stream << L"\r\n\r\nLatest request\r\n"
-           << L"Time: " << NullableText(latest.timestamp, L"(unknown)") << L"\r\n"
-           << L"Target: " << NullableText(latest.targetPath, L"(unknown)") << L"\r\n"
-            << L"Reason: " << NullableText(latest.reason, L"(none)") << L"\r\n"
-            << L"Requested by: " << NullableText(latest.requestedBy, L"(unknown)") << L"\r\n"
-            << L"Decision: " << NullableText(latest.decision, L"(unknown)");
-  }
-  return stream.str();
-}
-
 std::wstring DefaultDetailText(const UiContext& context) {
   switch (context.currentPage) {
-    case ClientPage::Pam:
-      if (IsCurrentUserAdmin()) {
-        return L"PAM detail\r\n\r\nThis session is running with administrator rights. Use the tray menu to launch a one-time elevated task or review local elevation history.";
-      }
-      return L"PAM detail\r\n\r\nThis session is running as a standard user. Use the tray menu to request a one-time elevation for trusted admin tools or a custom executable.";
     case ClientPage::Threats:
       if (context.snapshot.recentThreats.empty()) {
         return L"Threat detail\r\n\r\nNo unresolved local threats are currently recorded on this device.";
@@ -2011,26 +2109,6 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
          << JsonEscape(settingsEntries[index].second) << L"\"}";
   }
   json << L"],";
-
-  const auto pamEntries = LoadPamJournalEntries(context);
-  json << L"\"pam\":{";
-  json << L"\"currentUser\":\"" << JsonEscape(IsCurrentUserAdmin() ? L"Administrator session" : L"Standard user") << L"\",";
-  json << L"\"isAdmin\":" << (IsCurrentUserAdmin() ? 1 : 0) << L",";
-  json << L"\"mode\":\"monitor\",";
-  json << L"\"recoveryPath\":\"" << JsonEscape(L"Tray approvals are journaled locally") << L"\",";
-  json << L"\"breakGlass\":\"" << JsonEscape(L"Configured") << L"\",";
-  json << L"\"requests\":[";
-  for (std::size_t index = 0; index < pamEntries.size(); ++index) {
-    if (index != 0) {
-      json << L",";
-    }
-    const auto& entry = pamEntries[index];
-    json << L"{\"targetPath\":\"" << JsonEscape(entry.targetPath)
-         << L"\",\"reason\":\"" << JsonEscape(entry.reason)
-         << L"\",\"requestedBy\":\"" << JsonEscape(entry.requestedBy)
-         << L"\",\"decision\":\"" << JsonEscape(entry.decision.empty() ? L"approved" : entry.decision) << L"\"}";
-  }
-  json << L"]},";
 
   json << L"\"exclusions\":[";
   for (std::size_t index = 0; index < exclusions.size(); ++index) {
@@ -2384,7 +2462,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       { key: 'threats', label: 'Threats' },
       { key: 'quarantine', label: 'Quarantine' },
       { key: 'scans', label: 'Scans' },
-      { key: 'pam', label: 'PAM' },
       { key: 'history', label: 'History' },
       { key: 'settings', label: 'Settings' }
     ];
@@ -2409,7 +2486,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       if (pageKey === 'threats') return appState.threats || [];
       if (pageKey === 'quarantine') return appState.quarantine || [];
       if (pageKey === 'scans') return (appState.history || []).filter((item) => item.kind === 'scan-session');
-      if (pageKey === 'pam') return appState.pam?.requests || [];
       return appState.settings || [];
     }
 
@@ -2449,12 +2525,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         actions.push(`<button class="primary" data-action="scan" data-preset="quick">Quick scan</button>`);
         actions.push(`<button data-action="scan" data-preset="full">Full scan</button>`);
         actions.push(`<button data-action="scan" data-preset="folder">Scan folder</button>`);
-        actions.push(`<button data-action="refresh">Refresh</button>`);
-      } else if (page === 'pam') {
-        actions.push(`<button class="primary" data-action="pamLaunch" data-tool="powershell">Run PowerShell as admin</button>`);
-        actions.push(`<button data-action="pamLaunch" data-tool="cmd">Run Command Prompt as admin</button>`);
-        actions.push(`<button data-action="pamLaunch" data-tool="diskcleanup">Run Disk Cleanup as admin</button>`);
-        actions.push(`<button data-action="pamPrompt">Custom elevation...</button>`);
         actions.push(`<button data-action="refresh">Refresh</button>`);
       } else if (page === 'history') {
         actions.push(`<button data-action="refresh">Refresh</button>`);
@@ -2497,14 +2567,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
           `<button class="good" data-action="quarantineRestore" data-id="${esc(current.id)}">Restore</button>`,
           `<button class="danger" data-action="quarantineDelete" data-id="${esc(current.id)}">Delete</button>`
         ].join('') : '';
-      }
-      if (page === 'pam') {
-        return [
-          `<button class="primary" data-action="pamLaunch" data-tool="powershell">PowerShell</button>`,
-          `<button data-action="pamLaunch" data-tool="cmd">Command Prompt</button>`,
-          `<button data-action="pamLaunch" data-tool="diskcleanup">Disk Cleanup</button>`,
-          `<button class="warning" data-action="pamPrompt">Custom elevation</button>`
-        ].join('');
       }
       if (page === 'settings') {
         return `<button class="warning" data-action="openExclusions">Edit exclusions</button>`;
@@ -2600,41 +2662,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
     }
 
     function buildSelectedDetail(pageKey) {
-      if (pageKey === 'pam') {
-        const pam = appState.pam || {};
-        const requests = pam.requests || [];
-        const latest = requests[0] || null;
-        return `
-          <div class="detail-card">
-            <div class="title">${esc(appState.detailTitle)}</div>
-            <div class="text">${esc(appState.detailText)}</div>
-          </div>
-          <div class="detail-card">
-            <div class="title">Privilege posture</div>
-            <div class="detail-grid">
-              <div class="key">Current user</div><div class="value">${esc(pam.currentUser || '(unknown)')}</div>
-              <div class="key">Admin</div><div class="value">${esc(pam.isAdmin ? 'Yes' : 'No')}</div>
-              <div class="key">Mode</div><div class="value">${esc(pam.mode || 'monitor')}</div>
-              <div class="key">Recovery path</div><div class="value">${esc(pam.recoveryPath || 'Ready')}</div>
-              <div class="key">Break-glass</div><div class="value">${esc(pam.breakGlass || 'Configured')}</div>
-              <div class="key">Requests</div><div class="value">${esc(String(requests.length))}</div>
-            </div>
-            <div class="actions" style="margin-top: 14px;">
-              <button class="primary" data-action="pamLaunch" data-tool="powershell">PowerShell</button>
-              <button data-action="pamLaunch" data-tool="cmd">Command Prompt</button>
-              <button data-action="pamLaunch" data-tool="diskcleanup">Disk Cleanup</button>
-              <button class="warning" data-action="pamPrompt">Custom elevation</button>
-            </div>
-          </div>
-          <div class="detail-card">
-            <div class="title">Recent elevation</div>
-            <div class="text">${
-              latest
-                ? esc(`${latest.targetPath || '(unknown)'}\n${latest.reason || ''}\n${latest.decision || 'approved'}`)
-                : 'No local elevation requests have been recorded yet.'
-            }</div>
-          </div>`;
-      }
       if (pageKey === 'settings') {
         return `
           <div class="detail-card">
@@ -3015,31 +3042,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         }
         return buildSettingsOverviewBody();
       }
-      if (pageKey === 'pam') {
-        return `
-          <section class="section">
-            <div class="section-head">
-              <div>
-                <div class="eyebrow">Privilege access</div>
-                <div class="section-title">Native PAM controls</div>
-                <div class="section-text">Launch trusted admin tools from the tray, request one-time elevation, and review the local privilege journal.</div>
-              </div>
-              <div class="chip ${appState.pam?.isAdmin ? 'warning' : 'info'}">${esc(appState.pam?.isAdmin ? 'Admin session' : 'Standard user')}</div>
-            </div>
-            <div style="margin-top: 14px;">${buildSelectedDetail('pam')}</div>
-          </section>
-          <section class="section">
-            <div class="section-head">
-              <div>
-                <div class="eyebrow">Elevation journal</div>
-                <div class="section-title">Recent requests</div>
-                <div class="section-text">Approved requests are pulled from the local PAM journal and mirrored into service telemetry.</div>
-              </div>
-              <div class="chip info">${esc(String((appState.pam?.requests || []).length))} request(s)</div>
-            </div>
-            <div style="margin-top: 14px;">${buildList('pam')}</div>
-          </section>`;
-      }
 
       return buildDashboardBody();
     }
@@ -3048,7 +3050,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       if (pageKey === 'threats') return ['Time', 'Item', 'Action', 'Confidence', 'ATT&CK', 'Remediation'];
       if (pageKey === 'quarantine') return ['Captured', 'Original path', 'Status', 'Technique', 'SHA-256'];
       if (pageKey === 'scans' || pageKey === 'history' || pageKey === 'dashboard') return ['Time', 'Result', 'Item', 'Source', 'Technique', 'Remediation'];
-      if (pageKey === 'pam') return ['Time', 'Target', 'Reason', 'Requested by', 'Decision'];
       return ['Label', 'Value'];
     }
 
@@ -3062,24 +3063,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
               <div class="meta">${esc(item.value)}</div>
             </div>`).join('')
         }</div>`;
-      }
-      if (pageKey === 'pam') {
-        const rows = rowsFor('pam');
-        if (!rows.length) {
-          return `<div class="empty">No elevation requests have been recorded yet.</div>`;
-        }
-        const header = listColumns('pam').map((column) => `<th>${esc(column)}</th>`).join('');
-        const body = rows.map((item, index) => {
-          const selected = Number.isInteger(selection[pageKey]) && selection[pageKey] === index;
-          return `<tr class="${selected ? 'selected' : ''}" data-select="${index}">
-            <td>${esc(item.timestamp || '(unknown)')}</td>
-            <td>${esc(item.targetPath || '(unknown)')}</td>
-            <td>${esc(item.reason || '(none)')}</td>
-            <td>${esc(item.requestedBy || '(unknown)')}</td>
-            <td>${esc(item.decision || 'approved')}</td>
-          </tr>`;
-        }).join('');
-        return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
       }
 
       if (!rows.length) {
@@ -3138,27 +3121,6 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
             <div class="actions" style="margin-top: 14px;">
               <button class="warning" data-action="openExclusions">Edit exclusions</button>
             </div>
-          </div>`;
-      }
-      if (pageKey === 'pam') {
-        const current = activeItem('pam');
-        const pamRows = [
-          ['Last request', current?.timestamp || '(unknown)'],
-          ['Mode', appState.pam?.mode || 'monitor'],
-          ['Current user', appState.pam?.currentUser || '(unknown)'],
-          ['Admin', appState.pam?.isAdmin ? 'Yes' : 'No'],
-          ['Recovery path', appState.pam?.recoveryPath || 'Ready'],
-          ['Break-glass', appState.pam?.breakGlass || 'Configured']
-        ];
-        return `
-          <div class="detail-card">
-            <div class="title">${esc(current ? current.targetPath || 'Selected request' : 'PAM status')}</div>
-            <div class="text">${esc(current ? (current.reason || current.decision || '') : (appState.detailText || 'Use the tray to launch one-time elevation requests.'))}</div>
-          </div>
-          <div class="detail-card">
-            <div class="kv">${
-              pamRows.map(([key, value]) => `<div class="key">${esc(key)}</div><div class="value">${esc(value)}</div>`).join('')
-            }</div>
           </div>`;
       }
 
@@ -4247,140 +4209,37 @@ void OpenQuarantineFolder(const UiContext&) {
   // Quarantine is intentionally managed inside Fenrir. Direct folder access is disabled.
 }
 
-bool PromptForElevationTarget(HWND owner, std::wstring* targetPath) {
-  if (targetPath == nullptr) {
-    return false;
-  }
-
-  wchar_t fileBuffer[MAX_PATH] = {};
-  OPENFILENAMEW dialog{};
-  dialog.lStructSize = sizeof(dialog);
-  dialog.hwndOwner = owner;
-  dialog.lpstrFile = fileBuffer;
-  dialog.nMaxFile = static_cast<DWORD>(std::size(fileBuffer));
-  dialog.lpstrTitle = L"Choose a program to run elevated";
-  dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
-  dialog.lpstrFilter = L"Executables\0*.exe;*.msi;*.cmd;*.bat\0All files\0*.*\0";
-
-  if (!GetOpenFileNameW(&dialog)) {
-    return false;
-  }
-
-  *targetPath = dialog.lpstrFile;
-  return true;
-}
-
-bool LaunchElevatedPath(HWND owner, const std::wstring& targetPath) {
-  if (targetPath.empty()) {
-    return false;
-  }
-
-  SHELLEXECUTEINFOW shellExecute{};
-  shellExecute.cbSize = sizeof(shellExecute);
-  shellExecute.hwnd = owner;
-  shellExecute.lpVerb = L"runas";
-  shellExecute.lpFile = targetPath.c_str();
-  shellExecute.nShow = SW_SHOWNORMAL;
-  shellExecute.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
-  return ShellExecuteExW(&shellExecute) != FALSE;
-}
-
-std::wstring GetSystemBinaryPath(const std::wstring& binaryName) {
-  wchar_t systemDir[MAX_PATH] = {};
-  if (GetSystemDirectoryW(systemDir, static_cast<UINT>(std::size(systemDir))) == 0) {
-    return {};
-  }
-  return std::filesystem::path(systemDir) / binaryName;
-}
-
-bool LaunchElevatedCommand(HWND owner, const std::wstring& fileName, const std::wstring& parameters = L"") {
-  SHELLEXECUTEINFOW shellExecute{};
-  shellExecute.cbSize = sizeof(shellExecute);
-  shellExecute.hwnd = owner;
-  shellExecute.lpVerb = L"runas";
-  shellExecute.lpFile = fileName.c_str();
-  shellExecute.lpParameters = parameters.empty() ? nullptr : parameters.c_str();
-  shellExecute.nShow = SW_SHOWNORMAL;
-  shellExecute.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS;
-  return ShellExecuteExW(&shellExecute) != FALSE;
-}
-
-bool LaunchAdminTool(HWND owner, const std::wstring& toolPath, const std::wstring& parameters = L"") {
-  if (toolPath.empty()) {
-    return false;
-  }
-  return LaunchElevatedCommand(owner, toolPath, parameters);
-}
-
-bool LaunchTimedElevation(HWND owner, const std::wstring& targetPath, const DWORD durationMs = 120000) {
-  const auto started = MessageBoxW(
-      owner,
-      (L"Fenrir will allow this application to run elevated for 2 minutes:\n\n" + targetPath +
-       L"\n\nContinue?")
-          .c_str(),
-      kWindowTitle, MB_OKCANCEL | MB_ICONQUESTION);
-  if (started != IDOK) {
-    return false;
-  }
-
-  if (!LaunchElevatedPath(owner, targetPath)) {
-    return false;
-  }
-
-  std::thread([owner, targetPath, durationMs]() {
-    Sleep(durationMs);
-    PostMessageW(owner, WM_APP + 44, 0, 0);
-  }).detach();
-
-  return true;
-}
-
-bool AppendPrivilegeRequestJournal(const std::wstring& targetPath, const std::wstring& reason) {
-  const auto config = antivirus::agent::LoadAgentConfig();
-  const auto journalPath = config.runtimeDatabasePath.parent_path() / L"privilege-requests.jsonl";
-  std::error_code error;
-  std::filesystem::create_directories(journalPath.parent_path(), error);
-  std::ofstream journal(journalPath, std::ios::app);
-  if (!journal.is_open()) {
-    return false;
-  }
-
-  journal << "{\"timestamp\":\"" << antivirus::agent::EscapeJsonString(CurrentTimestampText())
-          << "\",\"targetPath\":\"" << antivirus::agent::EscapeJsonString(targetPath)
-          << "\",\"reason\":\"" << antivirus::agent::EscapeJsonString(reason)
-          << "\",\"requestedBy\":\"console\",\"decision\":\"approved\"}" << std::endl;
-  return true;
-}
-
 void ShowTrayMenu(UiContext& context) {
   HMENU menu = CreatePopupMenu();
   if (menu == nullptr) {
     return;
   }
 
-  AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"Open Fenrir");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, IDM_TRAY_QUICKSCAN, L"Run quick scan");
-  AppendMenuW(menu, MF_STRING, IDM_TRAY_FULLSCAN, L"Run full scan");
-  HMENU adminMenu = CreatePopupMenu();
-  if (adminMenu != nullptr) {
-    AppendMenuW(adminMenu, MF_STRING, IDM_TRAY_PAM, L"Run application as admin...");
-    AppendMenuW(adminMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(adminMenu, MF_STRING, IDM_TRAY_ADMIN_POWERSHELL, L"Run PowerShell as admin");
-    AppendMenuW(adminMenu, MF_STRING, IDM_TRAY_ADMIN_CMD, L"Run Command Prompt as admin");
-    AppendMenuW(adminMenu, MF_STRING, IDM_TRAY_ADMIN_DISKCLEANUP, L"Run Disk Cleanup as admin");
-    AppendMenuW(adminMenu, MF_STRING, IDM_TRAY_ADMIN_APP, L"Run application as admin...");
-    AppendMenuW(adminMenu, MF_STRING, IDM_TRAY_ADMIN_ELEVATE_2M, L"Elevate as admin (2 minutes)");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(adminMenu), L"Admin tools");
+  HMENU pamMenu = CreatePopupMenu();
+  if (pamMenu == nullptr) {
+    DestroyMenu(menu);
+    return;
   }
+
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"Open Fenrir dashboard");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_FULLSCAN, L"Run full scan");
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_QUICKSCAN, L"Run quick scan");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_POWERSHELL, L"PowerShell");
+  AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_CMD, L"Command Prompt");
+  AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_DISKCLEANUP, L"Disk Cleanup");
+  AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_APP, L"Run application as admin...");
+  AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pamMenu), L"Run as admin");
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_PAM_ELEVATE_2M, L"Elevate as admin (2 minutes)");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, IDM_TRAY_QUARANTINE, L"Open quarantine");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit Fenrir");
 
   POINT cursor{};
   GetCursorPos(&cursor);
   SetForegroundWindow(context.hwnd);
-  SetActiveWindow(context.hwnd);
-  BringWindowToTop(context.hwnd);
   const auto command = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
                                         cursor.x, cursor.y, context.hwnd, nullptr);
   PostMessageW(context.hwnd, WM_NULL, 0, 0);
@@ -4604,8 +4463,6 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
       SelectPage(context, ClientPage::History);
     } else if (_wcsicmp(page.c_str(), L"settings") == 0) {
       SelectPage(context, ClientPage::Settings);
-    } else if (_wcsicmp(page.c_str(), L"pam") == 0) {
-      SelectPage(context, ClientPage::Pam);
     }
     PublishWebViewState(context);
     return;
@@ -4651,95 +4508,6 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
   if (_wcsicmp(action.c_str(), L"openExclusions") == 0) {
     context.manageExclusionsMode = true;
     SelectPage(context, ClientPage::Settings);
-    RefreshSnapshot(context);
-    PublishWebViewState(context);
-    return;
-  }
-
-  if (_wcsicmp(action.c_str(), L"pamPrompt") == 0) {
-    std::wstring targetPath;
-    if (!PromptForElevationTarget(context.hwnd, &targetPath)) {
-      return;
-    }
-
-    const auto approved = MessageBoxW(
-        context.hwnd,
-        (L"Fenrir will launch this program with administrator rights once:\n\n" + targetPath +
-         L"\n\nApprove this one-time elevation?")
-            .c_str(),
-        kWindowTitle, MB_OKCANCEL | MB_ICONQUESTION);
-    if (approved != IDOK) {
-      return;
-    }
-
-    if (!AppendPrivilegeRequestJournal(targetPath, L"User approved one-time elevation from PAM page")) {
-      MessageBoxW(context.hwnd, L"Fenrir could not record the elevation request.", kWindowTitle,
-                  MB_OK | MB_ICONERROR);
-      return;
-    }
-
-    if (!LaunchElevatedPath(context.hwnd, targetPath)) {
-      MessageBoxW(context.hwnd, L"Fenrir could not start the selected program with administrator rights.",
-                  kWindowTitle, MB_OK | MB_ICONERROR);
-      return;
-    }
-
-    RefreshSnapshot(context);
-    PublishWebViewState(context);
-    return;
-  }
-
-  if (_wcsicmp(action.c_str(), L"pamLaunch") == 0) {
-    const auto tool = GetQueryValue(pairs, L"tool");
-    std::wstring targetPath;
-    std::wstring parameters;
-    if (_wcsicmp(tool.c_str(), L"powershell") == 0) {
-      targetPath = GetSystemBinaryPath(L"WindowsPowerShell\\v1.0\\powershell.exe");
-      parameters = L"-NoProfile -NoExit";
-    } else if (_wcsicmp(tool.c_str(), L"cmd") == 0) {
-      targetPath = GetSystemBinaryPath(L"cmd.exe");
-      parameters = L"/k";
-    } else if (_wcsicmp(tool.c_str(), L"diskcleanup") == 0) {
-      targetPath = GetSystemBinaryPath(L"cleanmgr.exe");
-    } else {
-      return;
-    }
-
-    if (!AppendPrivilegeRequestJournal(targetPath, L"User approved built-in PAM tool launch")) {
-      MessageBoxW(context.hwnd, L"Fenrir could not record the elevation request.", kWindowTitle,
-                  MB_OK | MB_ICONERROR);
-      return;
-    }
-
-    if (!LaunchElevatedCommand(context.hwnd, targetPath, parameters)) {
-      MessageBoxW(context.hwnd, L"Fenrir could not start the selected admin tool.", kWindowTitle,
-                  MB_OK | MB_ICONERROR);
-      return;
-    }
-
-    RefreshSnapshot(context);
-    PublishWebViewState(context);
-    return;
-  }
-
-  if (_wcsicmp(action.c_str(), L"pamTimedElevation") == 0) {
-    std::wstring targetPath;
-    if (!PromptForElevationTarget(context.hwnd, &targetPath)) {
-      return;
-    }
-
-    if (!AppendPrivilegeRequestJournal(targetPath, L"User approved 2 minute timed elevation")) {
-      MessageBoxW(context.hwnd, L"Fenrir could not record the elevation request.", kWindowTitle,
-                  MB_OK | MB_ICONERROR);
-      return;
-    }
-
-    if (!LaunchTimedElevation(context.hwnd, targetPath)) {
-      MessageBoxW(context.hwnd, L"Fenrir could not start the timed elevation.", kWindowTitle,
-                  MB_OK | MB_ICONERROR);
-      return;
-    }
-
     RefreshSnapshot(context);
     PublishWebViewState(context);
     return;
@@ -5009,14 +4777,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
   switch (message) {
     case kTrayMessage: {
       auto* context = GetContext(hwnd);
-      if (lParam == WM_LBUTTONUP || lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+      const auto trayEvent = LOWORD(static_cast<DWORD>(lParam));
+      if (trayEvent == WM_LBUTTONUP || trayEvent == WM_RBUTTONUP || trayEvent == WM_CONTEXTMENU) {
         if (context != nullptr) {
           ShowTrayMenu(*context);
         }
         return 0;
       }
-      if (lParam == WM_LBUTTONDBLCLK || lParam == NIN_BALLOONUSERCLICK || lParam == NIN_SELECT ||
-          lParam == NIN_KEYSELECT) {
+      if (trayEvent == WM_LBUTTONDBLCLK || trayEvent == NIN_BALLOONUSERCLICK || trayEvent == NIN_SELECT ||
+          trayEvent == NIN_KEYSELECT) {
         RestoreFromTray(hwnd);
         if (context != nullptr) {
           SelectPage(*context, ClientPage::Dashboard);
@@ -5025,13 +4794,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
       }
       break;
-    }
-    case WM_CONTEXTMENU: {
-      auto* context = GetContext(hwnd);
-      if (context != nullptr) {
-        ShowTrayMenu(*context);
-      }
-      return 0;
     }
     case WM_ERASEBKGND: {
       RECT client{};
@@ -5403,75 +5165,26 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         case IDM_TRAY_FULLSCAN:
           RunScanAsync(hwnd, *context, ScanPreset::Full, std::nullopt);
           return 0;
+        case IDM_TRAY_PAM_POWERSHELL:
+          SubmitPowerShellPamRequest(hwnd, *context);
+          return 0;
+        case IDM_TRAY_PAM_CMD:
+          SubmitCommandPromptPamRequest(hwnd, *context);
+          return 0;
+        case IDM_TRAY_PAM_DISKCLEANUP:
+          SubmitDiskCleanupPamRequest(hwnd, *context);
+          return 0;
+        case IDM_TRAY_PAM_APP:
+          SubmitApplicationPamRequest(hwnd, *context);
+          return 0;
+        case IDM_TRAY_PAM_ELEVATE_2M:
+          SubmitTimedPamRequest(hwnd, *context);
+          return 0;
         case IDM_TRAY_QUARANTINE:
           RestoreFromTray(hwnd);
           SelectPage(*context, ClientPage::Quarantine);
           LayoutControls(*context);
           return 0;
-        case IDM_TRAY_PAM: {
-          std::wstring targetPath;
-          if (!PromptForElevationTarget(hwnd, &targetPath)) {
-            return 0;
-          }
-
-          const auto approved = MessageBoxW(
-              hwnd,
-              (L"Fenrir will launch this program with administrator rights once:\n\n" + targetPath +
-               L"\n\nApprove this one-time elevation?")
-                  .c_str(),
-              kWindowTitle, MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
-
-          if (approved != IDOK) {
-            return 0;
-          }
-
-          AppendPrivilegeRequestJournal(targetPath, L"User approved one-time elevation from tray");
-          if (!LaunchElevatedPath(hwnd, targetPath)) {
-            MessageBoxW(hwnd, L"Fenrir could not start the selected program with elevated rights.", kWindowTitle,
-                        MB_OK | MB_ICONERROR);
-          }
-          return 0;
-        }
-        case IDM_TRAY_ADMIN_POWERSHELL:
-          if (!LaunchAdminTool(hwnd, GetSystemBinaryPath(L"WindowsPowerShell\\v1.0\\powershell.exe"), L"-NoProfile -NoExit")) {
-            MessageBoxW(hwnd, L"Fenrir could not launch PowerShell with administrator rights.", kWindowTitle,
-                        MB_OK | MB_ICONERROR);
-          }
-          return 0;
-        case IDM_TRAY_ADMIN_CMD:
-          if (!LaunchAdminTool(hwnd, GetSystemBinaryPath(L"cmd.exe"), L"/k")) {
-            MessageBoxW(hwnd, L"Fenrir could not launch Command Prompt with administrator rights.", kWindowTitle,
-                        MB_OK | MB_ICONERROR);
-          }
-          return 0;
-        case IDM_TRAY_ADMIN_DISKCLEANUP:
-          if (!LaunchAdminTool(hwnd, GetSystemBinaryPath(L"cleanmgr.exe"))) {
-            MessageBoxW(hwnd, L"Fenrir could not launch Disk Cleanup with administrator rights.", kWindowTitle,
-                        MB_OK | MB_ICONERROR);
-          }
-          return 0;
-        case IDM_TRAY_ADMIN_APP: {
-          std::wstring targetPath;
-          if (!PromptForElevationTarget(hwnd, &targetPath)) {
-            return 0;
-          }
-          if (!LaunchAdminTool(hwnd, targetPath)) {
-            MessageBoxW(hwnd, L"Fenrir could not launch the selected application with administrator rights.",
-                        kWindowTitle, MB_OK | MB_ICONERROR);
-          }
-          return 0;
-        }
-        case IDM_TRAY_ADMIN_ELEVATE_2M: {
-          std::wstring targetPath;
-          if (!PromptForElevationTarget(hwnd, &targetPath)) {
-            return 0;
-          }
-          if (!LaunchTimedElevation(hwnd, targetPath)) {
-            MessageBoxW(hwnd, L"Fenrir could not start the timed elevation.", kWindowTitle,
-                        MB_OK | MB_ICONERROR);
-          }
-          return 0;
-        }
         case IDM_TRAY_EXIT:
           context->allowExit = true;
           DestroyWindow(hwnd);
