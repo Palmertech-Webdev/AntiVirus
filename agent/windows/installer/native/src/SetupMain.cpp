@@ -803,7 +803,7 @@ bool WriteArpEntry(const std::filesystem::path& installRoot) {
     SYSTEMTIME now{};
     GetLocalTime(&now);
     wchar_t buffer[9]{};
-    StringCchPrintfW(buffer, std::size(buffer), L"%04u%02u%02u", now.wYear, now.wMonth, now.wDay);
+    swprintf_s(buffer, L"%04u%02u%02u", now.wYear, now.wMonth, now.wDay);
     return std::wstring(buffer);
   }();
 

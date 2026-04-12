@@ -1,6 +1,6 @@
 param(
-    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build'),
-    [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\installer'),
+    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev\build'),
+    [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
     [switch]$Clean
 )
 

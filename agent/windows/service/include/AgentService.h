@@ -77,6 +77,7 @@ class AgentService {
   void PrintStatus() const;
   void QueueEndpointStatusTelemetry();
   void QueueDeviceInventoryTelemetry(int cycle);
+  void ProcessPrivilegeRequestJournal();
   void DrainProcessTelemetry();
   void DrainRealtimeProtectionTelemetry();
   void DrainNetworkTelemetry();

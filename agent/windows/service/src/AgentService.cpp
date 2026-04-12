@@ -39,6 +39,10 @@ struct ProcessExecutionResult {
   std::wstring output;
 };
 
+std::filesystem::path GetPrivilegeRequestJournalPath(const AgentConfig& config) {
+  return config.runtimeDatabasePath.parent_path() / L"privilege-requests.jsonl";
+}
+
 std::string EscapeRegex(const std::string& value) {
   std::string escaped;
   escaped.reserve(value.size() * 2);
@@ -404,6 +408,7 @@ void AgentService::RunSyncLoop(const AgentRunMode mode) {
   while (!ShouldStop()) {
     QueueCycleTelemetry(cycle);
     QueueDeviceInventoryTelemetry(cycle);
+    ProcessPrivilegeRequestJournal();
     EnforceBlockedSoftware();
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
@@ -1208,6 +1213,50 @@ void AgentService::QueueDeviceInventoryTelemetry(const int cycle) {
   QueueTelemetryEvent(L"device.inventory.snapshot", L"device-inventory",
                       L"The endpoint refreshed its local user, network, and installed software inventory.",
                       BuildDeviceInventoryPayload(snapshot));
+}
+
+void AgentService::ProcessPrivilegeRequestJournal() {
+  const auto journalPath = GetPrivilegeRequestJournalPath(config_);
+  std::error_code existsError;
+  if (!std::filesystem::exists(journalPath, existsError)) {
+    return;
+  }
+
+  std::ifstream journal(journalPath);
+  if (!journal.is_open()) {
+    return;
+  }
+
+  std::string line;
+  std::vector<std::string> remaining;
+  while (std::getline(journal, line)) {
+    if (line.empty()) {
+      continue;
+    }
+
+    const auto journalLine = Utf8ToWide(line);
+    const auto targetPath = ExtractPayloadString(journalLine, "targetPath").value_or(L"");
+    const auto reason = ExtractPayloadString(journalLine, "reason").value_or(L"One-time elevation");
+    const auto requester = ExtractPayloadString(journalLine, "requestedBy").value_or(L"console");
+    const auto decision = ExtractPayloadString(journalLine, "decision").value_or(L"approved");
+
+    if (decision != L"approved") {
+      continue;
+    }
+
+    QueueTelemetryEvent(L"privilege.elevation.requested", L"pam-broker",
+                        std::wstring(L"One-time elevation was approved for ") + targetPath + L".",
+                        std::wstring(L"{\"targetPath\":\"") + Utf8ToWide(EscapeJsonString(targetPath)) +
+                            L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(reason)) +
+                            L"\",\"requestedBy\":\"" + Utf8ToWide(EscapeJsonString(requester)) + L"\"}");
+    QueueTelemetryEvent(L"privilege.elevation.approved", L"pam-broker",
+                        std::wstring(L"Fenrir approved a just-in-time elevation for ") + targetPath + L".",
+                        std::wstring(L"{\"targetPath\":\"") + Utf8ToWide(EscapeJsonString(targetPath)) +
+                            L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(reason)) +
+                            L"\",\"requestedBy\":\"" + Utf8ToWide(EscapeJsonString(requester)) + L"\"}");
+  }
+
+  std::wofstream truncate(journalPath, std::ios::trunc);
 }
 
 void AgentService::DrainProcessTelemetry() {

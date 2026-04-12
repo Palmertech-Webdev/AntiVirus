@@ -1,6 +1,6 @@
 param(
-    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'service\build'),
-    [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\release'),
+    [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev\build'),
+    [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
     [string]$DriverArtifactRoot = '',
     [switch]$Clean
 )
@@ -92,7 +92,12 @@ $buildRoot = (Resolve-Path $BuildRoot).Path
 $outputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 
 if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
-    Remove-Item -LiteralPath $outputRoot -Recurse -Force
+    $outputFull = [System.IO.Path]::GetFullPath($outputRoot)
+    $buildFull = [System.IO.Path]::GetFullPath($buildRoot)
+    Get-ChildItem -LiteralPath $outputRoot -Force | Where-Object {
+        $itemFull = [System.IO.Path]::GetFullPath($_.FullName)
+        -not $itemFull.StartsWith($buildFull, [System.StringComparison]::OrdinalIgnoreCase)
+    } | Remove-Item -Recurse -Force
 }
 
 Ensure-Directory -Path $outputRoot
