@@ -129,6 +129,16 @@ The purpose of this folder is to establish the internal contracts we will build 
 
 The default sync interval is now 60 seconds when the agent is run in multi-iteration mode.
 
+## Local Bootstrap Policy Defaults
+
+- Fresh local installs that are not yet enrolled in a remote control plane bootstrap with all core protections enabled by default.
+- realtime protection: enabled
+- cloud lookup: enabled
+- script inspection (AMSI path): enabled
+- network containment: enabled
+- quarantine on malicious: enabled
+- Local bootstrap policy identity: `policy-default` / `local-bootstrap` with policy name `Local Protection Baseline`.
+
 ## PAM Policy Template
 
 - The service reads `pam-policy.json` from the runtime root (the same root directory that contains the runtime database path).

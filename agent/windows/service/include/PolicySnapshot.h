@@ -22,12 +22,12 @@ struct PolicySnapshot {
 inline PolicySnapshot CreateDefaultPolicySnapshot() {
   return PolicySnapshot{
       .policyId = L"policy-default",
-      .policyName = L"Business Baseline",
+    .policyName = L"Local Protection Baseline",
       .revision = L"local-bootstrap",
       .realtimeProtectionEnabled = true,
       .cloudLookupEnabled = true,
       .scriptInspectionEnabled = true,
-      .networkContainmentEnabled = false,
+    .networkContainmentEnabled = true,
       .quarantineOnMalicious = true,
       .suppressionPathRoots = {},
       .suppressionSha256 = {},
