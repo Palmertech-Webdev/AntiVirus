@@ -65,7 +65,7 @@ bool IsSafeCommandType(const std::wstring& type) {
 bool RequiresSessionApproval(const std::wstring& type) {
   return type == L"quarantine.restore" || type == L"quarantine.delete" || type == L"patch.software.install" ||
          type == L"patch.windows.install" || type == L"patch.cycle.run" || type == L"local.approval.execute" ||
-         type == L"local.breakglass.enable" || type == L"local.breakglass.disable";
+         type == L"local.approval.list" || type == L"local.breakglass.enable" || type == L"local.breakglass.disable";
 }
 
 std::string EscapeRegex(const std::string& value) {
@@ -224,6 +224,10 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
     return LocalAction::StartServiceAction;
   }
 
+  if (type == L"local.approval.list") {
+    return LocalAction::StartServiceAction;
+  }
+
   if (type == L"local.breakglass.enable" || type == L"local.breakglass.disable") {
     return LocalAction::StartServiceAction;
   }
@@ -232,7 +236,7 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
 }
 
 bool IsSupportedLocalCommand(const std::wstring& type) {
-  static const std::array<const wchar_t*, 13> kSupportedTypes = {
+  static const std::array<const wchar_t*, 14> kSupportedTypes = {
       L"local.auth.session.begin",
       L"quarantine.restore",
       L"quarantine.delete",
@@ -244,6 +248,7 @@ bool IsSupportedLocalCommand(const std::wstring& type) {
       L"support.bundle.export.full",
       L"storage.maintenance.run",
       L"local.approval.execute",
+      L"local.approval.list",
       L"local.breakglass.enable",
       L"local.breakglass.disable"};
 

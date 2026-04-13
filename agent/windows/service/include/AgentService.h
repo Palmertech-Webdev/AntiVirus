@@ -77,6 +77,7 @@ class AgentService {
   std::wstring ExecuteStorageMaintenanceCommand(const RemoteCommand& command);
   std::wstring ExecuteBreakGlassCommand(const RemoteCommand& command, bool enable);
   std::wstring ExecuteLocalApprovalCommand(const RemoteCommand& command);
+  std::wstring ExecuteLocalApprovalListCommand(const RemoteCommand& command);
   std::wstring ExecuteProcessTerminationCommand(const RemoteCommand& command, bool includeChildren);
   std::wstring ExecutePersistenceCleanupCommand(const RemoteCommand& command);
   std::wstring ExecutePathRemediationCommand(const RemoteCommand& command);

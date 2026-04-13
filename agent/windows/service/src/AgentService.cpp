@@ -399,6 +399,32 @@ bool HasProcessedLocalApprovalRequest(const std::filesystem::path& ledgerPath, c
   return false;
 }
 
+std::set<std::wstring> LoadProcessedLocalApprovalRequestIds(const std::filesystem::path& ledgerPath) {
+  std::set<std::wstring> processed;
+
+  std::ifstream input(ledgerPath, std::ios::binary);
+  if (!input.is_open()) {
+    return processed;
+  }
+
+  std::string utf8Line;
+  while (std::getline(input, utf8Line)) {
+    if (utf8Line.empty()) {
+      continue;
+    }
+
+    const auto line = Utf8ToWide(utf8Line);
+    auto requestId = ExtractPayloadString(line, "requestId").value_or(L"");
+    if (requestId.empty()) {
+      continue;
+    }
+
+    processed.insert(ToLowerCopy(std::move(requestId)));
+  }
+
+  return processed;
+}
+
 bool AppendLocalApprovalLedgerEntry(const std::filesystem::path& ledgerPath, const std::wstring& approvalRequestId,
                                     const std::wstring& approver, const std::wstring& decision,
                                     const std::wstring& detailMessage, const std::wstring& approvedType,
@@ -2234,6 +2260,10 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecuteLocalApprovalCommand(command);
   }
 
+  if (command.type == L"local.approval.list") {
+    return ExecuteLocalApprovalListCommand(command);
+  }
+
   if (command.type == L"software.block") {
     return ExecuteSoftwareBlockCommand(command);
   }
@@ -2655,6 +2685,89 @@ std::wstring AgentService::ExecuteLocalApprovalCommand(const RemoteCommand& comm
          Utf8ToWide(EscapeJsonString(queuedRequest.type)) + L"\",\"queuedRequester\":\"" +
          Utf8ToWide(EscapeJsonString(queuedRequest.requester)) + L"\",\"executedCommandId\":\"" +
          Utf8ToWide(EscapeJsonString(approvedCommand.commandId)) + L"\",\"executionResult\":" + executionResult + L"}";
+}
+
+std::wstring AgentService::ExecuteLocalApprovalListCommand(const RemoteCommand& command) {
+  const auto queuePath = ResolveLocalApprovalQueuePath();
+  const auto ledgerPath = ResolveLocalApprovalLedgerPath();
+  const auto requestedLimit = ExtractPayloadUInt32(command.payloadJson, "limit").value_or(50);
+  const auto limit = static_cast<std::size_t>(std::clamp<std::uint32_t>(requestedLimit, 1, 200));
+
+  const auto processedRequestIds = LoadProcessedLocalApprovalRequestIds(ledgerPath);
+  std::vector<QueuedLocalApprovalRequest> pendingRequests;
+  pendingRequests.reserve(limit);
+
+  std::size_t totalPending = 0;
+  std::ifstream input(queuePath, std::ios::binary);
+  if (input.is_open()) {
+    std::string utf8Line;
+    while (std::getline(input, utf8Line)) {
+      if (utf8Line.empty()) {
+        continue;
+      }
+
+      const auto line = Utf8ToWide(utf8Line);
+      auto requestId = ExtractPayloadString(line, "requestId").value_or(L"");
+      if (requestId.empty()) {
+        continue;
+      }
+
+      const auto status = ToLowerCopy(ExtractPayloadString(line, "status").value_or(L"pending"));
+      if (status != L"pending") {
+        continue;
+      }
+
+      if (processedRequestIds.find(ToLowerCopy(requestId)) != processedRequestIds.end()) {
+        continue;
+      }
+
+      ++totalPending;
+      if (pendingRequests.size() >= limit) {
+        continue;
+      }
+
+      pendingRequests.push_back(QueuedLocalApprovalRequest{
+          .requestId = std::move(requestId),
+          .createdAt = ExtractPayloadString(line, "createdAt").value_or(L""),
+          .type = ExtractPayloadString(line, "type").value_or(L""),
+          .requester = ExtractPayloadString(line, "requester").value_or(L""),
+          .callerSid = ExtractPayloadString(line, "callerSid").value_or(L""),
+          .role = ExtractPayloadString(line, "role").value_or(L""),
+          .reason = ExtractPayloadString(line, "reason").value_or(L""),
+          .recordId = ExtractPayloadString(line, "recordId").value_or(L""),
+          .targetPath = ExtractPayloadString(line, "targetPath").value_or(L""),
+          .payloadJson = ExtractPayloadString(line, "payloadJson").value_or(L"{}")});
+    }
+  }
+
+  std::wstring requestsJson = L"[";
+  for (std::size_t index = 0; index < pendingRequests.size(); ++index) {
+    const auto& request = pendingRequests[index];
+    if (index != 0) {
+      requestsJson += L",";
+    }
+
+    requestsJson += L"{\"requestId\":\"" + Utf8ToWide(EscapeJsonString(request.requestId)) +
+                    L"\",\"createdAt\":\"" + Utf8ToWide(EscapeJsonString(request.createdAt)) +
+                    L"\",\"type\":\"" + Utf8ToWide(EscapeJsonString(request.type)) +
+                    L"\",\"requester\":\"" + Utf8ToWide(EscapeJsonString(request.requester)) +
+                    L"\",\"callerSid\":\"" + Utf8ToWide(EscapeJsonString(request.callerSid)) +
+                    L"\",\"role\":\"" + Utf8ToWide(EscapeJsonString(request.role)) +
+                    L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(request.reason)) +
+                    L"\",\"recordId\":\"" + Utf8ToWide(EscapeJsonString(request.recordId)) +
+                    L"\",\"targetPath\":\"" + Utf8ToWide(EscapeJsonString(request.targetPath)) + L"\"}";
+  }
+  requestsJson += L"]";
+
+  QueueTelemetryEvent(L"local.approval.listed", L"local-control",
+                      L"Fenrir returned pending local approval requests for administrator review.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"pendingCount\":" +
+                          std::to_wstring(totalPending) + L",\"returnedCount\":" +
+                          std::to_wstring(pendingRequests.size()) + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"pendingCount\":" +
+         std::to_wstring(totalPending) + L",\"returnedCount\":" +
+         std::to_wstring(pendingRequests.size()) + L",\"requests\":" + requestsJson + L"}";
 }
 
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {

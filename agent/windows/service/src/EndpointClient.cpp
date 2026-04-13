@@ -533,12 +533,19 @@ QuarantineActionResult RestoreQuarantinedItem(const AgentConfig& config, const s
 
   const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.restore", recordId, L"{}", L"", *approvalToken);
   if (!brokerResult.success) {
+    auto message = brokerResult.errorMessage.empty()
+                       ? std::wstring(L"Fenrir could not broker the quarantine restore action through the protection service.")
+                       : brokerResult.errorMessage;
+    if (brokerResult.requestOnly && !brokerResult.approvalRequestId.empty()) {
+      message += L" Approval request: " + brokerResult.approvalRequestId +
+                 L". Ask an owner or administrator to execute local.approval.execute for this request.";
+    }
+
     return QuarantineActionResult{
         .success = false,
         .recordId = recordId,
-        .errorMessage = brokerResult.errorMessage.empty()
-                            ? L"Fenrir could not broker the quarantine restore action through the protection service."
-                            : brokerResult.errorMessage};
+        .approvalRequestId = brokerResult.approvalRequestId,
+        .errorMessage = message};
   }
 
   return QuarantineActionResult{
@@ -560,12 +567,19 @@ QuarantineActionResult DeleteQuarantinedItem(const AgentConfig& config, const st
 
   const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.delete", recordId, L"{}", L"", *approvalToken);
   if (!brokerResult.success) {
+    auto message = brokerResult.errorMessage.empty()
+                       ? std::wstring(L"Fenrir could not broker the quarantine delete action through the protection service.")
+                       : brokerResult.errorMessage;
+    if (brokerResult.requestOnly && !brokerResult.approvalRequestId.empty()) {
+      message += L" Approval request: " + brokerResult.approvalRequestId +
+                 L". Ask an owner or administrator to execute local.approval.execute for this request.";
+    }
+
     return QuarantineActionResult{
         .success = false,
         .recordId = recordId,
-        .errorMessage = brokerResult.errorMessage.empty()
-                            ? L"Fenrir could not broker the quarantine delete action through the protection service."
-                            : brokerResult.errorMessage};
+        .approvalRequestId = brokerResult.approvalRequestId,
+        .errorMessage = message};
   }
 
   return QuarantineActionResult{
@@ -660,6 +674,24 @@ LocalBrokerCommandResult SetBreakGlassMode(const AgentConfig& config, const bool
                            L"\",\"queuePamRecovery\":" +
                            (queuePamRecovery ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
   return SendLocalBrokerCommand(config, commandType, L"", payloadJson, L"", *approvalToken);
+}
+
+LocalBrokerCommandResult ListPendingLocalApprovals(const AgentConfig& config, const std::size_t limit) {
+  std::wstring approvalError;
+  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
+  if (!approvalToken.has_value()) {
+    return LocalBrokerCommandResult{
+        .success = false,
+        .statusCode = 401,
+        .requiresReauth = true,
+        .errorMessage = approvalError.empty()
+                            ? L"Fenrir could not obtain a fresh local approval session for local approval queue review."
+                            : approvalError};
+  }
+
+  const auto boundedLimit = std::clamp<std::size_t>(limit, 1, 200);
+  const auto payloadJson = std::wstring(L"{\"limit\":") + std::to_wstring(boundedLimit) + L"}";
+  return SendLocalBrokerCommand(config, L"local.approval.list", L"", payloadJson, L"", *approvalToken);
 }
 
 PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId) {

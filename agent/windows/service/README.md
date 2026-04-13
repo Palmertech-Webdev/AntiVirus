@@ -113,6 +113,7 @@ Remote command additions:
 Local broker command additions:
 
 - `local.approval.execute`
+- `local.approval.list`
 - `local.breakglass.enable`
 - `local.breakglass.disable`
 

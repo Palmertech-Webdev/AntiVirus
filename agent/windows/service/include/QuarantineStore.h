@@ -32,6 +32,7 @@ struct QuarantineEntry {
 struct QuarantineActionResult {
   bool success{false};
   std::wstring recordId;
+  std::wstring approvalRequestId;
   std::filesystem::path originalPath;
   std::filesystem::path quarantinedPath;
   std::wstring errorMessage;

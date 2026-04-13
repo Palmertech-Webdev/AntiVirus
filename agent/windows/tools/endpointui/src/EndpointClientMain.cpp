@@ -5159,9 +5159,13 @@ void PerformQuarantineAction(UiContext& context, const bool restore) {
                               : antivirus::agent::DeleteQuarantinedItem(context.config, item.recordId);
   if (!result.success) {
     const auto heading = restore ? L"Unable to restore the selected item." : L"Unable to delete the selected item.";
+    auto detail = result.errorMessage.empty() ? std::wstring(L"Unknown error") : result.errorMessage;
+    if (!result.approvalRequestId.empty()) {
+      detail += L"\r\n\r\nApproval request: " + result.approvalRequestId +
+                L"\r\nProvide this ID to an owner/admin to execute local.approval.execute.";
+    }
     MessageBoxW(context.hwnd,
-                (std::wstring(heading) + L"\r\n\r\n" + (result.errorMessage.empty() ? L"Unknown error" : result.errorMessage))
-                    .c_str(),
+                (std::wstring(heading) + L"\r\n\r\n" + detail).c_str(),
                 kWindowTitle, MB_OK | MB_ICONERROR);
     return;
   }
@@ -5505,9 +5509,13 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
 
     const auto result = RestoreQuarantinedItem(context.config, id);
     if (!result.success) {
-      const auto messageText = result.errorMessage.empty() ? L"Unable to restore the selected item."
-                                                           : result.errorMessage.c_str();
-      MessageBoxW(context.hwnd, messageText, kWindowTitle, MB_OK | MB_ICONERROR);
+      auto detail = result.errorMessage.empty() ? std::wstring(L"Unable to restore the selected item.")
+                                                : result.errorMessage;
+      if (!result.approvalRequestId.empty()) {
+        detail += L"\r\n\r\nApproval request: " + result.approvalRequestId +
+                  L"\r\nProvide this ID to an owner/admin to execute local.approval.execute.";
+      }
+      MessageBoxW(context.hwnd, detail.c_str(), kWindowTitle, MB_OK | MB_ICONERROR);
       return;
     }
 
@@ -5528,9 +5536,13 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
 
     const auto result = DeleteQuarantinedItem(context.config, id);
     if (!result.success) {
-      const auto messageText = result.errorMessage.empty() ? L"Unable to delete the selected item."
-                                                           : result.errorMessage.c_str();
-      MessageBoxW(context.hwnd, messageText, kWindowTitle, MB_OK | MB_ICONERROR);
+      auto detail = result.errorMessage.empty() ? std::wstring(L"Unable to delete the selected item.")
+                                                : result.errorMessage;
+      if (!result.approvalRequestId.empty()) {
+        detail += L"\r\n\r\nApproval request: " + result.approvalRequestId +
+                  L"\r\nProvide this ID to an owner/admin to execute local.approval.execute.";
+      }
+      MessageBoxW(context.hwnd, detail.c_str(), kWindowTitle, MB_OK | MB_ICONERROR);
       return;
     }
 
