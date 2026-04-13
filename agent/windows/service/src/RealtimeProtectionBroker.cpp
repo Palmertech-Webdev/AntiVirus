@@ -498,6 +498,34 @@ bool IsTrustedInstallerImage(std::wstring_view imageLower) {
                           {L"msiexec.exe", L"winget.exe", L"choco.exe", L"scoop.exe", L"trustedinstaller.exe"});
 }
 
+bool IsLikelyBenignBulkIoProcess(std::wstring_view imageLower) {
+  return ImageContainsAny(imageLower, {L"backup", L"wbengine.exe", L"filehistory", L"onedrive.exe",
+                                       L"dropbox", L"googledrivesync", L"google drive", L"syncthing",
+                                       L"robocopy.exe", L"xcopy.exe", L"7z.exe", L"winrar.exe", L"rar.exe",
+                                       L"ffmpeg.exe", L"lightroom", L"photoshop", L"premiere", L"veeam",
+                                       L"acronis", L"devenv.exe", L"msbuild.exe", L"git.exe"});
+}
+
+bool IsWriteLikeOperation(const RealtimeFileOperation operation) {
+  return operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
+         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
+}
+
+bool IsUserDataExtension(const std::wstring& extension) {
+  return extension == L".doc" || extension == L".docx" || extension == L".xls" || extension == L".xlsx" ||
+         extension == L".ppt" || extension == L".pptx" || extension == L".txt" || extension == L".rtf" ||
+         extension == L".pdf" || extension == L".jpg" || extension == L".jpeg" || extension == L".png" ||
+         extension == L".gif" || extension == L".bmp" || extension == L".csv" || extension == L".json" ||
+         extension == L".xml" || extension == L".zip" || extension == L".7z";
+}
+
+bool IsSuspiciousEncryptedExtension(const std::wstring& extension) {
+  return extension == L".locked" || extension == L".lock" || extension == L".encrypted" || extension == L".enc" ||
+         extension == L".crypt" || extension == L".crypted" || extension == L".cry" ||
+         extension == L".lockbit" || extension == L".conti" || extension == L".akira" || extension == L".clop" ||
+         extension == L".ryuk" || extension == L".blackcat";
+}
+
 bool IsExecuteLikeOperation(const RealtimeFileOperation operation) {
   return operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE || operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
 }
@@ -554,6 +582,8 @@ void AddContextualRealtimeHits(std::vector<RealtimeHit>& hits, const std::filesy
   const auto hasProcessInjectionKeywords =
       ContainsAnyToken(commandLineLower, {L"createremotethread", L"writeprocessmemory", L"queueuserapc",
                                           L"rundll32", L"regsvr32", L"mshta"});
+    const auto likelyBenignBulkIoProcess =
+      IsLikelyBenignBulkIoProcess(processImageLower) || IsLikelyBenignBulkIoProcess(parentImageLower);
 
   if (hasEncodedPayload) {
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_ENCODED_COMMANDLINE",
@@ -627,6 +657,13 @@ void AddContextualRealtimeHits(std::vector<RealtimeHit>& hits, const std::filesy
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_TRUSTED_INSTALLER_CONTEXT",
                                      L"Execution context matches a trusted installer workflow.",
                                      L"TA0000", L"T0000", -24});
+  }
+
+  if (likelyBenignBulkIoProcess && IsWriteLikeOperation(operation) && userControlledPath && !hasRecoveryInhibition &&
+      !hasDynamicExecution && !hasProcessInjectionKeywords) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_BENIGN_BULK_IO_CONTEXT",
+                                     L"Execution context resembles trusted backup, sync, or migration activity.",
+                                     L"TA0000", L"T0000", -32});
   }
 }
 
@@ -721,6 +758,114 @@ std::wstring BuildBehaviorFingerprint(const RealtimeFileScanRequest& request, co
   }
 
   return processImage + L"|" + parentImage + L"|" + userSid;
+}
+
+struct RansomwareWriteHistoryEntry {
+  std::chrono::steady_clock::time_point observedAt{};
+  std::wstring fingerprint;
+  std::wstring directory;
+  std::wstring extension;
+  bool userControlled{false};
+  bool userDataExtension{false};
+  bool suspiciousEncryptedExtension{false};
+};
+
+struct RansomwareWriteBurstSnapshot {
+  std::size_t writeEvents{0};
+  std::size_t userDataWrites{0};
+  std::size_t suspiciousExtensionWrites{0};
+  std::size_t uniqueDirectories{0};
+  std::size_t uniqueExtensions{0};
+};
+
+constexpr auto kRansomwareWriteHistoryWindow = std::chrono::minutes(5);
+constexpr auto kRansomwareWriteBurstWindow = std::chrono::seconds(30);
+constexpr std::size_t kRansomwareWriteHistoryMaxEntries = 8192;
+
+std::mutex gRansomwareWriteHistoryMutex;
+std::deque<RansomwareWriteHistoryEntry> gRansomwareWriteHistory;
+
+void PruneRansomwareWriteHistoryLocked(const std::chrono::steady_clock::time_point now) {
+  while (!gRansomwareWriteHistory.empty() &&
+         (now - gRansomwareWriteHistory.front().observedAt) > kRansomwareWriteHistoryWindow) {
+    gRansomwareWriteHistory.pop_front();
+  }
+
+  while (gRansomwareWriteHistory.size() > kRansomwareWriteHistoryMaxEntries) {
+    gRansomwareWriteHistory.pop_front();
+  }
+}
+
+std::size_t CountUniqueValues(std::vector<std::wstring> values) {
+  if (values.empty()) {
+    return 0;
+  }
+
+  std::sort(values.begin(), values.end());
+  values.erase(std::unique(values.begin(), values.end()), values.end());
+  return values.size();
+}
+
+RansomwareWriteBurstSnapshot ObserveRansomwareWriteBurst(const RealtimeFileScanRequest& request,
+                                                         const std::filesystem::path& path,
+                                                         const RealtimeFileOperation operation) {
+  RansomwareWriteBurstSnapshot snapshot{};
+  if (!IsWriteLikeOperation(operation) || path.empty()) {
+    return snapshot;
+  }
+
+  const auto fingerprint = BuildBehaviorFingerprint(request, path);
+  if (fingerprint.empty()) {
+    return snapshot;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  const auto extension = ToLowerCopy(path.extension().wstring());
+  const auto userControlledPath = IsUserControlledPath(path);
+
+  std::vector<std::wstring> burstDirectories;
+  std::vector<std::wstring> burstExtensions;
+
+  {
+    const std::scoped_lock lock(gRansomwareWriteHistoryMutex);
+    PruneRansomwareWriteHistoryLocked(now);
+
+    gRansomwareWriteHistory.push_back(RansomwareWriteHistoryEntry{
+        .observedAt = now,
+        .fingerprint = fingerprint,
+        .directory = ToLowerCopy(path.parent_path().wstring()),
+        .extension = extension,
+        .userControlled = userControlledPath,
+        .userDataExtension = IsUserDataExtension(extension),
+        .suspiciousEncryptedExtension = IsSuspiciousEncryptedExtension(extension)});
+
+    PruneRansomwareWriteHistoryLocked(now);
+
+    for (const auto& entry : gRansomwareWriteHistory) {
+      if (entry.fingerprint != fingerprint || !entry.userControlled ||
+          (now - entry.observedAt) > kRansomwareWriteBurstWindow) {
+        continue;
+      }
+
+      ++snapshot.writeEvents;
+      if (entry.userDataExtension) {
+        ++snapshot.userDataWrites;
+      }
+      if (entry.suspiciousEncryptedExtension) {
+        ++snapshot.suspiciousExtensionWrites;
+      }
+      if (!entry.directory.empty()) {
+        burstDirectories.push_back(entry.directory);
+      }
+      if (!entry.extension.empty()) {
+        burstExtensions.push_back(entry.extension);
+      }
+    }
+  }
+
+  snapshot.uniqueDirectories = CountUniqueValues(std::move(burstDirectories));
+  snapshot.uniqueExtensions = CountUniqueValues(std::move(burstExtensions));
+  return snapshot;
 }
 
 std::wstring BuildBehaviorFingerprintFromEvent(const EventEnvelope& event) {
@@ -960,6 +1105,56 @@ std::vector<RealtimeHit> BuildBehaviorCorrelationHits(const std::uint32_t curren
   return hits;
 }
 
+void AddRansomwareBurstRealtimeHits(std::vector<RealtimeHit>& hits, const std::filesystem::path& path,
+                                    const RealtimeFileOperation operation, const RealtimeFileScanRequest& request,
+                                    const std::wstring& processImageLower, const std::wstring& parentImageLower,
+                                    const std::wstring& commandLineLower) {
+  const auto snapshot = ObserveRansomwareWriteBurst(request, path, operation);
+  if (snapshot.writeEvents == 0) {
+    return;
+  }
+
+  const auto hasRecoveryInhibition =
+      ContainsAnyToken(commandLineLower, {L"vssadmin delete shadows", L"wbadmin delete", L"wmic shadowcopy delete",
+                                          L"bcdedit /set", L"reagentc /disable"});
+  const auto hasCryptoBehavior =
+      ContainsAnyToken(commandLineLower, {L"aesmanaged", L"rijndaelmanaged", L"cryptostream", L"createencryptor",
+                                          L"transformfinalblock", L"encryptor"});
+  const auto likelyBenignBulkIoProcess =
+      IsLikelyBenignBulkIoProcess(processImageLower) || IsLikelyBenignBulkIoProcess(parentImageLower);
+
+  if (snapshot.userDataWrites >= 24 && snapshot.uniqueDirectories >= 4) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_RANSOMWARE_WRITE_BURST",
+                                     L"Rapid multi-directory write churn across user data resembles ransomware pre-encryption behavior.",
+                                     L"TA0040", L"T1486", 56});
+  }
+
+  if (snapshot.suspiciousExtensionWrites >= 5 && snapshot.uniqueDirectories >= 3) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_RANSOMWARE_EXTENSION_BURST",
+                                     L"Repeated writes with suspicious encrypted extensions indicate destructive encryption activity.",
+                                     L"TA0040", L"T1486", 62});
+  }
+
+  if (snapshot.writeEvents >= 30 && snapshot.uniqueDirectories >= 4 && snapshot.uniqueExtensions >= 5) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_RANSOMWARE_CROSS_DIRECTORY_CHURN",
+                                     L"High-rate cross-directory write churn indicates potential mass-encryption behavior.",
+                                     L"TA0040", L"T1486", 48});
+  }
+
+  if ((snapshot.userDataWrites >= 12 && hasRecoveryInhibition) ||
+      (snapshot.userDataWrites >= 15 && hasCryptoBehavior)) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_RANSOMWARE_PREIMPACT_CHAIN",
+                                     L"Write-burst behavior combined with recovery inhibition or crypto primitives signals ransomware impact staging.",
+                                     L"TA0040", L"T1490", 58});
+  }
+
+  if (likelyBenignBulkIoProcess && snapshot.userDataWrites >= 20 && !hasRecoveryInhibition && !hasCryptoBehavior) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_BENIGN_BULK_IO_DAMPENING",
+                                     L"Fenrir reduced ransomware burst confidence because process context resembles known backup/sync workflows.",
+                                     L"TA0000", L"T0000", -40});
+  }
+}
+
 TelemetryRecord BuildBehaviorObservationTelemetry(const EventEnvelope& event, const std::wstring& deviceId,
                                                   const std::uint32_t currentSignals,
                                                   const BehaviorCorrelationSnapshot& snapshot,
@@ -1133,6 +1328,8 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
 
   AddContextualRealtimeHits(hits, path, extension, operation, processImageLower, parentImageLower, commandLineLower,
                             userControlledPath);
+  AddRansomwareBurstRealtimeHits(hits, path, operation, request, processImageLower, parentImageLower,
+                                 commandLineLower);
 
   const auto topHit = std::max_element(hits.begin(), hits.end(),
                                        [](const auto& left, const auto& right) { return left.score < right.score; });

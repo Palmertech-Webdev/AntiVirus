@@ -6,6 +6,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -45,8 +46,22 @@ constexpr char kCleanwareExecutionSample[] =
   "# Fenrir cleanware self-test marker\n"
   "$status = 'fenrir-cleanware-selftest'\n"
   "Write-Output $status\n";
+constexpr char kBrowserDownloadInstallSample[] =
+  "Fenrir benign download/install validation sample\n"
+  "Contains routine business installation notes and no script execution content.\n";
+constexpr char kPhase2RansomwareBurstSample[] =
+  "Fenrir Phase 2 ransomware-burst simulation payload for write-churn validation.\n";
+constexpr char kPhase2BenignBulkIoSample[] =
+  "Fenrir Phase 2 benign bulk I/O simulation payload for false-positive guardrails.\n";
+constexpr std::size_t kDefaultCorpusFileLimit = 400;
+constexpr std::size_t kMaxCorpusFileLimit = 5000;
 
 std::wstring JsonEscape(const std::wstring& value) { return Utf8ToWide(EscapeJsonString(value)); }
+
+struct SignedSystemBinaryCandidate {
+  std::filesystem::path path;
+  std::wstring signer;
+};
 
 void AddCheck(SelfTestReport& report, const std::wstring& id, const std::wstring& name, const SelfTestStatus status,
               const std::wstring& details, const std::wstring& remediation = {}) {
@@ -197,6 +212,104 @@ bool IsProbablyPrivilegeBoundary(const std::wstring& value) {
          lower.find(L"service context") != std::wstring::npos;
 }
 
+std::size_t ResolveCorpusFileLimit() {
+  const auto raw = ReadEnvironmentVariable(L"ANTIVIRUS_PHASE1_CORPUS_MAX_FILES");
+  if (raw.empty()) {
+    return kDefaultCorpusFileLimit;
+  }
+
+  try {
+    const auto parsed = std::stoull(raw);
+    if (parsed == 0) {
+      return kDefaultCorpusFileLimit;
+    }
+    return static_cast<std::size_t>(std::min<unsigned long long>(parsed, kMaxCorpusFileLimit));
+  } catch (...) {
+    return kDefaultCorpusFileLimit;
+  }
+}
+
+std::vector<std::filesystem::path> CollectCorpusSampleFiles(const std::filesystem::path& root,
+                                                            const std::size_t fileLimit, bool* truncated) {
+  if (truncated != nullptr) {
+    *truncated = false;
+  }
+
+  std::vector<std::filesystem::path> files;
+  if (fileLimit == 0) {
+    return files;
+  }
+
+  std::error_code error;
+  if (std::filesystem::is_regular_file(root, error)) {
+    files.push_back(root);
+    return files;
+  }
+
+  error.clear();
+  if (!std::filesystem::is_directory(root, error)) {
+    return files;
+  }
+
+  for (std::filesystem::recursive_directory_iterator iterator(
+           root, std::filesystem::directory_options::skip_permission_denied, error);
+       iterator != std::filesystem::recursive_directory_iterator(); iterator.increment(error)) {
+    if (error) {
+      error.clear();
+      continue;
+    }
+
+    if (iterator->is_regular_file(error)) {
+      files.push_back(iterator->path());
+      if (files.size() >= fileLimit) {
+        if (truncated != nullptr) {
+          *truncated = true;
+        }
+        break;
+      }
+    }
+
+    if (error) {
+      error.clear();
+    }
+  }
+
+  std::sort(files.begin(), files.end());
+  return files;
+}
+
+std::optional<SignedSystemBinaryCandidate> FindSignedSystemBinaryCandidate() {
+  std::vector<std::filesystem::path> candidates;
+  const auto windowsRoot = std::filesystem::path(ReadEnvironmentVariable(L"WINDIR"));
+  if (!windowsRoot.empty()) {
+    candidates.push_back(windowsRoot / L"System32" / L"notepad.exe");
+    candidates.push_back(windowsRoot / L"System32" / L"cmd.exe");
+    candidates.push_back(windowsRoot / L"System32" / L"WindowsPowerShell" / L"v1.0" / L"powershell.exe");
+    candidates.push_back(windowsRoot / L"explorer.exe");
+  }
+
+  candidates.push_back(std::filesystem::path(L"C:\\Windows\\System32\\notepad.exe"));
+  candidates.push_back(std::filesystem::path(L"C:\\Windows\\System32\\cmd.exe"));
+
+  std::sort(candidates.begin(), candidates.end());
+  candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+  for (const auto& candidate : candidates) {
+    if (!PathExists(candidate) || !VerifyFileAuthenticodeSignature(candidate)) {
+      continue;
+    }
+
+    const auto signer = QueryFileSignerSubject(candidate);
+    if (signer.empty()) {
+      continue;
+    }
+
+    return SignedSystemBinaryCandidate{.path = candidate, .signer = signer};
+  }
+
+  return std::nullopt;
+}
+
 std::filesystem::path ResolveSignatureBundlePath(const std::filesystem::path& installRoot) {
   const auto envPath = ReadEnvironmentVariable(L"ANTIVIRUS_SIGNATURE_BUNDLE_PATH");
   if (!envPath.empty()) {
@@ -306,6 +419,11 @@ std::wstring FirstReasonCode(const ScanFinding& finding) {
 bool FindingHasReasonCode(const ScanFinding& finding, const std::wstring& code) {
   return std::any_of(finding.verdict.reasons.begin(), finding.verdict.reasons.end(),
                      [&code](const auto& reason) { return reason.code == code; });
+}
+
+bool FindingHasReasonPrefix(const ScanFinding& finding, const std::wstring& prefix) {
+  return std::any_of(finding.verdict.reasons.begin(), finding.verdict.reasons.end(),
+                     [&prefix](const auto& reason) { return reason.code.starts_with(prefix); });
 }
 
 std::wstring StatusToString(const SelfTestStatus status) {
@@ -672,6 +790,52 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       }
     }
 
+    const auto browserDownloadInstallRoot = phaseValidationRoot / L"phase1-browser-download-install-set";
+    const std::vector<std::filesystem::path> browserDownloadInstallSamples = {
+        browserDownloadInstallRoot / L"downloads" / L"invoice.pdf",
+        browserDownloadInstallRoot / L"downloads" / L"QuarterlySummary.xlsx",
+        browserDownloadInstallRoot / L"installers" / L"AcmeUpdater.log",
+        browserDownloadInstallRoot / L"installers" / L"release-notes.txt",
+    };
+
+    std::vector<std::wstring> writeFailures;
+    for (const auto& samplePath : browserDownloadInstallSamples) {
+      if (!WriteSelfTestSample(samplePath, kBrowserDownloadInstallSample)) {
+        writeFailures.push_back(samplePath.wstring());
+      }
+    }
+
+    if (!writeFailures.empty()) {
+      std::wstring details = L"Self-test could not stage one or more benign browser/download/install samples:";
+      for (const auto& failedPath : writeFailures) {
+        details += L" ";
+        details += failedPath;
+      }
+
+      AddCheck(report, L"phase1_browser_download_install_set", L"Phase 1 browser/download/install clean set",
+               SelfTestStatus::Fail, details,
+               L"Verify local runtime/temp ACLs and rerun self-test from the target endpoint context.");
+    } else {
+      auto cleanSetPolicy = CreateDefaultPolicySnapshot();
+      cleanSetPolicy.cloudLookupEnabled = false;
+      cleanSetPolicy.quarantineOnMalicious = false;
+
+      const auto cleanSetFindings = ScanTargets({browserDownloadInstallRoot}, cleanSetPolicy);
+      if (cleanSetFindings.empty()) {
+        AddCheck(report, L"phase1_browser_download_install_set", L"Phase 1 browser/download/install clean set",
+                 SelfTestStatus::Pass,
+                 L"ScanTargets returned no malicious findings across staged benign browser/download/install artifacts.");
+      } else {
+        const auto& firstFinding = cleanSetFindings.front();
+        AddCheck(report, L"phase1_browser_download_install_set", L"Phase 1 browser/download/install clean set",
+                 SelfTestStatus::Fail,
+                 L"ScanTargets flagged staged benign artifact " + firstFinding.path.wstring() + L" with disposition " +
+                     VerdictDispositionToString(firstFinding.verdict.disposition) + L" (reason " +
+                     FirstReasonCode(firstFinding) + L").",
+                 L"Tune false-positive heuristics for common business download/install artifacts before pilot rollout.");
+      }
+    }
+
     const auto suppressionRoot = phaseValidationRoot / L"phase1-suppression-root";
     const auto suppressionSamplePath = suppressionRoot / L"phase1-suppressed-eicar.txt";
     if (!WriteSelfTestSample(suppressionSamplePath, kDiskBlockingSample)) {
@@ -718,9 +882,321 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       }
     }
 
+    const auto signedCandidate = FindSignedSystemBinaryCandidate();
+    if (!signedCandidate.has_value()) {
+      AddCheck(report, L"phase1_signed_software_trust", L"Phase 1 signed software trust tests",
+               SelfTestStatus::Warning,
+               L"Self-test did not find an Authenticode-signed Windows binary with a readable signer subject.",
+               L"Run this check on a standard Windows client image with default signed system binaries available.");
+    } else {
+      auto trustPolicy = CreateDefaultPolicySnapshot();
+      trustPolicy.cloudLookupEnabled = false;
+      trustPolicy.quarantineOnMalicious = false;
+
+      const auto baselineFinding = ScanFile(signedCandidate->path, trustPolicy);
+      const auto baselineSafe = !baselineFinding.has_value() ||
+                                baselineFinding->verdict.disposition == VerdictDisposition::Allow;
+
+      auto signerSuppressionPolicy = trustPolicy;
+      signerSuppressionPolicy.suppressionSignerNames.push_back(signedCandidate->signer);
+
+      const auto signerOverride = BuildAllowOverrideFinding(signedCandidate->path, signerSuppressionPolicy);
+      const auto signerSuppressedScan = ScanFile(signedCandidate->path, signerSuppressionPolicy);
+      const auto signerSuppressionMatched =
+          signerOverride.has_value() &&
+          signerOverride->verdict.disposition == VerdictDisposition::Allow &&
+          FindingHasReasonCode(*signerOverride, L"POLICY_SUPPRESSION_SIGNER");
+
+      if (baselineSafe && signerSuppressionMatched && !signerSuppressedScan.has_value()) {
+        AddCheck(report, L"phase1_signed_software_trust", L"Phase 1 signed software trust tests",
+                 SelfTestStatus::Pass,
+                 L"Verified signed software trust behavior with " + signedCandidate->path.wstring() +
+                     L" (signer: " + signedCandidate->signer + L").");
+      } else {
+        std::wstring details =
+            L"Signed software trust validation failed for " + signedCandidate->path.wstring() + L".";
+        if (baselineFinding.has_value()) {
+          details += L" Baseline disposition: ";
+          details += VerdictDispositionToString(baselineFinding->verdict.disposition);
+          details += L" (reason ";
+          details += FirstReasonCode(*baselineFinding);
+          details += L").";
+        }
+
+        if (signerOverride.has_value()) {
+          details += L" Signer override disposition: ";
+          details += VerdictDispositionToString(signerOverride->verdict.disposition);
+          details += L" (reason ";
+          details += FirstReasonCode(*signerOverride);
+          details += L").";
+        } else {
+          details += L" No signer suppression override was produced.";
+        }
+
+        if (signerSuppressedScan.has_value()) {
+          details += L" ScanFile with signer suppression still returned ";
+          details += VerdictDispositionToString(signerSuppressedScan->verdict.disposition);
+          details += L" (reason ";
+          details += FirstReasonCode(*signerSuppressedScan);
+          details += L").";
+        }
+
+        AddCheck(report, L"phase1_signed_software_trust", L"Phase 1 signed software trust tests",
+                 SelfTestStatus::Fail, details,
+                 L"Tune signer reputation/suppression handling so trusted signed software does not regress into false positives.");
+      }
+    }
+
+    try {
+      auto phase2Config = config;
+      phase2Config.runtimeDatabasePath = phaseValidationRoot / L"phase2-runtime.db";
+      phase2Config.quarantineRootPath = phaseValidationRoot / L"phase2-quarantine";
+      phase2Config.evidenceRootPath = phaseValidationRoot / L"phase2-evidence";
+      phase2Config.scanExcludedPaths.clear();
+
+      std::error_code phase2PathError;
+      std::filesystem::create_directories(phase2Config.runtimeDatabasePath.parent_path(), phase2PathError);
+      std::filesystem::create_directories(phase2Config.quarantineRootPath, phase2PathError);
+      std::filesystem::create_directories(phase2Config.evidenceRootPath, phase2PathError);
+
+      if (phase2PathError) {
+        AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
+                 L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+      } else {
+        auto phase2Policy = CreateDefaultPolicySnapshot();
+        phase2Policy.cloudLookupEnabled = false;
+        phase2Policy.quarantineOnMalicious = false;
+
+        RealtimeProtectionBroker broker(phase2Config);
+        broker.SetPolicy(phase2Policy);
+        broker.SetDeviceId(L"self-test-device");
+
+        const auto runBurstScenario = [&broker](const std::filesystem::path& root,
+                                                const std::wstring& processImage,
+                                                const std::wstring& parentImage,
+                                                const std::wstring& commandLine,
+                                                const std::wstring& userSid,
+                                                const char* payload,
+                                                const std::vector<std::wstring>& extensions,
+                                                const bool includeEncryptedExtensions) {
+          std::vector<std::filesystem::path> stagedPaths;
+          const std::vector<std::wstring> directories = {L"documents", L"desktop", L"downloads", L"pictures", L"projects"};
+          constexpr std::size_t kSampleCount = 40;
+
+          for (std::size_t index = 0; index < kSampleCount; ++index) {
+            const auto directoryName = directories[index % directories.size()];
+            std::wstring extension = extensions[index % extensions.size()];
+            if (includeEncryptedExtensions && index >= 24) {
+              extension = (index % 2 == 0) ? L".locked" : L".encrypted";
+            }
+
+            const auto stagedPath = root / directoryName / (L"phase2-file-" + std::to_wstring(index + 1) + extension);
+            if (!WriteSelfTestSample(stagedPath, payload)) {
+              return std::tuple<bool, bool, int, std::wstring>(false, false, 0,
+                                                                L"Failed to stage " + stagedPath.wstring() + L".");
+            }
+            stagedPaths.push_back(stagedPath);
+          }
+
+          bool blocked = false;
+          bool ransomwareReason = false;
+          int blockedCount = 0;
+          std::wstring details;
+          for (std::size_t index = 0; index < stagedPaths.size(); ++index) {
+            const auto& stagedPath = stagedPaths[index];
+            std::error_code absolutePathError;
+            auto resolvedPath = std::filesystem::absolute(stagedPath, absolutePathError);
+            if (absolutePathError) {
+              resolvedPath = stagedPath;
+            }
+
+            RealtimeFileScanRequest request{};
+            request.protocolVersion = ANTIVIRUS_REALTIME_PROTOCOL_VERSION;
+            request.requestSize = sizeof(request);
+            request.requestId = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                 std::chrono::system_clock::now().time_since_epoch())
+                                                                 .count() + index);
+            request.operation = ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE;
+            request.processId = GetCurrentProcessId();
+            request.threadId = GetCurrentThreadId();
+
+            std::error_code sizeError;
+            request.fileSizeBytes = std::filesystem::file_size(resolvedPath, sizeError);
+            if (sizeError) {
+              request.fileSizeBytes = 0;
+            }
+
+            CopyWideField(request.correlationId, L"self-test-phase2-burst");
+            CopyWideField(request.path, resolvedPath.wstring());
+            CopyWideField(request.processImage, processImage);
+            CopyWideField(request.parentImage, parentImage);
+            CopyWideField(request.commandLine, commandLine);
+            CopyWideField(request.userSid, userSid);
+
+            const auto outcome = broker.InspectFile(request);
+            if (outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK ||
+                outcome.finding.verdict.disposition == VerdictDisposition::Block ||
+                outcome.finding.verdict.disposition == VerdictDisposition::Quarantine) {
+              ++blockedCount;
+              blocked = true;
+              if (FindingHasReasonPrefix(outcome.finding, L"REALTIME_RANSOMWARE_")) {
+                ransomwareReason = true;
+              }
+              details = L"Blocked " + resolvedPath.wstring() + L" with reason " + FirstReasonCode(outcome.finding) + L".";
+              break;
+            }
+          }
+
+          if (details.empty()) {
+            details = L"No block was observed across staged write-churn simulation files.";
+          }
+
+          return std::tuple<bool, bool, int, std::wstring>(blocked, ransomwareReason, blockedCount, details);
+        };
+
+        const auto maliciousScenario = runBurstScenario(
+            phaseValidationRoot / L"phase2-ransomware-burst",
+            L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            L"C:\\Windows\\explorer.exe",
+            L"powershell.exe -NoProfile -Command \"vssadmin delete shadows /all /quiet; $aes = New-Object System.Security.Cryptography.AesManaged\"",
+            L"S-1-5-21-1000",
+            kPhase2RansomwareBurstSample,
+            {L".docx", L".xlsx", L".pdf", L".jpg", L".txt", L".csv"},
+            true);
+
+        if (std::get<0>(maliciousScenario) && std::get<1>(maliciousScenario)) {
+          AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
+                   SelfTestStatus::Pass,
+                   L"Realtime write-churn simulation triggered ransomware behavior containment. " + std::get<3>(maliciousScenario));
+        } else {
+          AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
+                   SelfTestStatus::Fail,
+                   L"Realtime write-churn simulation did not trigger expected ransomware behavior blocking. " +
+                       std::get<3>(maliciousScenario),
+                   L"Tune Phase 2 behavior-chain scoring for destructive write bursts and pre-impact commands.");
+        }
+
+        const auto benignScenario = runBurstScenario(
+            phaseValidationRoot / L"phase2-benign-bulk-io",
+            L"C:\\Program Files\\BackupSuite\\backup-agent.exe",
+            L"C:\\Windows\\System32\\services.exe",
+            L"backup-agent.exe --sync --incremental --verify",
+            L"S-1-5-21-2000",
+            kPhase2BenignBulkIoSample,
+            {L".docx", L".xlsx", L".pdf", L".jpg", L".txt", L".csv"},
+            false);
+
+        if (!std::get<0>(benignScenario)) {
+          AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
+                   L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Pass,
+                   L"Benign backup-style bulk write simulation stayed allow-only across staged files.");
+        } else {
+          AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
+                   L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Fail,
+                   L"Benign backup-style bulk write simulation triggered blocking unexpectedly. " +
+                       std::get<3>(benignScenario),
+                   L"Adjust benign bulk-I/O dampening so backup, sync, and migration workloads avoid ransomware false positives.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
+               SelfTestStatus::Fail, L"Phase 2 ransomware behavior simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
+               L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Fail,
+               L"Phase 2 benign bulk-I/O simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+    }
+
     std::error_code cleanupError;
     std::filesystem::remove_all(phaseValidationRoot, cleanupError);
   }
+
+  const auto corpusFileLimit = ResolveCorpusFileLimit();
+  const auto runOptionalCorpusCheck = [&report, corpusFileLimit](const std::wstring& checkId,
+                                                                  const std::wstring& checkName,
+                                                                  const wchar_t* envVarName,
+                                                                  const std::wstring& corpusLabel) {
+    const auto configuredPath = ReadEnvironmentVariable(envVarName);
+    if (configuredPath.empty()) {
+      AddCheck(report, checkId, checkName, SelfTestStatus::Warning,
+               corpusLabel + L" corpus path is not configured for this self-test run.",
+               std::wstring(L"Set ") + envVarName + L" to a trusted corpus root and rerun --self-test.");
+      return;
+    }
+
+    const std::filesystem::path corpusRoot(configuredPath);
+    std::error_code error;
+    if (!std::filesystem::exists(corpusRoot, error) || error) {
+      AddCheck(report, checkId, checkName, SelfTestStatus::Fail,
+               corpusLabel + L" corpus path does not exist: " + corpusRoot.wstring() + L".",
+               std::wstring(L"Update ") + envVarName + L" to an existing corpus path.");
+      return;
+    }
+
+    bool truncated = false;
+    const auto sampleFiles = CollectCorpusSampleFiles(corpusRoot, corpusFileLimit, &truncated);
+    if (sampleFiles.empty()) {
+      AddCheck(report, checkId, checkName, SelfTestStatus::Fail,
+               corpusLabel + L" corpus path did not yield any readable files: " + corpusRoot.wstring() + L".",
+               L"Ensure the corpus contains readable files and rerun self-test from the same host context.");
+      return;
+    }
+
+    auto corpusPolicy = CreateDefaultPolicySnapshot();
+    corpusPolicy.cloudLookupEnabled = false;
+    corpusPolicy.quarantineOnMalicious = false;
+
+    const auto findings = ScanTargets(sampleFiles, corpusPolicy);
+    if (findings.empty()) {
+      std::wstring details = L"Validated ";
+      details += std::to_wstring(sampleFiles.size());
+      details += L" ";
+      details += corpusLabel;
+      details += L" corpus file(s) without false-positive findings.";
+      if (truncated) {
+        details += L" Scan was limited to first ";
+        details += std::to_wstring(corpusFileLimit);
+        details += L" files.";
+      }
+
+      AddCheck(report, checkId, checkName, SelfTestStatus::Pass, details);
+      return;
+    }
+
+    std::wstring details = L"Detected ";
+    details += std::to_wstring(findings.size());
+    details += L" false-positive candidate(s) in the ";
+    details += corpusLabel;
+    details += L" corpus.";
+    const auto sampleCount = std::min<std::size_t>(findings.size(), 3);
+    for (std::size_t index = 0; index < sampleCount; ++index) {
+      const auto& finding = findings[index];
+      details += L" Sample ";
+      details += std::to_wstring(index + 1);
+      details += L": ";
+      details += finding.path.wstring();
+      details += L" (";
+      details += VerdictDispositionToString(finding.verdict.disposition);
+      details += L", reason ";
+      details += FirstReasonCode(finding);
+      details += L").";
+    }
+
+    AddCheck(report, checkId, checkName, SelfTestStatus::Fail, details,
+             L"Review suppression/reputation tuning for these cleanware artifacts before pilot rollout.");
+  };
+
+  runOptionalCorpusCheck(L"phase1_cleanware_corpus", L"Phase 1 cleanware corpus",
+                         L"ANTIVIRUS_PHASE1_CLEANWARE_CORPUS_PATH", L"cleanware");
+  runOptionalCorpusCheck(L"phase1_uk_business_software_corpus", L"Phase 1 UK business software corpus",
+                         L"ANTIVIRUS_PHASE1_UK_BUSINESS_CORPUS_PATH", L"UK business software");
 
   const auto hardeningManager = HardeningManager(config, installRoot);
   const auto hardeningStatus = hardeningManager.QueryStatus();

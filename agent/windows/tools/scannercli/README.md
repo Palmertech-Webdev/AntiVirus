@@ -28,3 +28,30 @@ Current examples:
 
 This is still an early scan and real-time inspection scaffold, not the final detection engine. It does not yet unpack
 archives, perform content emulation, restore quarantined files, or consult cloud reputation.
+
+## Phase 1 Exit-Criteria Harness
+
+Use `RunPhase1ExitCriteria.ps1` to evaluate the four Phase 1 AV exit criteria in one run:
+
+- common malware blocked on write/execute
+- remediation consistency across repeated runs
+- false-positive rate against cleanware and UK business corpora
+- scan performance thresholds (average and p95 milliseconds per file)
+
+Use `GeneratePhase1HouseholdCorpus.ps1` to produce larger local synthetic corpora for repeatable false-positive and
+performance checks.
+
+Example:
+
+```powershell
+.\GeneratePhase1HouseholdCorpus.ps1 -WorkspaceRoot ..\..\..\.. -OutputRoot ./tmp-phase1-corpora-large -CleanwareCount 120 -UkBusinessCount 120
+.\RunPhase1ExitCriteria.ps1 -WorkspaceRoot ..\..\..\.. -CleanwareCorpusPath ./tmp-phase1-corpora/cleanware -UkBusinessCorpusPath ./tmp-phase1-corpora/uk-business-software
+```
+
+Stronger evidence example (minimum corpus size requirements):
+
+```powershell
+.\RunPhase1ExitCriteria.ps1 -WorkspaceRoot ..\..\..\.. -CleanwareCorpusPath ./tmp-phase1-corpora-large/cleanware -UkBusinessCorpusPath ./tmp-phase1-corpora-large/uk-business-software -MinCleanwareFiles 100 -MinUkBusinessFiles 100
+```
+
+The script writes a JSON report to `tmp-phase1-exitcriteria/phase1-exitcriteria-report.json`.

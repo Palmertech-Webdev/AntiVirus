@@ -24,7 +24,8 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Trusted runtime-root boundary validation across runtime database, state, telemetry, update staging, quarantine, evidence, and journal paths
 - Runtime trust validation that cross-checks registry runtime markers, install/runtime roots, and critical service binaries before install/repair and service startup
 - Startup and remote `agent.repair` flows now fail closed when required hardening/runtime trust controls cannot be re-applied
-- Phase 1 self-test gates that verify both malware blocking (disk-time and execute-time) and false-positive handling (cleanware allowance plus suppression allow-override flow)
+- Phase 1 self-test gates that verify both malware blocking (disk-time and execute-time) and false-positive handling (cleanware allowance, browser/download/install clean-set coverage, signer trust, plus suppression allow-override flow)
+- Phase 2 self-test gates that validate ransomware-style destructive write-burst containment while preserving allow-only behavior for benign backup/sync bulk-I/O workloads
 - A shared on-demand scan engine used by `antivirus-scannercli`
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
 - Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories
@@ -103,6 +104,9 @@ The purpose of this folder is to establish the internal contracts we will build 
 - `ANTIVIRUS_QUARANTINE_ROOT`
 - `ANTIVIRUS_EVIDENCE_ROOT`
 - `ANTIVIRUS_SIGNATURE_BUNDLE_PATH`
+- `ANTIVIRUS_PHASE1_CLEANWARE_CORPUS_PATH`
+- `ANTIVIRUS_PHASE1_UK_BUSINESS_CORPUS_PATH`
+- `ANTIVIRUS_PHASE1_CORPUS_MAX_FILES`
 - `ANTIVIRUS_AGENT_VERSION`
 - `ANTIVIRUS_PLATFORM_VERSION`
 - `ANTIVIRUS_REQUIRE_SIGNED_RUNTIME`

@@ -1,0 +1,38 @@
+{
+  "generatedAtUtc": "2026-04-13T11:10:33.9684665Z",
+  "scannerPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\tools\\fenrir-scannercli.exe",
+  "configuration": {
+    "remediationRuns": 10,
+    "remediationSamplesPerRun": 3,
+    "performanceRuns": 10,
+    "performanceMaxAvgMsPerFile": 150.0,
+    "performanceMaxP95MsPerFile": 250.0,
+    "minCleanwareFiles": 100,
+    "minUkBusinessFiles": 100,
+    "cleanwareCorpusPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-corpora-large\\cleanware",
+    "ukBusinessCorpusPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-corpora-large\\uk-business-software"
+  },
+  "criteria": [
+    {
+      "Criterion": "Common malware blocked on write or execute",
+      "Status": "pass",
+      "Details": "write=block, execute=block"
+    },
+    {
+      "Criterion": "Remediation succeeds consistently",
+      "Status": "pass",
+      "Details": "run1: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run2: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run3: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run4: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run5: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run6: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run7: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run8: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run9: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True; run10: findings=3, blocked=3, quarantined=3, missingOriginals=3, pass=True"
+    },
+    {
+      "Criterion": "False positives are low enough for normal household use",
+      "Status": "pass",
+      "Details": "cleanware: files=120, minRequired=100, findings=0; uk-business: files=120, minRequired=100, findings=0"
+    },
+    {
+      "Criterion": "System performance remains acceptable",
+      "Status": "pass",
+      "Details": "files=240, runs=10, avgMsPerFile=4.78, p95MsPerFile=5.1, limitAvg=150, limitP95=250; runMsPerFile=5,4.85,3.99,5.02,4.57,5.1,4.83,4.69,5.03,4.76"
+    }
+  ],
+  "allCriteriaPass": true
+}
