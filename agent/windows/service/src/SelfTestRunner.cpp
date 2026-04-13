@@ -3,10 +3,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <thread>
@@ -15,8 +17,10 @@
 #include "../../../sensor/etw/include/ProcessEtwSensor.h"
 #include "../../../sensor/wfp/include/NetworkIsolationManager.h"
 #include "AgentConfig.h"
+#include "AmsiScanEngine.h"
 #include "CryptoUtils.h"
 #include "HardeningManager.h"
+#include "PatchOrchestrator.h"
 #include "RealtimeProtectionBroker.h"
 #include "RuntimeDatabase.h"
 #include "RuntimeTrustValidator.h"
@@ -228,6 +232,14 @@ std::size_t ResolveCorpusFileLimit() {
     return kDefaultCorpusFileLimit;
   }
 }
+
+constexpr char kPhase3AmsiMaliciousSample[] =
+  "downloadstring :8443\n"
+  "assembly.load(\n"
+  "regsvr32 \n";
+constexpr char kPhase3AmsiBenignSample[] =
+  "Get-ChildItem Documents *.txt\n"
+  "Write-Output report\n";
 
 std::vector<std::filesystem::path> CollectCorpusSampleFiles(const std::filesystem::path& root,
                                                             const std::size_t fileLimit, bool* truncated) {
@@ -1295,6 +1307,334 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                L"Phase 2 developer build false-positive resistance", SelfTestStatus::Fail,
                L"Phase 2 developer build simulation failed: " + Utf8ToWide(error.what()),
                L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+    }
+
+    try {
+      auto phase3Config = config;
+      phase3Config.runtimeDatabasePath = phaseValidationRoot / L"phase3-runtime.db";
+      phase3Config.quarantineRootPath = phaseValidationRoot / L"phase3-quarantine";
+      phase3Config.evidenceRootPath = phaseValidationRoot / L"phase3-evidence";
+      phase3Config.scanExcludedPaths.clear();
+
+      std::error_code phase3PathError;
+      std::filesystem::create_directories(phase3Config.runtimeDatabasePath.parent_path(), phase3PathError);
+      std::filesystem::create_directories(phase3Config.quarantineRootPath, phase3PathError);
+      std::filesystem::create_directories(phase3Config.evidenceRootPath, phase3PathError);
+
+      if (phase3PathError) {
+        AddCheck(report, L"phase3_amsi_script_depth", L"Phase 3 AMSI script-depth correlation",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 3 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 3 AMSI checks.");
+        AddCheck(report, L"phase3_amsi_false_positive_benign", L"Phase 3 AMSI benign-script false-positive resistance",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 3 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 3 AMSI checks.");
+      } else {
+        auto phase3Policy = CreateDefaultPolicySnapshot();
+        phase3Policy.cloudLookupEnabled = false;
+        phase3Policy.quarantineOnMalicious = false;
+
+        const AmsiContentRequest maliciousRequest{
+            .source = AmsiContentSource::Stream,
+            .deviceId = L"self-test-device",
+            .appName = L"PowerShell",
+            .contentName = L"memory://powershell/staged-loader.ps1",
+            .sessionId = 3001,
+            .quiet = false,
+            .content = std::vector<unsigned char>(
+                kPhase3AmsiMaliciousSample,
+                kPhase3AmsiMaliciousSample + std::strlen(kPhase3AmsiMaliciousSample))};
+        const auto maliciousAmsi = InspectAmsiContent(maliciousRequest, phase3Policy, phase3Config);
+        const auto maliciousReasoningMatched =
+            (FindingHasReasonCode(maliciousAmsi.finding, L"DOWNLOAD_CRADLE") ||
+             FindingHasReasonCode(maliciousAmsi.finding, L"SUSPICIOUS_C2_DESTINATION")) &&
+            (FindingHasReasonCode(maliciousAmsi.finding, L"REFLECTIVE_MEMORY_LOADER") ||
+             FindingHasReasonCode(maliciousAmsi.finding, L"AMSI_PATCH_BYPASS") ||
+             FindingHasReasonCode(maliciousAmsi.finding, L"LOLBIN_PROXY_CHAIN"));
+
+        if (maliciousAmsi.blocked && maliciousReasoningMatched) {
+          AddCheck(report, L"phase3_amsi_script_depth", L"Phase 3 AMSI script-depth correlation",
+                   SelfTestStatus::Pass,
+                   L"AMSI blocked staged script content with layered delivery and memory-loader indicators (reason " +
+                       FirstReasonCode(maliciousAmsi.finding) + L").");
+        } else {
+          AddCheck(report, L"phase3_amsi_script_depth", L"Phase 3 AMSI script-depth correlation",
+                   SelfTestStatus::Fail,
+                   L"AMSI did not block or fully explain the staged script chain. Disposition was " +
+                       VerdictDispositionToString(maliciousAmsi.finding.verdict.disposition) + L" with reason " +
+                       FirstReasonCode(maliciousAmsi.finding) + L".",
+                   L"Strengthen AMSI reasoning so download cradles, suspicious destinations, and memory-loader or LOLBin signals combine into a high-confidence block.");
+        }
+
+        const AmsiContentRequest benignRequest{
+            .source = AmsiContentSource::Stream,
+            .deviceId = L"self-test-device",
+            .appName = L"PowerShell",
+            .contentName = L"memory://powershell/benign-admin-task.ps1",
+            .sessionId = 3002,
+            .quiet = false,
+            .content = std::vector<unsigned char>(
+                kPhase3AmsiBenignSample,
+                kPhase3AmsiBenignSample + std::strlen(kPhase3AmsiBenignSample))};
+        const auto benignAmsi = InspectAmsiContent(benignRequest, phase3Policy, phase3Config);
+
+        if (!benignAmsi.blocked && benignAmsi.finding.verdict.disposition == VerdictDisposition::Allow) {
+          AddCheck(report, L"phase3_amsi_false_positive_benign", L"Phase 3 AMSI benign-script false-positive resistance",
+                   SelfTestStatus::Pass,
+                   L"AMSI allowed benign administrative script content without escalating to a block.");
+        } else {
+          AddCheck(report, L"phase3_amsi_false_positive_benign", L"Phase 3 AMSI benign-script false-positive resistance",
+                   SelfTestStatus::Fail,
+                   L"AMSI treated benign administrative script content too aggressively with disposition " +
+                       VerdictDispositionToString(benignAmsi.finding.verdict.disposition) + L" (reason " +
+                       FirstReasonCode(benignAmsi.finding) + L").",
+                   L"Retune AMSI scoring so simple administrative discovery and reporting scripts remain allow-by-default.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase3_amsi_script_depth", L"Phase 3 AMSI script-depth correlation", SelfTestStatus::Fail,
+               L"Phase 3 AMSI staged-script simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase3_amsi_false_positive_benign", L"Phase 3 AMSI benign-script false-positive resistance",
+               SelfTestStatus::Fail, L"Phase 3 AMSI benign-script simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+    }
+
+    try {
+      auto phase4Config = config;
+      phase4Config.runtimeDatabasePath = phaseValidationRoot / L"phase4-runtime.db";
+      phase4Config.quarantineRootPath = phaseValidationRoot / L"phase4-quarantine";
+      phase4Config.evidenceRootPath = phaseValidationRoot / L"phase4-evidence";
+      phase4Config.updateRootPath = phaseValidationRoot / L"phase4-updates";
+      phase4Config.scanExcludedPaths.clear();
+
+      std::error_code phase4PathError;
+      std::filesystem::create_directories(phase4Config.runtimeDatabasePath.parent_path(), phase4PathError);
+      std::filesystem::create_directories(phase4Config.quarantineRootPath, phase4PathError);
+      std::filesystem::create_directories(phase4Config.evidenceRootPath, phase4PathError);
+      std::filesystem::create_directories(phase4Config.updateRootPath, phase4PathError);
+
+      if (phase4PathError) {
+        AddCheck(report, L"phase4_patch_policy_roundtrip", L"Phase 4 patch-policy roundtrip", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 4 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, evidence, and update roots are writable before running Phase 4 patch-orchestration checks.");
+        AddCheck(report, L"phase4_windows_patch_state_refresh", L"Phase 4 Windows patch-state refresh",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 4 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, evidence, and update roots are writable before running Phase 4 patch-orchestration checks.");
+        AddCheck(report, L"phase4_software_patch_recipe_coverage", L"Phase 4 software patch recipe coverage",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 4 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, evidence, and update roots are writable before running Phase 4 patch-orchestration checks.");
+        AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 4 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, evidence, and update roots are writable before running Phase 4 patch-orchestration checks.");
+      } else {
+        PatchOrchestrator patchOrchestrator(phase4Config);
+        auto policy = patchOrchestrator.LoadPolicy();
+        policy.autoInstallWindowsSecurity = true;
+        policy.autoInstallWindowsQuality = true;
+        policy.deferFeatureUpdates = true;
+        policy.includeDriverUpdates = false;
+        policy.includeOptionalUpdates = false;
+        policy.autoUpdateHighRiskAppsOnly = true;
+        policy.autoUpdateAllSupportedApps = false;
+        policy.allowNativeUpdaters = true;
+        policy.allowWinget = true;
+        policy.allowRecipes = true;
+        policy.maintenanceWindowStart = L"01:30";
+        policy.maintenanceWindowEnd = L"04:30";
+        policy.rebootGracePeriodMinutes = 180;
+        policy.featureUpdateDeferralDays = 45;
+        patchOrchestrator.SavePolicy(policy);
+
+        const auto persistedPolicy = patchOrchestrator.LoadPolicy();
+        if (persistedPolicy.maintenanceWindowStart == L"01:30" && persistedPolicy.maintenanceWindowEnd == L"04:30" &&
+            persistedPolicy.rebootGracePeriodMinutes == 180 && persistedPolicy.featureUpdateDeferralDays == 45 &&
+            persistedPolicy.allowWinget && persistedPolicy.allowRecipes && persistedPolicy.autoInstallWindowsSecurity) {
+          AddCheck(report, L"phase4_patch_policy_roundtrip", L"Phase 4 patch-policy roundtrip", SelfTestStatus::Pass,
+                   L"Patch policy persisted maintenance windows, reboot grace, provider toggles, and feature deferral settings.");
+        } else {
+          AddCheck(report, L"phase4_patch_policy_roundtrip", L"Phase 4 patch-policy roundtrip", SelfTestStatus::Fail,
+                   L"Patch policy values did not round-trip through the runtime database cleanly.",
+                   L"Validate the patch_policy table mappings so persisted maintenance, reboot, and provider controls remain stable.");
+        }
+
+        const auto refreshSummary = patchOrchestrator.RefreshPatchState();
+        const auto refreshedSnapshot = patchOrchestrator.LoadSnapshot(20, 50, 20, 50);
+        if (!refreshedSnapshot.policy.policyId.empty() && refreshedSnapshot.recipes.size() >= 10 &&
+            refreshedSnapshot.rebootState.gracePeriodMinutes == persistedPolicy.rebootGracePeriodMinutes &&
+            refreshSummary.recipeCount >= 10) {
+          AddCheck(report, L"phase4_windows_patch_state_refresh", L"Phase 4 Windows patch-state refresh",
+                   SelfTestStatus::Pass,
+                   L"Patch orchestrator refreshed policy, reboot coordination, recipe catalog, and local patch inventory without execution errors.");
+        } else {
+          AddCheck(report, L"phase4_windows_patch_state_refresh", L"Phase 4 Windows patch-state refresh",
+                   SelfTestStatus::Fail,
+                   L"Patch orchestrator refresh did not populate the expected local policy, reboot, or recipe state surfaces.",
+                   L"Validate refresh flow so Windows update discovery, reboot tracking, and inventory persistence always publish a usable local snapshot.");
+        }
+
+        RuntimeDatabase phase4Database(phase4Config.runtimeDatabasePath);
+        const auto recipes = phase4Database.ListPackageRecipes(200);
+        const std::vector<std::wstring> requiredRecipeIds = {
+            L"google-chrome", L"microsoft-edge", L"mozilla-firefox", L"adobe-reader", L"7zip",
+            L"java-runtime", L"vlc-media-player", L"notepad-plus-plus", L"microsoft-teams",
+            L"zoom", L"vcpp-redistributable"};
+        auto missingRecipes = std::vector<std::wstring>{};
+        for (const auto& requiredRecipeId : requiredRecipeIds) {
+          const auto match = std::find_if(recipes.begin(), recipes.end(), [&](const auto& recipe) {
+            return recipe.recipeId == requiredRecipeId && recipe.enabled;
+          });
+          if (match == recipes.end()) {
+            missingRecipes.push_back(requiredRecipeId);
+          }
+        }
+
+        if (missingRecipes.empty()) {
+          AddCheck(report, L"phase4_software_patch_recipe_coverage", L"Phase 4 software patch recipe coverage",
+                   SelfTestStatus::Pass,
+                   L"Phase 4 recipe catalog covers the initial high-risk household software baseline including browsers, reader, archive, runtime, conferencing, and media tooling.");
+        } else {
+          AddCheck(report, L"phase4_software_patch_recipe_coverage", L"Phase 4 software patch recipe coverage",
+                   SelfTestStatus::Fail,
+                   L"Patch recipe catalog is missing required baseline coverage entries: " +
+                       std::accumulate(std::next(missingRecipes.begin()), missingRecipes.end(), missingRecipes.front(),
+                                       [](std::wstring left, const std::wstring& right) { return left + L", " + right; }) +
+                       L".",
+                   L"Add or re-enable recipe coverage for the missing high-risk software families before promoting Phase 4.");
+        }
+
+        phase4Database.ReplaceWindowsUpdateRecords({WindowsUpdateRecord{
+            .updateId = L"selftest-kb5039999",
+            .revision = L"1",
+            .title = L"2026-04 Cumulative Update for Windows 11",
+            .kbArticles = L"KB5039999",
+            .categories = L"Security Updates;Update Rollups",
+            .classification = L"security",
+            .severity = L"Critical",
+            .updateType = L"software",
+            .deploymentAction = L"installation",
+            .discoveredAt = CurrentUtcTimestamp(),
+            .lastAttemptAt = CurrentUtcTimestamp(),
+            .status = L"failed",
+            .failureCode = L"0x80240022",
+            .detailJson = L"{\"canRequestUserInput\":false}",
+            .installed = false,
+            .hidden = false,
+            .downloaded = true,
+            .mandatory = true,
+            .browseOnly = false,
+            .rebootRequired = true,
+            .driver = false,
+            .featureUpdate = false,
+            .optional = false}});
+        phase4Database.ReplaceSoftwarePatchRecords({
+            SoftwarePatchRecord{
+                .softwareId = L"chrome-test",
+                .displayName = L"Google Chrome",
+                .displayVersion = L"123.0",
+                .availableVersion = L"124.0",
+                .publisher = L"Google",
+                .installLocation = L"C:\\Program Files\\Google\\Chrome\\Application",
+                .provider = L"native-updater",
+                .providerId = L"C:\\Program Files (x86)\\Google\\Update\\GoogleUpdate.exe",
+                .supportedSource = L"native-updater",
+                .updateState = L"available",
+                .updateSummary = L"Update ready through native updater.",
+                .lastCheckedAt = CurrentUtcTimestamp(),
+                .supported = true,
+                .highRisk = true},
+            SoftwarePatchRecord{
+                .softwareId = L"vpn-test",
+                .displayName = L"Contoso VPN",
+                .displayVersion = L"5.1",
+                .publisher = L"Contoso",
+                .provider = L"manual",
+                .providerId = L"",
+                .supportedSource = L"manual",
+                .updateState = L"manual",
+                .updateSummary = L"Vendor requires manual interaction.",
+                .lastCheckedAt = CurrentUtcTimestamp(),
+                .manualOnly = true,
+                .userInteractionRequired = true},
+            SoftwarePatchRecord{
+                .softwareId = L"legacy-test",
+                .displayName = L"Legacy Archive Tool",
+                .displayVersion = L"2.0",
+                .publisher = L"LegacySoft",
+                .provider = L"manual",
+                .providerId = L"",
+                .supportedSource = L"unsupported",
+                .updateState = L"unsupported",
+                .updateSummary = L"Unsupported package source.",
+                .lastCheckedAt = CurrentUtcTimestamp(),
+                .supported = false}});
+        phase4Database.UpsertPatchHistoryRecord(PatchHistoryRecord{
+            .recordId = L"phase4-history-1",
+            .targetType = L"windows-update",
+            .targetId = L"selftest-kb5039999",
+            .title = L"2026-04 Cumulative Update for Windows 11",
+            .provider = L"windows-update-agent",
+            .action = L"install",
+            .status = L"failed",
+            .startedAt = CurrentUtcTimestamp(),
+            .completedAt = CurrentUtcTimestamp(),
+            .errorCode = L"0x80240022",
+            .detailJson = L"{\"stage\":\"install\"}",
+            .rebootRequired = true});
+        phase4Database.SaveRebootCoordinator(RebootCoordinatorRecord{
+            .rebootRequired = true,
+            .pendingWindowsUpdate = true,
+            .pendingFileRename = false,
+            .pendingComputerRename = false,
+            .pendingComponentServicing = true,
+            .rebootReasons = L"windows_update;component_servicing",
+            .detectedAt = CurrentUtcTimestamp(),
+            .deferredUntil = L"",
+            .gracePeriodMinutes = 180,
+            .status = L"pending"});
+
+        const auto verificationSnapshot = patchOrchestrator.LoadSnapshot(10, 10, 10, 20);
+        const auto hasFailedWindowsUpdate = std::any_of(
+            verificationSnapshot.windowsUpdates.begin(), verificationSnapshot.windowsUpdates.end(),
+            [](const auto& update) { return update.updateId == L"selftest-kb5039999" && update.status == L"failed"; });
+        const auto hasManualSoftware = std::any_of(
+            verificationSnapshot.software.begin(), verificationSnapshot.software.end(),
+            [](const auto& software) { return software.softwareId == L"vpn-test" && software.manualOnly && software.updateState == L"manual"; });
+        const auto hasUnsupportedSoftware = std::any_of(
+            verificationSnapshot.software.begin(), verificationSnapshot.software.end(),
+            [](const auto& software) { return software.softwareId == L"legacy-test" && !software.supported && software.updateState == L"unsupported"; });
+        const auto hasFailedHistory = std::any_of(
+            verificationSnapshot.history.begin(), verificationSnapshot.history.end(),
+            [](const auto& item) { return item.recordId == L"phase4-history-1" && item.status == L"failed"; });
+
+        if (verificationSnapshot.rebootState.rebootRequired && verificationSnapshot.rebootState.pendingWindowsUpdate &&
+            hasFailedWindowsUpdate && hasManualSoftware && hasUnsupportedSoftware && hasFailedHistory) {
+          AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot",
+                   SelfTestStatus::Pass,
+                   L"Patch snapshot preserved failed updates, reboot-required state, manual-only software, unsupported software, and patch history for user-facing reporting.");
+        } else {
+          AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot",
+                   SelfTestStatus::Fail,
+                   L"Patch snapshot did not preserve enough state to explain missing, failed, reboot-pending, manual-only, and unsupported patch conditions.",
+                   L"Validate patch inventory, reboot coordinator, and history views so dashboard and client surfaces can explain patch posture clearly.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase4_patch_policy_roundtrip", L"Phase 4 patch-policy roundtrip", SelfTestStatus::Fail,
+               L"Phase 4 patch policy validation failed: " + Utf8ToWide(error.what()),
+               L"Validate isolated patch orchestrator runtime paths and database mappings before rerunning self-test.");
+      AddCheck(report, L"phase4_windows_patch_state_refresh", L"Phase 4 Windows patch-state refresh",
+               SelfTestStatus::Fail, L"Phase 4 patch refresh validation failed: " + Utf8ToWide(error.what()),
+               L"Validate Windows and software patch discovery flow before rerunning self-test.");
+      AddCheck(report, L"phase4_software_patch_recipe_coverage", L"Phase 4 software patch recipe coverage",
+               SelfTestStatus::Fail, L"Phase 4 patch recipe validation failed: " + Utf8ToWide(error.what()),
+               L"Validate recipe catalog seeding and reload the patch orchestrator before rerunning self-test.");
+      AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot", SelfTestStatus::Fail,
+               L"Phase 4 patch visibility validation failed: " + Utf8ToWide(error.what()),
+               L"Validate patch snapshot persistence and reporting surfaces before rerunning self-test.");
     }
 
     std::error_code cleanupError;

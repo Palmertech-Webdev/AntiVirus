@@ -62,7 +62,24 @@ AmsiEvidenceRecordResult AmsiEvidenceRecorder::RecordInspection(const AmsiConten
          << "\",\n";
   output << "  \"quarantineRecordId\": \"" << EscapeJsonString(outcome.finding.quarantineRecordId) << "\",\n";
   output << "  \"quarantinedPath\": \"" << EscapeJsonString(outcome.finding.quarantinedPath.wstring()) << "\",\n";
-  output << "  \"remediationError\": \"" << EscapeJsonString(outcome.finding.remediationError) << "\"\n";
+  output << "  \"remediationError\": \"" << EscapeJsonString(outcome.finding.remediationError) << "\",\n";
+  output << "  \"reasons\": [\n";
+  for (std::size_t index = 0; index < outcome.finding.verdict.reasons.size(); ++index) {
+    const auto& reason = outcome.finding.verdict.reasons[index];
+    output << "    {\"code\": \"" << EscapeJsonString(reason.code) << "\", \"message\": \""
+           << EscapeJsonString(reason.message) << "\"}";
+    if (index + 1 != outcome.finding.verdict.reasons.size()) {
+      output << ",";
+    }
+    output << "\n";
+  }
+  output << "  ],\n";
+  output << "  \"timeline\": [\n";
+  output << "    {\"phase\": \"amsi-scan\", \"recordedAt\": \"" << EscapeJsonString(CurrentUtcTimestamp())
+         << "\", \"summary\": \"" << EscapeJsonString(VerdictDispositionToString(outcome.finding.verdict.disposition)) << "\"},\n";
+  output << "    {\"phase\": \"amsi-remediation\", \"recordedAt\": \"" << EscapeJsonString(CurrentUtcTimestamp())
+         << "\", \"summary\": \"" << EscapeJsonString(RemediationStatusToString(outcome.finding.remediationStatus)) << "\"}\n";
+  output << "  ]\n";
   output << "}\n";
 
   RuntimeDatabase(databasePath_).UpsertEvidenceRecord(EvidenceIndexRecord{

@@ -31,6 +31,10 @@ struct EndpointClientSnapshot {
   std::vector<ScanHistoryRecord> recentFindings;
   std::vector<QuarantineIndexRecord> quarantineItems;
   std::vector<UpdateJournalRecord> updateJournal;
+  RebootCoordinatorRecord rebootCoordinator;
+  std::vector<WindowsUpdateRecord> windowsUpdates;
+  std::vector<SoftwarePatchRecord> softwarePatches;
+  std::vector<PatchHistoryRecord> patchHistory;
 };
 
 LocalServiceState QueryAgentServiceState();

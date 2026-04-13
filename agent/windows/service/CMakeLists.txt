@@ -75,6 +75,7 @@ add_library(antivirus-agent-core STATIC
   src/HardeningManager.cpp
   src/LocalScanRunner.cpp
   src/LocalStateStore.cpp
+  src/PatchOrchestrator.cpp
   src/ProcessDeltaTracker.cpp
   src/ProcessInventory.cpp
   src/ProcessSnapshotCollector.cpp

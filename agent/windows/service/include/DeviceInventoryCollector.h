@@ -16,10 +16,14 @@ struct InstalledSoftwareInventoryItem {
   std::wstring installDate;
   std::wstring displayIconPath;
   std::vector<std::wstring> executableNames;
+  std::vector<std::wstring> executablePaths;
   bool blocked{false};
   std::wstring updateState{L"unknown"};
   std::wstring lastUpdateCheckAt;
   std::wstring updateSummary;
+  std::wstring supportedPatchSource;
+  bool manualPatchOnly{false};
+  bool patchUnsupported{false};
 };
 
 struct DeviceInventorySnapshot {

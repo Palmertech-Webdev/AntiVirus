@@ -17,7 +17,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
-constexpr int kRuntimeDatabaseSchemaVersion = 2;
+constexpr int kRuntimeDatabaseSchemaVersion = 3;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -131,13 +131,86 @@ void EnsureBaseSchema(sqlite3* db) {
        " software_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, install_location TEXT,"
        " executable_names TEXT NOT NULL, blocked_at TEXT NOT NULL"
        ");"
+       "CREATE TABLE IF NOT EXISTS patch_policy ("
+       " singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+       " policy_id TEXT NOT NULL, auto_install_windows_security INTEGER NOT NULL DEFAULT 1,"
+       " auto_install_windows_quality INTEGER NOT NULL DEFAULT 1,"
+       " defer_feature_updates INTEGER NOT NULL DEFAULT 1,"
+       " include_driver_updates INTEGER NOT NULL DEFAULT 0,"
+       " include_optional_updates INTEGER NOT NULL DEFAULT 0,"
+       " auto_update_high_risk_apps_only INTEGER NOT NULL DEFAULT 1,"
+       " auto_update_all_supported_apps INTEGER NOT NULL DEFAULT 0,"
+       " notify_before_update INTEGER NOT NULL DEFAULT 0,"
+       " silent_only INTEGER NOT NULL DEFAULT 1,"
+       " skip_interactive_updates INTEGER NOT NULL DEFAULT 1,"
+       " paused INTEGER NOT NULL DEFAULT 0,"
+       " respect_metered_connections INTEGER NOT NULL DEFAULT 1,"
+       " battery_aware INTEGER NOT NULL DEFAULT 1,"
+       " allow_native_updaters INTEGER NOT NULL DEFAULT 1,"
+       " allow_winget INTEGER NOT NULL DEFAULT 1,"
+       " allow_recipes INTEGER NOT NULL DEFAULT 1,"
+       " maintenance_window_start TEXT, maintenance_window_end TEXT,"
+       " reboot_grace_period_minutes INTEGER NOT NULL DEFAULT 240,"
+       " feature_update_deferral_days INTEGER NOT NULL DEFAULT 30,"
+       " active_hours_start TEXT, active_hours_end TEXT, updated_at TEXT"
+       ");"
+       "CREATE TABLE IF NOT EXISTS windows_update_inventory ("
+       " update_id TEXT PRIMARY KEY, revision TEXT, title TEXT NOT NULL,"
+       " kb_articles TEXT, categories TEXT, classification TEXT, severity TEXT,"
+       " update_type TEXT, deployment_action TEXT, discovered_at TEXT NOT NULL,"
+       " last_attempt_at TEXT, last_succeeded_at TEXT, status TEXT NOT NULL,"
+       " failure_code TEXT, detail_json TEXT, installed INTEGER NOT NULL DEFAULT 0,"
+       " hidden INTEGER NOT NULL DEFAULT 0, downloaded INTEGER NOT NULL DEFAULT 0,"
+       " mandatory INTEGER NOT NULL DEFAULT 0, browse_only INTEGER NOT NULL DEFAULT 0,"
+       " reboot_required INTEGER NOT NULL DEFAULT 0, driver INTEGER NOT NULL DEFAULT 0,"
+       " feature_update INTEGER NOT NULL DEFAULT 0, optional INTEGER NOT NULL DEFAULT 0"
+       ");"
+       "CREATE TABLE IF NOT EXISTS software_patch_inventory ("
+       " software_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, display_version TEXT,"
+       " available_version TEXT, publisher TEXT, install_location TEXT,"
+       " uninstall_command TEXT, quiet_uninstall_command TEXT,"
+       " executable_names TEXT, executable_paths TEXT, provider TEXT, provider_id TEXT,"
+       " supported_source TEXT, update_state TEXT NOT NULL, update_summary TEXT,"
+       " last_checked_at TEXT, last_attempted_at TEXT, last_updated_at TEXT,"
+       " failure_code TEXT, detail_json TEXT, blocked INTEGER NOT NULL DEFAULT 0,"
+       " supported INTEGER NOT NULL DEFAULT 0, manual_only INTEGER NOT NULL DEFAULT 0,"
+       " user_interaction_required INTEGER NOT NULL DEFAULT 0,"
+       " reboot_required INTEGER NOT NULL DEFAULT 0, high_risk INTEGER NOT NULL DEFAULT 0"
+       ");"
+       "CREATE TABLE IF NOT EXISTS patch_history ("
+       " record_id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,"
+       " title TEXT, provider TEXT, action TEXT NOT NULL, status TEXT NOT NULL,"
+       " started_at TEXT NOT NULL, completed_at TEXT, error_code TEXT, detail_json TEXT,"
+       " reboot_required INTEGER NOT NULL DEFAULT 0"
+       ");"
+       "CREATE TABLE IF NOT EXISTS patch_recipes ("
+       " recipe_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, publisher TEXT,"
+       " match_pattern TEXT, winget_id TEXT, source_url TEXT, installer_sha256 TEXT,"
+       " required_signer TEXT, silent_args TEXT, reboot_behavior TEXT,"
+       " detect_hints_json TEXT, updated_at TEXT, priority INTEGER NOT NULL DEFAULT 300,"
+       " manual_only INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1"
+       ");"
+       "CREATE TABLE IF NOT EXISTS reboot_coordinator ("
+       " singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+       " reboot_required INTEGER NOT NULL DEFAULT 0,"
+       " pending_windows_update INTEGER NOT NULL DEFAULT 0,"
+       " pending_file_rename INTEGER NOT NULL DEFAULT 0,"
+       " pending_computer_rename INTEGER NOT NULL DEFAULT 0,"
+       " pending_component_servicing INTEGER NOT NULL DEFAULT 0,"
+       " reboot_reasons TEXT, detected_at TEXT, deferred_until TEXT,"
+       " grace_period_minutes INTEGER NOT NULL DEFAULT 0, status TEXT"
+       ");"
        "CREATE INDEX IF NOT EXISTS idx_telemetry_queue_queue_id ON telemetry_queue(queue_id);"
        "CREATE INDEX IF NOT EXISTS idx_command_journal_status ON command_journal(status, updated_at);"
        "CREATE INDEX IF NOT EXISTS idx_quarantine_index_status ON quarantine_index(local_status);"
        "CREATE INDEX IF NOT EXISTS idx_evidence_index_source ON evidence_index(source, recorded_at);"
        "CREATE INDEX IF NOT EXISTS idx_scan_history_recorded_at ON scan_history(recorded_at DESC);"
        "CREATE INDEX IF NOT EXISTS idx_update_journal_status ON update_journal(status, started_at DESC);"
-       "CREATE INDEX IF NOT EXISTS idx_blocked_software_name ON blocked_software(display_name);");
+       "CREATE INDEX IF NOT EXISTS idx_blocked_software_name ON blocked_software(display_name);"
+       "CREATE INDEX IF NOT EXISTS idx_windows_update_status ON windows_update_inventory(status, classification);"
+       "CREATE INDEX IF NOT EXISTS idx_software_patch_state ON software_patch_inventory(update_state, provider);"
+       "CREATE INDEX IF NOT EXISTS idx_patch_history_started_at ON patch_history(started_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_patch_recipes_name ON patch_recipes(display_name, priority);");
 }
 
 void RunSchemaMigrations(sqlite3* db) {
@@ -153,6 +226,10 @@ void RunSchemaMigrations(sqlite3* db) {
       ExecIgnoreDuplicateColumn(db, "ALTER TABLE policy_cache ADD COLUMN suppression_path_roots TEXT NOT NULL DEFAULT '';");
       ExecIgnoreDuplicateColumn(db, "ALTER TABLE policy_cache ADD COLUMN suppression_sha256 TEXT NOT NULL DEFAULT '';");
       ExecIgnoreDuplicateColumn(db, "ALTER TABLE policy_cache ADD COLUMN suppression_signer_names TEXT NOT NULL DEFAULT '';");
+    }
+
+    if (currentVersion < 3) {
+      EnsureBaseSchema(db);
     }
 
     SetUserVersion(db, kRuntimeDatabaseSchemaVersion);
@@ -802,6 +879,517 @@ std::vector<BlockedSoftwareRule> RuntimeDatabase::ListBlockedSoftwareRules(const
   }
 
   return records;
+}
+
+void RuntimeDatabase::SavePatchPolicy(const PatchPolicyRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "INSERT INTO patch_policy("
+                           " singleton, policy_id, auto_install_windows_security, auto_install_windows_quality,"
+                           " defer_feature_updates, include_driver_updates, include_optional_updates,"
+                           " auto_update_high_risk_apps_only, auto_update_all_supported_apps,"
+                           " notify_before_update, silent_only, skip_interactive_updates, paused,"
+                           " respect_metered_connections, battery_aware, allow_native_updaters,"
+                           " allow_winget, allow_recipes, maintenance_window_start, maintenance_window_end,"
+                           " reboot_grace_period_minutes, feature_update_deferral_days,"
+                           " active_hours_start, active_hours_end, updated_at)"
+                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           " ON CONFLICT(singleton) DO UPDATE SET"
+                           " policy_id=excluded.policy_id,"
+                           " auto_install_windows_security=excluded.auto_install_windows_security,"
+                           " auto_install_windows_quality=excluded.auto_install_windows_quality,"
+                           " defer_feature_updates=excluded.defer_feature_updates,"
+                           " include_driver_updates=excluded.include_driver_updates,"
+                           " include_optional_updates=excluded.include_optional_updates,"
+                           " auto_update_high_risk_apps_only=excluded.auto_update_high_risk_apps_only,"
+                           " auto_update_all_supported_apps=excluded.auto_update_all_supported_apps,"
+                           " notify_before_update=excluded.notify_before_update,"
+                           " silent_only=excluded.silent_only,"
+                           " skip_interactive_updates=excluded.skip_interactive_updates,"
+                           " paused=excluded.paused,"
+                           " respect_metered_connections=excluded.respect_metered_connections,"
+                           " battery_aware=excluded.battery_aware,"
+                           " allow_native_updaters=excluded.allow_native_updaters,"
+                           " allow_winget=excluded.allow_winget,"
+                           " allow_recipes=excluded.allow_recipes,"
+                           " maintenance_window_start=excluded.maintenance_window_start,"
+                           " maintenance_window_end=excluded.maintenance_window_end,"
+                           " reboot_grace_period_minutes=excluded.reboot_grace_period_minutes,"
+                           " feature_update_deferral_days=excluded.feature_update_deferral_days,"
+                           " active_hours_start=excluded.active_hours_start,"
+                           " active_hours_end=excluded.active_hours_end,"
+                           " updated_at=excluded.updated_at;");
+  sqlite3_bind_int(statement.get(), 1, kSingletonKey);
+  BindText(statement.get(), 2, record.policyId);
+  sqlite3_bind_int(statement.get(), 3, record.autoInstallWindowsSecurity ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 4, record.autoInstallWindowsQuality ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 5, record.deferFeatureUpdates ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 6, record.includeDriverUpdates ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 7, record.includeOptionalUpdates ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 8, record.autoUpdateHighRiskAppsOnly ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 9, record.autoUpdateAllSupportedApps ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 10, record.notifyBeforeUpdate ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 11, record.silentOnly ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 12, record.skipInteractiveUpdates ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 13, record.paused ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 14, record.respectMeteredConnections ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 15, record.batteryAware ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 16, record.allowNativeUpdaters ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 17, record.allowWinget ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 18, record.allowRecipes ? 1 : 0);
+  BindText(statement.get(), 19, record.maintenanceWindowStart);
+  BindText(statement.get(), 20, record.maintenanceWindowEnd);
+  sqlite3_bind_int(statement.get(), 21, record.rebootGracePeriodMinutes);
+  sqlite3_bind_int(statement.get(), 22, record.featureUpdateDeferralDays);
+  BindText(statement.get(), 23, record.activeHoursStart);
+  BindText(statement.get(), 24, record.activeHoursEnd);
+  BindText(statement.get(), 25, record.updatedAt);
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::LoadPatchPolicy(PatchPolicyRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT policy_id, auto_install_windows_security, auto_install_windows_quality,"
+                           " defer_feature_updates, include_driver_updates, include_optional_updates,"
+                           " auto_update_high_risk_apps_only, auto_update_all_supported_apps,"
+                           " notify_before_update, silent_only, skip_interactive_updates, paused,"
+                           " respect_metered_connections, battery_aware, allow_native_updaters,"
+                           " allow_winget, allow_recipes, maintenance_window_start, maintenance_window_end,"
+                           " reboot_grace_period_minutes, feature_update_deferral_days,"
+                           " active_hours_start, active_hours_end, updated_at"
+                           " FROM patch_policy WHERE singleton=1;");
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading patch policy failed");
+  }
+
+  record.policyId = ColumnText(statement.get(), 0);
+  record.autoInstallWindowsSecurity = sqlite3_column_int(statement.get(), 1) != 0;
+  record.autoInstallWindowsQuality = sqlite3_column_int(statement.get(), 2) != 0;
+  record.deferFeatureUpdates = sqlite3_column_int(statement.get(), 3) != 0;
+  record.includeDriverUpdates = sqlite3_column_int(statement.get(), 4) != 0;
+  record.includeOptionalUpdates = sqlite3_column_int(statement.get(), 5) != 0;
+  record.autoUpdateHighRiskAppsOnly = sqlite3_column_int(statement.get(), 6) != 0;
+  record.autoUpdateAllSupportedApps = sqlite3_column_int(statement.get(), 7) != 0;
+  record.notifyBeforeUpdate = sqlite3_column_int(statement.get(), 8) != 0;
+  record.silentOnly = sqlite3_column_int(statement.get(), 9) != 0;
+  record.skipInteractiveUpdates = sqlite3_column_int(statement.get(), 10) != 0;
+  record.paused = sqlite3_column_int(statement.get(), 11) != 0;
+  record.respectMeteredConnections = sqlite3_column_int(statement.get(), 12) != 0;
+  record.batteryAware = sqlite3_column_int(statement.get(), 13) != 0;
+  record.allowNativeUpdaters = sqlite3_column_int(statement.get(), 14) != 0;
+  record.allowWinget = sqlite3_column_int(statement.get(), 15) != 0;
+  record.allowRecipes = sqlite3_column_int(statement.get(), 16) != 0;
+  record.maintenanceWindowStart = ColumnText(statement.get(), 17);
+  record.maintenanceWindowEnd = ColumnText(statement.get(), 18);
+  record.rebootGracePeriodMinutes = sqlite3_column_int(statement.get(), 19);
+  record.featureUpdateDeferralDays = sqlite3_column_int(statement.get(), 20);
+  record.activeHoursStart = ColumnText(statement.get(), 21);
+  record.activeHoursEnd = ColumnText(statement.get(), 22);
+  record.updatedAt = ColumnText(statement.get(), 23);
+  return true;
+}
+
+void RuntimeDatabase::ReplaceWindowsUpdateRecords(const std::vector<WindowsUpdateRecord>& records) const {
+  const auto db = OpenConnection(databasePath_);
+  try {
+    Begin(db.get());
+    Exec(db.get(), "DELETE FROM windows_update_inventory;");
+    auto statement = Prepare(db.get(),
+                             "INSERT INTO windows_update_inventory("
+                             " update_id, revision, title, kb_articles, categories, classification, severity,"
+                             " update_type, deployment_action, discovered_at, last_attempt_at, last_succeeded_at,"
+                             " status, failure_code, detail_json, installed, hidden, downloaded, mandatory,"
+                             " browse_only, reboot_required, driver, feature_update, optional)"
+                             " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+    for (const auto& record : records) {
+      sqlite3_reset(statement.get());
+      sqlite3_clear_bindings(statement.get());
+      BindText(statement.get(), 1, record.updateId);
+      BindText(statement.get(), 2, record.revision);
+      BindText(statement.get(), 3, record.title);
+      BindText(statement.get(), 4, record.kbArticles);
+      BindText(statement.get(), 5, record.categories);
+      BindText(statement.get(), 6, record.classification);
+      BindText(statement.get(), 7, record.severity);
+      BindText(statement.get(), 8, record.updateType);
+      BindText(statement.get(), 9, record.deploymentAction);
+      BindText(statement.get(), 10, record.discoveredAt);
+      BindText(statement.get(), 11, record.lastAttemptAt);
+      BindText(statement.get(), 12, record.lastSucceededAt);
+      BindText(statement.get(), 13, record.status);
+      BindText(statement.get(), 14, record.failureCode);
+      BindText(statement.get(), 15, record.detailJson);
+      sqlite3_bind_int(statement.get(), 16, record.installed ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 17, record.hidden ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 18, record.downloaded ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 19, record.mandatory ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 20, record.browseOnly ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 21, record.rebootRequired ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 22, record.driver ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 23, record.featureUpdate ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 24, record.optional ? 1 : 0);
+      StepDone(db.get(), statement.get());
+    }
+    Commit(db.get());
+  } catch (...) {
+    Rollback(db.get());
+    throw;
+  }
+}
+
+std::vector<WindowsUpdateRecord> RuntimeDatabase::ListWindowsUpdateRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT update_id, revision, title, kb_articles, categories, classification, severity,"
+                           " update_type, deployment_action, discovered_at, last_attempt_at, last_succeeded_at,"
+                           " status, failure_code, detail_json, installed, hidden, downloaded, mandatory,"
+                           " browse_only, reboot_required, driver, feature_update, optional"
+                           " FROM windows_update_inventory"
+                           " ORDER BY discovered_at DESC, title ASC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+  std::vector<WindowsUpdateRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing windows update inventory failed");
+    }
+
+    records.push_back(WindowsUpdateRecord{
+        .updateId = ColumnText(statement.get(), 0),
+        .revision = ColumnText(statement.get(), 1),
+        .title = ColumnText(statement.get(), 2),
+        .kbArticles = ColumnText(statement.get(), 3),
+        .categories = ColumnText(statement.get(), 4),
+        .classification = ColumnText(statement.get(), 5),
+        .severity = ColumnText(statement.get(), 6),
+        .updateType = ColumnText(statement.get(), 7),
+        .deploymentAction = ColumnText(statement.get(), 8),
+        .discoveredAt = ColumnText(statement.get(), 9),
+        .lastAttemptAt = ColumnText(statement.get(), 10),
+        .lastSucceededAt = ColumnText(statement.get(), 11),
+        .status = ColumnText(statement.get(), 12),
+        .failureCode = ColumnText(statement.get(), 13),
+        .detailJson = ColumnText(statement.get(), 14),
+        .installed = sqlite3_column_int(statement.get(), 15) != 0,
+        .hidden = sqlite3_column_int(statement.get(), 16) != 0,
+        .downloaded = sqlite3_column_int(statement.get(), 17) != 0,
+        .mandatory = sqlite3_column_int(statement.get(), 18) != 0,
+        .browseOnly = sqlite3_column_int(statement.get(), 19) != 0,
+        .rebootRequired = sqlite3_column_int(statement.get(), 20) != 0,
+        .driver = sqlite3_column_int(statement.get(), 21) != 0,
+        .featureUpdate = sqlite3_column_int(statement.get(), 22) != 0,
+        .optional = sqlite3_column_int(statement.get(), 23) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::ReplaceSoftwarePatchRecords(const std::vector<SoftwarePatchRecord>& records) const {
+  const auto db = OpenConnection(databasePath_);
+  try {
+    Begin(db.get());
+    Exec(db.get(), "DELETE FROM software_patch_inventory;");
+    auto statement = Prepare(db.get(),
+                             "INSERT INTO software_patch_inventory("
+                             " software_id, display_name, display_version, available_version, publisher,"
+                             " install_location, uninstall_command, quiet_uninstall_command, executable_names,"
+                             " executable_paths, provider, provider_id, supported_source, update_state,"
+                             " update_summary, last_checked_at, last_attempted_at, last_updated_at, failure_code,"
+                             " detail_json, blocked, supported, manual_only, user_interaction_required,"
+                             " reboot_required, high_risk)"
+                             " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+    for (const auto& record : records) {
+      sqlite3_reset(statement.get());
+      sqlite3_clear_bindings(statement.get());
+      BindText(statement.get(), 1, record.softwareId);
+      BindText(statement.get(), 2, record.displayName);
+      BindText(statement.get(), 3, record.displayVersion);
+      BindText(statement.get(), 4, record.availableVersion);
+      BindText(statement.get(), 5, record.publisher);
+      BindText(statement.get(), 6, record.installLocation);
+      BindText(statement.get(), 7, record.uninstallCommand);
+      BindText(statement.get(), 8, record.quietUninstallCommand);
+      BindText(statement.get(), 9, record.executableNames);
+      BindText(statement.get(), 10, record.executablePaths);
+      BindText(statement.get(), 11, record.provider);
+      BindText(statement.get(), 12, record.providerId);
+      BindText(statement.get(), 13, record.supportedSource);
+      BindText(statement.get(), 14, record.updateState);
+      BindText(statement.get(), 15, record.updateSummary);
+      BindText(statement.get(), 16, record.lastCheckedAt);
+      BindText(statement.get(), 17, record.lastAttemptedAt);
+      BindText(statement.get(), 18, record.lastUpdatedAt);
+      BindText(statement.get(), 19, record.failureCode);
+      BindText(statement.get(), 20, record.detailJson);
+      sqlite3_bind_int(statement.get(), 21, record.blocked ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 22, record.supported ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 23, record.manualOnly ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 24, record.userInteractionRequired ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 25, record.rebootRequired ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 26, record.highRisk ? 1 : 0);
+      StepDone(db.get(), statement.get());
+    }
+    Commit(db.get());
+  } catch (...) {
+    Rollback(db.get());
+    throw;
+  }
+}
+
+std::vector<SoftwarePatchRecord> RuntimeDatabase::ListSoftwarePatchRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT software_id, display_name, display_version, available_version, publisher,"
+                           " install_location, uninstall_command, quiet_uninstall_command, executable_names,"
+                           " executable_paths, provider, provider_id, supported_source, update_state,"
+                           " update_summary, last_checked_at, last_attempted_at, last_updated_at, failure_code,"
+                           " detail_json, blocked, supported, manual_only, user_interaction_required,"
+                           " reboot_required, high_risk FROM software_patch_inventory"
+                           " ORDER BY high_risk DESC, display_name ASC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+  std::vector<SoftwarePatchRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing software patch inventory failed");
+    }
+
+    records.push_back(SoftwarePatchRecord{
+        .softwareId = ColumnText(statement.get(), 0),
+        .displayName = ColumnText(statement.get(), 1),
+        .displayVersion = ColumnText(statement.get(), 2),
+        .availableVersion = ColumnText(statement.get(), 3),
+        .publisher = ColumnText(statement.get(), 4),
+        .installLocation = ColumnText(statement.get(), 5),
+        .uninstallCommand = ColumnText(statement.get(), 6),
+        .quietUninstallCommand = ColumnText(statement.get(), 7),
+        .executableNames = ColumnText(statement.get(), 8),
+        .executablePaths = ColumnText(statement.get(), 9),
+        .provider = ColumnText(statement.get(), 10),
+        .providerId = ColumnText(statement.get(), 11),
+        .supportedSource = ColumnText(statement.get(), 12),
+        .updateState = ColumnText(statement.get(), 13),
+        .updateSummary = ColumnText(statement.get(), 14),
+        .lastCheckedAt = ColumnText(statement.get(), 15),
+        .lastAttemptedAt = ColumnText(statement.get(), 16),
+        .lastUpdatedAt = ColumnText(statement.get(), 17),
+        .failureCode = ColumnText(statement.get(), 18),
+        .detailJson = ColumnText(statement.get(), 19),
+        .blocked = sqlite3_column_int(statement.get(), 20) != 0,
+        .supported = sqlite3_column_int(statement.get(), 21) != 0,
+        .manualOnly = sqlite3_column_int(statement.get(), 22) != 0,
+        .userInteractionRequired = sqlite3_column_int(statement.get(), 23) != 0,
+        .rebootRequired = sqlite3_column_int(statement.get(), 24) != 0,
+        .highRisk = sqlite3_column_int(statement.get(), 25) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::UpsertPatchHistoryRecord(const PatchHistoryRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "INSERT INTO patch_history("
+                           " record_id, target_type, target_id, title, provider, action, status,"
+                           " started_at, completed_at, error_code, detail_json, reboot_required)"
+                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           " ON CONFLICT(record_id) DO UPDATE SET"
+                           " target_type=excluded.target_type, target_id=excluded.target_id,"
+                           " title=excluded.title, provider=excluded.provider, action=excluded.action,"
+                           " status=excluded.status, started_at=excluded.started_at,"
+                           " completed_at=excluded.completed_at, error_code=excluded.error_code,"
+                           " detail_json=excluded.detail_json, reboot_required=excluded.reboot_required;");
+  BindText(statement.get(), 1, record.recordId);
+  BindText(statement.get(), 2, record.targetType);
+  BindText(statement.get(), 3, record.targetId);
+  BindText(statement.get(), 4, record.title);
+  BindText(statement.get(), 5, record.provider);
+  BindText(statement.get(), 6, record.action);
+  BindText(statement.get(), 7, record.status);
+  BindText(statement.get(), 8, record.startedAt);
+  BindText(statement.get(), 9, record.completedAt);
+  BindText(statement.get(), 10, record.errorCode);
+  BindText(statement.get(), 11, record.detailJson);
+  sqlite3_bind_int(statement.get(), 12, record.rebootRequired ? 1 : 0);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<PatchHistoryRecord> RuntimeDatabase::ListPatchHistoryRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT record_id, target_type, target_id, title, provider, action, status,"
+                           " started_at, completed_at, error_code, detail_json, reboot_required"
+                           " FROM patch_history ORDER BY started_at DESC, record_id DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+  std::vector<PatchHistoryRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing patch history failed");
+    }
+
+    records.push_back(PatchHistoryRecord{
+        .recordId = ColumnText(statement.get(), 0),
+        .targetType = ColumnText(statement.get(), 1),
+        .targetId = ColumnText(statement.get(), 2),
+        .title = ColumnText(statement.get(), 3),
+        .provider = ColumnText(statement.get(), 4),
+        .action = ColumnText(statement.get(), 5),
+        .status = ColumnText(statement.get(), 6),
+        .startedAt = ColumnText(statement.get(), 7),
+        .completedAt = ColumnText(statement.get(), 8),
+        .errorCode = ColumnText(statement.get(), 9),
+        .detailJson = ColumnText(statement.get(), 10),
+        .rebootRequired = sqlite3_column_int(statement.get(), 11) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::ReplacePackageRecipes(const std::vector<PackageRecipeRecord>& records) const {
+  const auto db = OpenConnection(databasePath_);
+  try {
+    Begin(db.get());
+    Exec(db.get(), "DELETE FROM patch_recipes;");
+    auto statement = Prepare(db.get(),
+                             "INSERT INTO patch_recipes("
+                             " recipe_id, display_name, publisher, match_pattern, winget_id, source_url,"
+                             " installer_sha256, required_signer, silent_args, reboot_behavior, detect_hints_json,"
+                             " updated_at, priority, manual_only, enabled)"
+                             " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+    for (const auto& record : records) {
+      sqlite3_reset(statement.get());
+      sqlite3_clear_bindings(statement.get());
+      BindText(statement.get(), 1, record.recipeId);
+      BindText(statement.get(), 2, record.displayName);
+      BindText(statement.get(), 3, record.publisher);
+      BindText(statement.get(), 4, record.matchPattern);
+      BindText(statement.get(), 5, record.wingetId);
+      BindText(statement.get(), 6, record.sourceUrl);
+      BindText(statement.get(), 7, record.installerSha256);
+      BindText(statement.get(), 8, record.requiredSigner);
+      BindText(statement.get(), 9, record.silentArgs);
+      BindText(statement.get(), 10, record.rebootBehavior);
+      BindText(statement.get(), 11, record.detectHintsJson);
+      BindText(statement.get(), 12, record.updatedAt);
+      sqlite3_bind_int(statement.get(), 13, record.priority);
+      sqlite3_bind_int(statement.get(), 14, record.manualOnly ? 1 : 0);
+      sqlite3_bind_int(statement.get(), 15, record.enabled ? 1 : 0);
+      StepDone(db.get(), statement.get());
+    }
+    Commit(db.get());
+  } catch (...) {
+    Rollback(db.get());
+    throw;
+  }
+}
+
+std::vector<PackageRecipeRecord> RuntimeDatabase::ListPackageRecipes(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT recipe_id, display_name, publisher, match_pattern, winget_id, source_url,"
+                           " installer_sha256, required_signer, silent_args, reboot_behavior, detect_hints_json,"
+                           " updated_at, priority, manual_only, enabled FROM patch_recipes"
+                           " ORDER BY priority ASC, display_name ASC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+  std::vector<PackageRecipeRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing patch recipes failed");
+    }
+
+    records.push_back(PackageRecipeRecord{
+        .recipeId = ColumnText(statement.get(), 0),
+        .displayName = ColumnText(statement.get(), 1),
+        .publisher = ColumnText(statement.get(), 2),
+        .matchPattern = ColumnText(statement.get(), 3),
+        .wingetId = ColumnText(statement.get(), 4),
+        .sourceUrl = ColumnText(statement.get(), 5),
+        .installerSha256 = ColumnText(statement.get(), 6),
+        .requiredSigner = ColumnText(statement.get(), 7),
+        .silentArgs = ColumnText(statement.get(), 8),
+        .rebootBehavior = ColumnText(statement.get(), 9),
+        .detectHintsJson = ColumnText(statement.get(), 10),
+        .updatedAt = ColumnText(statement.get(), 11),
+        .priority = sqlite3_column_int(statement.get(), 12),
+        .manualOnly = sqlite3_column_int(statement.get(), 13) != 0,
+        .enabled = sqlite3_column_int(statement.get(), 14) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::SaveRebootCoordinator(const RebootCoordinatorRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "INSERT INTO reboot_coordinator("
+                           " singleton, reboot_required, pending_windows_update, pending_file_rename,"
+                           " pending_computer_rename, pending_component_servicing, reboot_reasons, detected_at,"
+                           " deferred_until, grace_period_minutes, status)"
+                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           " ON CONFLICT(singleton) DO UPDATE SET"
+                           " reboot_required=excluded.reboot_required,"
+                           " pending_windows_update=excluded.pending_windows_update,"
+                           " pending_file_rename=excluded.pending_file_rename,"
+                           " pending_computer_rename=excluded.pending_computer_rename,"
+                           " pending_component_servicing=excluded.pending_component_servicing,"
+                           " reboot_reasons=excluded.reboot_reasons, detected_at=excluded.detected_at,"
+                           " deferred_until=excluded.deferred_until,"
+                           " grace_period_minutes=excluded.grace_period_minutes, status=excluded.status;");
+  sqlite3_bind_int(statement.get(), 1, kSingletonKey);
+  sqlite3_bind_int(statement.get(), 2, record.rebootRequired ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 3, record.pendingWindowsUpdate ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 4, record.pendingFileRename ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 5, record.pendingComputerRename ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 6, record.pendingComponentServicing ? 1 : 0);
+  BindText(statement.get(), 7, record.rebootReasons);
+  BindText(statement.get(), 8, record.detectedAt);
+  BindText(statement.get(), 9, record.deferredUntil);
+  sqlite3_bind_int(statement.get(), 10, record.gracePeriodMinutes);
+  BindText(statement.get(), 11, record.status);
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::LoadRebootCoordinator(RebootCoordinatorRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT reboot_required, pending_windows_update, pending_file_rename,"
+                           " pending_computer_rename, pending_component_servicing, reboot_reasons,"
+                           " detected_at, deferred_until, grace_period_minutes, status"
+                           " FROM reboot_coordinator WHERE singleton=1;");
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading reboot coordinator failed");
+  }
+
+  record.rebootRequired = sqlite3_column_int(statement.get(), 0) != 0;
+  record.pendingWindowsUpdate = sqlite3_column_int(statement.get(), 1) != 0;
+  record.pendingFileRename = sqlite3_column_int(statement.get(), 2) != 0;
+  record.pendingComputerRename = sqlite3_column_int(statement.get(), 3) != 0;
+  record.pendingComponentServicing = sqlite3_column_int(statement.get(), 4) != 0;
+  record.rebootReasons = ColumnText(statement.get(), 5);
+  record.detectedAt = ColumnText(statement.get(), 6);
+  record.deferredUntil = ColumnText(statement.get(), 7);
+  record.gracePeriodMinutes = sqlite3_column_int(statement.get(), 8);
+  record.status = ColumnText(statement.get(), 9);
+  return true;
 }
 
 }  // namespace antivirus::agent

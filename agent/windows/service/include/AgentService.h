@@ -16,6 +16,7 @@
 #include "FileDeltaTracker.h"
 #include "HardeningManager.h"
 #include "LocalStateStore.h"
+#include "PatchOrchestrator.h"
 #include "PolicySnapshot.h"
 #include "ProcessDeltaTracker.h"
 #include "RemediationEngine.h"
@@ -69,6 +70,7 @@ class AgentService {
   std::wstring ExecuteQuarantineMutation(const RemoteCommand& command, bool restore);
   std::wstring ExecuteUpdateCommand(const RemoteCommand& command, bool rollback);
   std::wstring ExecuteRepairCommand(const RemoteCommand& command);
+  std::wstring ExecutePatchCommand(const RemoteCommand& command, bool installWindows, bool installSoftware, bool runCycle);
   std::wstring ExecuteProcessTerminationCommand(const RemoteCommand& command, bool includeChildren);
   std::wstring ExecutePersistenceCleanupCommand(const RemoteCommand& command);
   std::wstring ExecutePathRemediationCommand(const RemoteCommand& command);
@@ -81,6 +83,7 @@ class AgentService {
   void PrintStatus() const;
   void QueueEndpointStatusTelemetry();
   void QueueDeviceInventoryTelemetry(int cycle);
+  void QueuePatchTelemetry(int cycle);
   void DrainProcessTelemetry();
   void DrainRealtimeProtectionTelemetry();
   void DrainNetworkTelemetry();

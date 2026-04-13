@@ -11,14 +11,20 @@ namespace antivirus::agent {
 
 struct RemediationOutcome {
   bool success{false};
+  bool verificationSucceeded{false};
   int processesTerminated{0};
   int registryValuesRemoved{0};
   int startupArtifactsRemoved{0};
+  int scheduledTasksRemoved{0};
+  int servicesRemoved{0};
+  int wmiObjectsRemoved{0};
+  int siblingArtifactsRemoved{0};
   bool quarantineApplied{false};
   std::wstring quarantineRecordId;
   std::wstring evidenceRecordId;
   std::wstring errorMessage;
   std::vector<std::wstring> removedArtifacts;
+  std::vector<std::wstring> verificationDetails;
 };
 
 class RemediationEngine {

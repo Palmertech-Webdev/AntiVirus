@@ -86,3 +86,45 @@ benign destructive-churn scenarios:
 ```
 
 That corpus is designed for Phase 2 behavior validation and tuning rather than file-signature detection.
+
+## Phase 3 Exit-Criteria Harness
+
+Use `RunPhase3ExitCriteria.ps1` to evaluate the Phase 3 AMSI and script-scoring exit criteria from the service
+self-test and the synthetic adversarial AMSI corpus without treating unrelated hardening posture warnings as a Phase 3 failure.
+
+Current required checks:
+
+- AMSI blocks staged script content with layered delivery, suspicious destination, and memory-loader or LOLBin reasoning
+- AMSI avoids blocking benign administrative script content
+- AMSI blocks the malicious Phase 3 adversarial corpus
+- AMSI allows the benign Phase 3 adversarial corpus
+
+Example:
+
+```powershell
+.\GeneratePhase3AdversarialCorpus.ps1 -WorkspaceRoot ..\..\..\..
+.\RunPhase3ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+The script writes a JSON report to `tmp-phase3-exitcriteria/phase3-exitcriteria-report.json`.
+The corpus generator writes repeatable test content and a manifest to `tmp-phase3-corpora/`.
+
+## Phase 4 Exit-Criteria Harness
+
+Use `RunPhase4ExitCriteria.ps1` to evaluate the Phase 4 patch-orchestration exit criteria from the service self-test
+without treating unrelated signing, hardening, or protected-service posture warnings as a Phase 4 failure.
+
+Current required checks:
+
+- patch policy persists maintenance windows, reboot grace periods, and provider toggles cleanly
+- patch refresh populates local policy, reboot coordination, and patch state inventory surfaces
+- recipe catalog covers the initial high-risk software baseline for the free edition
+- patch snapshot preserves failed, reboot-pending, manual-only, and unsupported states for user-facing reporting
+
+Example:
+
+```powershell
+.\RunPhase4ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+The script writes a JSON report to `tmp-phase4-exitcriteria/phase4-exitcriteria-report.json`.

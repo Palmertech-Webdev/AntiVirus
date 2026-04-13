@@ -1586,6 +1586,22 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecuteSoftwareCommand(command, false, true);
   }
 
+  if (command.type == L"patch.scan") {
+    return ExecutePatchCommand(command, false, false, false);
+  }
+
+  if (command.type == L"patch.windows.install") {
+    return ExecutePatchCommand(command, true, false, false);
+  }
+
+  if (command.type == L"patch.software.install") {
+    return ExecutePatchCommand(command, false, true, false);
+  }
+
+  if (command.type == L"patch.cycle.run") {
+    return ExecutePatchCommand(command, true, true, true);
+  }
+
   if (command.type == L"software.block") {
     return ExecuteSoftwareBlockCommand(command);
   }
@@ -1733,6 +1749,55 @@ std::wstring AgentService::ExecuteUpdateCommand(const RemoteCommand& command, co
   return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"transactionId\":\"" + result.transactionId +
          L"\",\"packageId\":\"" + result.packageId + L"\",\"status\":\"" + result.status + L"\",\"restartRequired\":" +
          (result.restartRequired ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
+}
+
+std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, const bool installWindows,
+                                               const bool installSoftware, const bool runCycle) {
+  PatchOrchestrator orchestrator(config_);
+  PatchExecutionResult result{};
+
+  if (runCycle) {
+    result = orchestrator.RunPatchCycle();
+  } else if (installWindows) {
+    const auto securityOnly = ExtractPayloadUInt32(command.payloadJson, "securityOnly").value_or(1) != 0;
+    result = orchestrator.InstallWindowsUpdates(securityOnly);
+  } else if (installSoftware) {
+    const auto softwareId = ExtractPayloadString(command.payloadJson, "softwareId").value_or(L"");
+    if (softwareId.empty()) {
+      throw std::runtime_error("patch.software.install command is missing softwareId");
+    }
+    result = orchestrator.UpdateSoftware(softwareId, false);
+  } else {
+    const auto summary = orchestrator.RefreshPatchState();
+    QueueTelemetryEvent(L"patch.scan.completed", L"patch-orchestrator",
+                        L"Fenrir refreshed Windows and third-party patch inventory.",
+                        std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"windowsUpdateCount\":" +
+                            std::to_wstring(summary.windowsUpdateCount) + L",\"softwareCount\":" +
+                            std::to_wstring(summary.softwareCount) + L",\"recipeCount\":" +
+                            std::to_wstring(summary.recipeCount) + L",\"rebootPending\":" +
+                            (summary.rebootPending ? std::wstring(L"true") : std::wstring(L"false")) + L"}");
+    return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"windowsUpdateCount\":" +
+           std::to_wstring(summary.windowsUpdateCount) + L",\"softwareCount\":" +
+           std::to_wstring(summary.softwareCount) + L",\"recipeCount\":" + std::to_wstring(summary.recipeCount) +
+           L",\"rebootPending\":" + (summary.rebootPending ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
+  }
+
+  const auto eventType = runCycle ? L"patch.cycle.completed"
+                                  : (installWindows ? L"patch.windows.install.completed" : L"patch.software.install.completed");
+  const auto summary = result.success ? L"Fenrir completed a patch orchestration action."
+                                      : L"Fenrir attempted a patch orchestration action but it did not fully succeed.";
+  QueueTelemetryEvent(result.success ? eventType : eventType + std::wstring(L".failed"), L"patch-orchestrator", summary,
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"action\":\"" + result.action +
+                          L"\",\"targetId\":\"" + result.targetId + L"\",\"provider\":\"" + result.provider +
+                          L"\",\"status\":\"" + result.status + L"\",\"rebootRequired\":" +
+                          (result.rebootRequired ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"errorCode\":\"" + result.errorCode + L"\",\"detailJson\":" + result.detailJson + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"action\":\"" + result.action +
+         L"\",\"targetId\":\"" + result.targetId + L"\",\"provider\":\"" + result.provider + L"\",\"status\":\"" +
+         result.status + L"\",\"rebootRequired\":" +
+         (result.rebootRequired ? std::wstring(L"true") : std::wstring(L"false")) + L",\"errorCode\":\"" +
+         result.errorCode + L"\",\"detailJson\":" + result.detailJson + L"}";
 }
 
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {
@@ -1887,6 +1952,30 @@ std::wstring AgentService::ExecuteSoftwareCommand(const RemoteCommand& command, 
   const auto quietUninstallCommand = ExtractPayloadString(command.payloadJson, "quietUninstallCommand").value_or(L"");
   const auto commandLineOverride = ExtractPayloadString(command.payloadJson, "commandLine").value_or(L"");
   const auto workingDirectory = ExtractPayloadString(command.payloadJson, "workingDirectory").value_or(installLocation);
+
+  if (!uninstall && !softwareId.empty()) {
+    PatchOrchestrator orchestrator(config_);
+    const auto patchResult = orchestrator.UpdateSoftware(softwareId, searchOnly);
+    const auto summary = searchOnly
+                             ? (patchResult.status == L"available"
+                                    ? L"Fenrir checked software update availability through the patch orchestrator and found an update."
+                                    : L"Fenrir checked software update availability through the patch orchestrator.")
+                             : (patchResult.success ? L"Fenrir completed a software update through the patch orchestrator."
+                                                    : L"Fenrir attempted a software update through the patch orchestrator.");
+
+    QueueTelemetryEvent(searchOnly ? L"software.update.search.completed"
+                                   : (patchResult.success ? L"software.updated" : L"software.update.failed"),
+                        L"patch-orchestrator", summary,
+                        std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+                            L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) +
+                            L"\",\"provider\":\"" + patchResult.provider + L"\",\"status\":\"" + patchResult.status +
+                            L"\",\"detailJson\":" + patchResult.detailJson + L"}");
+
+    return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"softwareId\":\"" + softwareId +
+           L"\",\"displayName\":\"" + Utf8ToWide(EscapeJsonString(displayName)) + L"\",\"provider\":\"" +
+           patchResult.provider + L"\",\"status\":\"" + patchResult.status + L"\",\"detailJson\":" +
+           patchResult.detailJson + L"}";
+  }
 
   if (searchOnly) {
     const auto searchCommand = std::wstring(L"cmd.exe /c winget upgrade --name \"") + displayName +
@@ -2148,6 +2237,7 @@ void AgentService::QueueDeviceInventoryTelemetry(const int cycle) {
   RuntimeDatabase database(config_.runtimeDatabasePath);
   auto snapshot = CollectDeviceInventorySnapshot();
   const auto blockedRules = database.ListBlockedSoftwareRules();
+  const auto patchInventory = database.ListSoftwarePatchRecords(500);
 
   for (auto& software : snapshot.installedSoftware) {
     const auto blockedRule =
@@ -2161,11 +2251,41 @@ void AgentService::QueueDeviceInventoryTelemetry(const int cycle) {
         software.updateSummary = L"Execution is blocked on this endpoint.";
       }
     }
+
+    const auto patchRecord = std::find_if(patchInventory.begin(), patchInventory.end(),
+                                          [&](const SoftwarePatchRecord& record) { return record.softwareId == software.softwareId; });
+    if (patchRecord != patchInventory.end()) {
+      software.updateState = patchRecord->updateState;
+      software.lastUpdateCheckAt = patchRecord->lastCheckedAt;
+      software.updateSummary = patchRecord->updateSummary;
+      software.supportedPatchSource = patchRecord->supportedSource;
+      software.manualPatchOnly = patchRecord->manualOnly;
+      software.patchUnsupported = !patchRecord->supported;
+    }
   }
 
   QueueTelemetryEvent(L"device.inventory.snapshot", L"device-inventory",
                       L"The endpoint refreshed its local user, network, and installed software inventory.",
                       BuildDeviceInventoryPayload(snapshot));
+}
+
+void AgentService::QueuePatchTelemetry(const int cycle) {
+  if (cycle != 1 && (cycle % 30) != 0) {
+    return;
+  }
+
+  PatchOrchestrator orchestrator(config_);
+  const auto refresh = orchestrator.RefreshPatchState();
+  const auto snapshot = orchestrator.LoadSnapshot(50, 100, 20, 50);
+
+  QueueTelemetryEvent(L"patch.inventory.snapshot", L"patch-orchestrator",
+                      L"The endpoint refreshed Windows and third-party patch inventory.",
+                          std::wstring(L"{\"windowsUpdateCount\":") + std::to_wstring(refresh.windowsUpdateCount) +
+                          L",\"softwareCount\":" + std::to_wstring(refresh.softwareCount) +
+                          L",\"recipeCount\":" + std::to_wstring(refresh.recipeCount) + L",\"rebootPending\":" +
+                          (snapshot.rebootState.rebootRequired ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"windowsUpdates\":" + std::to_wstring(snapshot.windowsUpdates.size()) +
+                          L",\"softwarePatches\":" + std::to_wstring(snapshot.software.size()) + L"}");
 }
 
 void AgentService::DrainProcessTelemetry() {
@@ -2320,6 +2440,8 @@ void AgentService::QueueCycleTelemetry(const int cycle) {
   if (networkIsolationManager_ && networkIsolationManager_->EngineReady()) {
     QueueTelemetryRecords(networkIsolationManager_->CollectConnectionSnapshotTelemetry(6));
   }
+
+  QueuePatchTelemetry(cycle);
 }
 
 void AgentService::QueueTelemetryEvent(const std::wstring& eventType, const std::wstring& source,

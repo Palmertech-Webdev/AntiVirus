@@ -174,7 +174,12 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
       .serviceState = serviceState,
       .queuedTelemetryCount = database.CountTelemetryQueue(),
       .quarantineItems = quarantineItems,
-      .updateJournal = database.ListUpdateJournal(updateLimit)};
+      .updateJournal = database.ListUpdateJournal(updateLimit),
+      .windowsUpdates = database.ListWindowsUpdateRecords(50),
+      .softwarePatches = database.ListSoftwarePatchRecords(100),
+      .patchHistory = database.ListPatchHistoryRecords(50)};
+
+  database.LoadRebootCoordinator(snapshot.rebootCoordinator);
 
   snapshot.activeQuarantineCount = std::count_if(
       quarantineItems.begin(), quarantineItems.end(),

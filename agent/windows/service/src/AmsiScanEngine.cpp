@@ -147,6 +147,11 @@ bool ContainsRecoveryInhibitionCommands(std::wstring_view scriptLower) {
                                    L"bcdedit /set {current} bootstatuspolicy ignoreallfailures", L"reagentc /disable"});
 }
 
+bool ContainsSuspiciousNetworkDestinations(std::wstring_view scriptLower) {
+  return ContainsAny(scriptLower, {L".onion", L"pastebin.com", L"anonfiles", L"transfer.sh", L"ngrok",
+                                   L"telegram.me", L"discordapp.com/api/webhooks", L":4444", L":8080", L":8443"});
+}
+
 bool ContainsMassEncryptionScriptBehavior(std::wstring_view scriptLower) {
   const auto enumeratesFiles =
       ContainsAny(scriptLower, {L"get-childitem", L"enumeratefiles", L"directory.getfiles", L"findfirstfile",
@@ -159,6 +164,21 @@ bool ContainsMassEncryptionScriptBehavior(std::wstring_view scriptLower) {
                                 L"copyto(", L"filesystem::rename"});
 
   return enumeratesFiles && usesCrypto && rewritesContent;
+}
+
+bool ContainsReflectiveLoaderBehavior(std::wstring_view scriptLower) {
+  const auto hasReflectiveLoad =
+      ContainsAny(scriptLower, {L"reflection.assembly", L"assembly.load(", L"definedynamicassembly",
+                                L"getdelegateforfunctionpointer", L"marshal.copy", L"unsafe native methods"});
+  const auto hasMemoryWrite =
+      ContainsAny(scriptLower, {L"virtualalloc", L"virtualprotect", L"rtlmovememory", L"writeprocessmemory",
+                                L"createthread", L"create remote thread"});
+  return hasReflectiveLoad || hasMemoryWrite;
+}
+
+bool ContainsLateralLolbinProxyChain(std::wstring_view scriptLower) {
+  return ContainsAny(scriptLower, {L"mshta ", L"regsvr32 ", L"rundll32 ", L"wmic process call create",
+                                   L"installutil ", L"msbuild ", L"control.exe ", L"forfiles /c"});
 }
 
 bool LooksLikeRansomNoteContent(std::wstring_view scriptLower, std::wstring_view contentNameLower) {
@@ -257,7 +277,24 @@ std::vector<IndicatorHit> CollectIndicatorHits(const std::wstring& appNameLower,
         MakePattern({L"create", L"remote", L"thread"}), MakePattern({L"queue", L"user", L"apc"})}},
       {L"SCRIPT_HOST_ABUSE", L"Script host abuse patterns were detected.", L"TA0002", L"T1059", 30,
        {MakePattern({L"wscript", L".shell"}), MakePattern({L"shell.", L"application"}),
-        MakePattern({L"run", L"dll32"}), MakePattern({L"reg", L"svr32"}), MakePattern({L"ms", L"build"})}}};
+        MakePattern({L"run", L"dll32"}), MakePattern({L"reg", L"svr32"}), MakePattern({L"ms", L"build"})}},
+      {L"AMSI_PATCH_BYPASS", L"Script content includes AMSI bypass or in-memory patching primitives.", L"TA0005",
+       L"T1562.001", 62,
+       {MakePattern({L"amsi", L"scan", L"buffer"}), MakePattern({L"getproc", L"address"}),
+        MakePattern({L"load", L"library"}), MakePattern({L"patch", L"amsi"}),
+        MakePattern({L"amsi", L"init", L"failed"})}},
+      {L"REFLECTIVE_MEMORY_LOADER", L"Script content includes reflective or memory-loader behavior.", L"TA0002",
+       L"T1620", 54,
+       {MakePattern({L"reflection.", L"assembly"}), MakePattern({L"assembly.", L"load("}),
+        MakePattern({L"get", L"delegate", L"for", L"function", L"pointer"}),
+        MakePattern({L"marshal.", L"copy"}), MakePattern({L"virtual", L"alloc"})}},
+      {L"LOLBIN_PROXY_CHAIN", L"Script content drives LOLBins for proxy execution or staging.", L"TA0005", L"T1218",
+       48,
+       {MakePattern({L"ms", L"hta "}), MakePattern({L"reg", L"svr32 "}), MakePattern({L"run", L"dll32 "}),
+        MakePattern({L"wmic ", L"process", L" call ", L"create"}), MakePattern({L"install", L"util "})}},
+      {L"SUSPICIOUS_C2_DESTINATION", L"Script content references suspicious external destinations often used for staging or control.",
+       L"TA0011", L"T1071", 42,
+       {L".onion", L"pastebin.com", L"discordapp.com/api/webhooks", L":4444", L":8443"}}};
 
   std::vector<IndicatorHit> hits;
   for (const auto& rule : rules) {
@@ -290,6 +327,33 @@ std::vector<IndicatorHit> CollectIndicatorHits(const std::wstring& appNameLower,
         .tacticId = L"TA0040",
         .techniqueId = L"T1490",
         .score = 72});
+  }
+
+  if (ContainsSuspiciousNetworkDestinations(scriptLower)) {
+    hits.push_back(IndicatorHit{
+        .code = L"SUSPICIOUS_C2_DESTINATION",
+        .message = L"Script content references suspicious network destinations commonly used for staging or command-and-control.",
+        .tacticId = L"TA0011",
+        .techniqueId = L"T1071",
+        .score = 42});
+  }
+
+  if (ContainsReflectiveLoaderBehavior(scriptLower)) {
+    hits.push_back(IndicatorHit{
+        .code = L"REFLECTIVE_MEMORY_LOADER",
+        .message = L"Script content includes reflective loading or in-memory execution primitives.",
+        .tacticId = L"TA0002",
+        .techniqueId = L"T1620",
+        .score = 54});
+  }
+
+  if (ContainsLateralLolbinProxyChain(scriptLower)) {
+    hits.push_back(IndicatorHit{
+        .code = L"LOLBIN_PROXY_CHAIN",
+        .message = L"Script content chains LOLBins for proxy execution or payload staging.",
+        .tacticId = L"TA0005",
+        .techniqueId = L"T1218",
+        .score = 48});
   }
 
   if (ContainsMassEncryptionScriptBehavior(scriptLower)) {
@@ -342,7 +406,9 @@ TelemetryRecord BuildAmsiDecisionTelemetry(const AmsiInspectionOutcome& outcome,
   payload += VerdictDispositionToString(outcome.finding.verdict.disposition);
   payload += L"\",\"preview\":\"";
   payload += Utf8ToWide(EscapeJsonString(outcome.preview));
-  payload += L"\"}";
+  payload += L"\",\"reasonCount\":";
+  payload += std::to_wstring(outcome.finding.verdict.reasons.size());
+  payload += L"}";
 
   return TelemetryRecord{
       .eventId = GenerateGuidString(),
@@ -404,7 +470,19 @@ TelemetryRecord BuildAmsiFindingTelemetry(const AmsiInspectionOutcome& outcome, 
   payload += std::to_wstring(outcome.sessionId);
   payload += L",\"preview\":\"";
   payload += Utf8ToWide(EscapeJsonString(outcome.preview));
-  payload += L"\"}";
+  payload += L"\",\"reasons\":[";
+  for (std::size_t index = 0; index < outcome.finding.verdict.reasons.size(); ++index) {
+    const auto& reason = outcome.finding.verdict.reasons[index];
+    if (index != 0) {
+      payload += L",";
+    }
+    payload += L"{\"code\":\"";
+    payload += Utf8ToWide(EscapeJsonString(reason.code));
+    payload += L"\",\"message\":\"";
+    payload += Utf8ToWide(EscapeJsonString(reason.message));
+    payload += L"\"}";
+  }
+  payload += L"]}";
 
   return TelemetryRecord{
       .eventId = GenerateGuidString(),

@@ -131,6 +131,37 @@ std::vector<std::wstring> DeriveExecutableNames(const std::wstring& displayIconP
   return results;
 }
 
+std::vector<std::wstring> DeriveExecutablePaths(const std::wstring& displayIconPath, const std::wstring& installLocation) {
+  std::set<std::wstring> uniquePaths;
+
+  const auto normalizedIconPath = TrimCommandToken(displayIconPath);
+  if (!normalizedIconPath.empty()) {
+    uniquePaths.insert(normalizedIconPath);
+  }
+
+  if (!installLocation.empty()) {
+    std::error_code error;
+    const std::filesystem::path installRoot(installLocation);
+    if (std::filesystem::exists(installRoot, error) && std::filesystem::is_directory(installRoot, error)) {
+      for (const auto& entry : std::filesystem::directory_iterator(installRoot, error)) {
+        if (error) {
+          break;
+        }
+
+        if (!entry.is_regular_file(error)) {
+          continue;
+        }
+
+        if (ToLowerCopy(entry.path().extension().wstring()) == L".exe") {
+          uniquePaths.insert(entry.path().wstring());
+        }
+      }
+    }
+  }
+
+  return {uniquePaths.begin(), uniquePaths.end()};
+}
+
 void CollectSoftwareFromRegistry(HKEY root, const wchar_t* subKeyPath, REGSAM accessMask,
                                  std::vector<InstalledSoftwareInventoryItem>& items) {
   HKEY uninstallKey = nullptr;
@@ -185,7 +216,8 @@ void CollectSoftwareFromRegistry(HKEY root, const wchar_t* subKeyPath, REGSAM ac
         .quietUninstallCommand = quietUninstallCommand,
         .installDate = installDate,
         .displayIconPath = displayIconPath,
-        .executableNames = DeriveExecutableNames(displayIconPath)});
+        .executableNames = DeriveExecutableNames(displayIconPath),
+        .executablePaths = DeriveExecutablePaths(displayIconPath, installLocation)});
 
     RegCloseKey(itemKey);
   }
@@ -335,13 +367,24 @@ std::wstring BuildInstalledSoftwarePayload(const std::vector<InstalledSoftwareIn
                (item.blocked ? std::wstring(L"true") : std::wstring(L"false")) + L",\"updateState\":\"" +
                Utf8ToWide(EscapeJsonString(item.updateState)) + L"\",\"lastUpdateCheckAt\":\"" +
                Utf8ToWide(EscapeJsonString(item.lastUpdateCheckAt)) + L"\",\"updateSummary\":\"" +
-               Utf8ToWide(EscapeJsonString(item.updateSummary)) + L"\",\"executableNames\":[";
+               Utf8ToWide(EscapeJsonString(item.updateSummary)) + L"\",\"supportedPatchSource\":\"" +
+               Utf8ToWide(EscapeJsonString(item.supportedPatchSource)) + L"\",\"manualPatchOnly\":" +
+               (item.manualPatchOnly ? std::wstring(L"true") : std::wstring(L"false")) + L",\"patchUnsupported\":" +
+               (item.patchUnsupported ? std::wstring(L"true") : std::wstring(L"false")) + L",\"executableNames\":[";
 
     for (std::size_t executableIndex = 0; executableIndex < item.executableNames.size(); ++executableIndex) {
       if (executableIndex > 0) {
         payload += L",";
       }
       payload += L"\"" + Utf8ToWide(EscapeJsonString(item.executableNames[executableIndex])) + L"\"";
+    }
+
+    payload += L"],\"executablePaths\":[";
+    for (std::size_t executablePathIndex = 0; executablePathIndex < item.executablePaths.size(); ++executablePathIndex) {
+      if (executablePathIndex > 0) {
+        payload += L",";
+      }
+      payload += L"\"" + Utf8ToWide(EscapeJsonString(item.executablePaths[executablePathIndex])) + L"\"";
     }
 
     payload += L"]}";

@@ -477,6 +477,15 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
     result.originalPath = entry.originalPath;
     result.quarantinedPath = entry.quarantinedPath;
 
+    auto restorePolicy = CreateDefaultPolicySnapshot();
+    restorePolicy.cloudLookupEnabled = false;
+    const auto finding = ScanFile(entry.quarantinedPath, restorePolicy);
+    if (finding.has_value() &&
+        (finding->verdict.disposition == VerdictDisposition::Block ||
+         finding->verdict.disposition == VerdictDisposition::Quarantine)) {
+      throw std::runtime_error("Restore blocked because the quarantined artifact still scores as malicious");
+    }
+
     std::filesystem::create_directories(entry.originalPath.parent_path());
     std::error_code error;
     std::filesystem::rename(entry.quarantinedPath, entry.originalPath, error);

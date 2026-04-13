@@ -6,6 +6,7 @@
 
 #include "AgentState.h"
 #include "ControlPlaneClient.h"
+#include "PatchOrchestrator.h"
 #include "TelemetryRecord.h"
 
 namespace antivirus::agent {
@@ -104,6 +105,18 @@ class RuntimeDatabase {
   std::vector<UpdateJournalRecord> ListUpdateJournal(std::size_t limit = 20) const;
   void UpsertBlockedSoftwareRule(const BlockedSoftwareRule& record) const;
   std::vector<BlockedSoftwareRule> ListBlockedSoftwareRules(std::size_t limit = 200) const;
+  void SavePatchPolicy(const PatchPolicyRecord& record) const;
+  bool LoadPatchPolicy(PatchPolicyRecord& record) const;
+  void ReplaceWindowsUpdateRecords(const std::vector<WindowsUpdateRecord>& records) const;
+  std::vector<WindowsUpdateRecord> ListWindowsUpdateRecords(std::size_t limit = 200) const;
+  void ReplaceSoftwarePatchRecords(const std::vector<SoftwarePatchRecord>& records) const;
+  std::vector<SoftwarePatchRecord> ListSoftwarePatchRecords(std::size_t limit = 500) const;
+  void UpsertPatchHistoryRecord(const PatchHistoryRecord& record) const;
+  std::vector<PatchHistoryRecord> ListPatchHistoryRecords(std::size_t limit = 200) const;
+  void ReplacePackageRecipes(const std::vector<PackageRecipeRecord>& records) const;
+  std::vector<PackageRecipeRecord> ListPackageRecipes(std::size_t limit = 500) const;
+  void SaveRebootCoordinator(const RebootCoordinatorRecord& record) const;
+  bool LoadRebootCoordinator(RebootCoordinatorRecord& record) const;
 
  private:
   std::filesystem::path databasePath_;
