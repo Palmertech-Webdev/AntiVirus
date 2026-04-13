@@ -74,6 +74,8 @@ add_library(antivirus-agent-core STATIC
   src/FileSnapshotCollector.cpp
   src/HardeningManager.cpp
   src/LocalScanRunner.cpp
+  src/LocalControlChannel.cpp
+  src/LocalSecurity.cpp
   src/LocalStateStore.cpp
   src/PatchOrchestrator.cpp
   src/ProcessDeltaTracker.cpp
@@ -88,6 +90,7 @@ add_library(antivirus-agent-core STATIC
   src/ScanEngine.cpp
   src/SelfTestRunner.cpp
   src/StringUtils.cpp
+  src/SupportBundleService.cpp
   src/ServiceInventory.cpp
   src/ServiceSnapshotCollector.cpp
   src/TelemetryQueueStore.cpp

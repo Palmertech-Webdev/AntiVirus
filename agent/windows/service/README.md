@@ -32,6 +32,8 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Tray PAM workflows now include built-in `run_windows_update` and `run_network_reset` actions so patch/remediation admin tasks route through the PAM broker instead of direct admin sessions
 - `patch.windows.install` remote commands can opt into PAM routing with payload flag `routeThroughPam=true` (plus optional `reason`), which queues `run_windows_update` for policy-governed execution
 - Richer PAM audit journaling that records approval source, duration, and completion/termination outcome metadata for each elevation decision
+- Local support-bundle export and storage-maintenance command paths for sanitized diagnostics, full offline review bundles, and bounded cleanup of stale support/update artifacts
+- A service-owned local control broker on `\\.\pipe\FenrirEndpointLocalApi` so dashboard-driven quarantine mutation and patch-install actions are authorized at the service boundary, not just in the UI
 - A shared on-demand scan engine used by `antivirus-scannercli`
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
 - Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories
@@ -55,6 +57,10 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Coexistence visibility for Windows Security Center, Microsoft Defender, and the local agent service launch-protected state
 - Remote response actions for update apply/rollback, agent repair, process termination, persistence cleanup, and full artifact remediation
 - A native local endpoint client with a tray icon, protection status view, recent threat history, quarantine management, and local scan actions
+- A documented named-pipe-first local dashboard security boundary with role-based local action controls, privileged-session reauthentication, and standard-user request escalation rather than direct privileged execution
+- A documented recovery model covering safe-mode repair, driver rollback, database rebuild, runtime-root reset, known-good reset, and emergency disable of bad content or policy
+- A documented storage governance model for telemetry, evidence, quarantine, logs, patch history, and PAM audit retention plus disk-pressure behavior
+- A documented support-bundle export model with sanitized and full diagnostic modes
 
 The purpose of this folder is to establish the internal contracts we will build around:
 
@@ -97,6 +103,12 @@ The purpose of this folder is to establish the internal contracts we will build 
 .\\antivirus-wfptestcli.exe --json
 .\\antivirus-wfptestcli.exe --apply --json
 ```
+
+Remote command additions:
+
+- `support.bundle.export`
+- `support.bundle.export.full`
+- `storage.maintenance.run`
 
 ## Environment Variables
 
@@ -144,6 +156,15 @@ The default sync interval is now 60 seconds when the agent is run in multi-itera
 - The service reads `pam-policy.json` from the runtime root (the same root directory that contains the runtime database path).
 - A baseline template is included at `agent/windows/service/pam-policy.example.json`.
 - Copy the template to your runtime root as `pam-policy.json` and then tune requester/action/path controls for your environment.
+
+## Security Boundary And Governance Templates
+
+- [Production-Readiness-Plan.md](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/docs/Production-Readiness-Plan.md) is the canonical design record for the local UI/API security boundary, updater trust chain, recovery lifecycle, storage governance, patch governance, household role model, and release gates.
+- `local-dashboard-security.example.json` defines the named-pipe-first local dashboard transport, ACL, role, origin-check, and session timeout defaults.
+- `update-trust.example.json` defines pinned trust anchors, anti-downgrade rules, package provenance requirements, and channel recovery defaults.
+- `storage-governance.example.json` defines retention, quota, and disk-pressure policy.
+- `support-bundle.example.json` defines support export contents and sanitization defaults.
+- `release-promotion.example.json` defines release-gate policy and hotfix triggers.
 
 ## Packaging
 

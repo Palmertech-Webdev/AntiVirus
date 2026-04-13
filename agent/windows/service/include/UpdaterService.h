@@ -27,6 +27,8 @@ struct UpdateManifest {
   std::wstring targetVersion;
   std::wstring channel;
   std::wstring packageSigner;
+  std::wstring signingKeyId;
+  bool allowDowngrade{false};
   std::filesystem::path manifestPath;
   std::vector<UpdateFilePlan> files;
 };

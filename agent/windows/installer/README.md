@@ -59,3 +59,9 @@ pwsh -ExecutionPolicy Bypass -File .\GenerateUpdateManifest.ps1 `
 ```
 
 This is still release scaffolding, not a Microsoft-partner-signed commercial MSI pipeline. It gives us a repeatable internal packaging path while we stay pre-release.
+
+## Trust, Recovery, And Lifecycle
+
+- The installer and updater trust chain, anti-downgrade rules, key-rotation model, emergency revocation path, repair lifecycle, uninstall preservation rules, known-good reset mode, and rollback governance are defined in [Production-Readiness-Plan.md](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/docs/Production-Readiness-Plan.md).
+- The companion updater trust template lives at [update-trust.example.json](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/update-trust.example.json).
+- The packaged experience is expected to preserve evidence, patch history, and PAM audit by default during upgrade and repair, while uninstall offers preserve-versus-purge choices instead of destructive one-path removal.

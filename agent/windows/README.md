@@ -39,6 +39,12 @@ The Windows agent is responsible for local prevention, telemetry collection, enf
 - `agent/windows/out/install` is the canonical packaged-installer location for `FenrirSetup.exe`.
 - `agent/windows/out/dev/build` is only the CMake intermediate workspace. Promotion-ready binaries should be consumed from `out/dev`, not directly from the build tree.
 
+## Security And Operations Design
+
+- The formal production-readiness design now lives in [Production-Readiness-Plan.md](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/docs/Production-Readiness-Plan.md).
+- That plan defines the local dashboard security boundary, updater trust chain, recovery model, uninstall and migration lifecycle, storage governance, Windows integration stance, network protection model, external intelligence flow, patch prioritization, PAM safety rails, parser safety, quarantine restore governance, household role model, and release promotion gates.
+- Runtime-facing example policies for local dashboard security, updater trust, storage governance, support bundle export, and release promotion live in `agent/windows/service/` alongside the existing PAM policy template.
+
 ## First Build Targets
 
 - Agent service starts at boot and loads policy from local cache

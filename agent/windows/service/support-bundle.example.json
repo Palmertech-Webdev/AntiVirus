@@ -1,0 +1,29 @@
+{
+  "formatVersion": "fenrir-support-bundle-v1",
+  "modes": [
+    "sanitized",
+    "full"
+  ],
+  "defaultMode": "sanitized",
+  "include": {
+    "devicePosture": true,
+    "serviceStatus": true,
+    "driverStatus": true,
+    "recentIncidents": true,
+    "patchHistory": true,
+    "pamAuditSummary": true,
+    "configurationSnapshot": true,
+    "rotatedLogs": true,
+    "rawQuarantinePayloads": false
+  },
+  "redaction": {
+    "hashUserNames": true,
+    "removeDocumentPathsByDefault": true,
+    "removeCommandArgumentsMarkedSensitive": true
+  },
+  "offlineImport": {
+    "supported": true,
+    "verifyFormatVersion": true,
+    "verifyBundleIntegrity": true
+  }
+}

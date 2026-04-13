@@ -1,0 +1,37 @@
+{
+  "formatVersion": "fenrir-release-gates-v1",
+  "promotions": {
+    "internal_to_beta": {
+      "requiredPhaseGates": [
+        "phase1",
+        "phase2",
+        "phase3",
+        "phase4"
+      ],
+      "maxCriticalOpenIssues": 0,
+      "maxKnownPrivilegeEscalationIssues": 0,
+      "maxRollbackBlockingIssues": 0
+    },
+    "beta_to_stable": {
+      "requiredPhaseGates": [
+        "phase1",
+        "phase2",
+        "phase3",
+        "phase4",
+        "phase5",
+        "phase6"
+      ],
+      "maxCriticalOpenIssues": 0,
+      "requireRollbackValidation": true,
+      "requireSupportBundleValidation": true,
+      "requireRecoveryValidation": true
+    }
+  },
+  "hotfixTriggers": [
+    "false_positive_outbreak",
+    "broken_update_or_rollback",
+    "service_startup_regression",
+    "pam_lockout",
+    "quarantine_restore_corruption"
+  ]
+}

@@ -6,11 +6,15 @@
 #include <algorithm>
 #include <fstream>
 #include <memory>
+#include <optional>
+#include <regex>
 #include <set>
 #include <string>
 
 #include "LocalStateStore.h"
+#include "LocalControlChannel.h"
 #include "QuarantineStore.h"
+#include "StringUtils.h"
 
 namespace antivirus::agent {
 namespace {
@@ -89,6 +93,145 @@ std::size_t CountToken(const std::string& value, const std::string& token) {
   }
 
   return count;
+}
+
+std::string EscapeRegex(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size() * 2);
+
+  for (const auto ch : value) {
+    switch (ch) {
+      case '\\':
+      case '^':
+      case '$':
+      case '.':
+      case '|':
+      case '?':
+      case '*':
+      case '+':
+      case '(':
+      case ')':
+      case '[':
+      case ']':
+      case '{':
+      case '}':
+        escaped.push_back('\\');
+        break;
+      default:
+        break;
+    }
+    escaped.push_back(ch);
+  }
+
+  return escaped;
+}
+
+std::string UnescapeJsonString(const std::string& value) {
+  std::string result;
+  result.reserve(value.size());
+
+  bool escaping = false;
+  for (const auto ch : value) {
+    if (!escaping) {
+      if (ch == '\\') {
+        escaping = true;
+      } else {
+        result.push_back(ch);
+      }
+      continue;
+    }
+
+    switch (ch) {
+      case '\\':
+        result.push_back('\\');
+        break;
+      case '"':
+        result.push_back('"');
+        break;
+      case 'n':
+        result.push_back('\n');
+        break;
+      case 'r':
+        result.push_back('\r');
+        break;
+      case 't':
+        result.push_back('\t');
+        break;
+      default:
+        result.push_back(ch);
+        break;
+    }
+
+    escaping = false;
+  }
+
+  if (escaping) {
+    result.push_back('\\');
+  }
+
+  return result;
+}
+
+std::optional<std::wstring> ExtractJsonString(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"");
+  std::smatch match;
+  if (!std::regex_search(utf8Json, match, pattern)) {
+    return std::nullopt;
+  }
+
+  return Utf8ToWide(UnescapeJsonString(match[1].str()));
+}
+
+std::optional<int> ExtractJsonInt(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(\\d+)");
+  std::smatch match;
+  if (!std::regex_search(utf8Json, match, pattern)) {
+    return std::nullopt;
+  }
+
+  return std::stoi(match[1].str());
+}
+
+std::optional<bool> ExtractJsonBool(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(true|false|1|0)");
+  std::smatch match;
+  if (!std::regex_search(utf8Json, match, pattern)) {
+    return std::nullopt;
+  }
+
+  const auto token = match[1].str();
+  return token == "true" || token == "1";
+}
+
+std::wstring EscapeJsonValue(const std::wstring& value) {
+  return Utf8ToWide(EscapeJsonString(value));
+}
+
+std::wstring BuildBrokerRequestJson(const std::wstring& type, const std::wstring& recordId, const std::wstring& payloadJson,
+                                    const std::wstring& targetPath) {
+  return std::wstring(L"{\"type\":\"") + EscapeJsonValue(type) + L"\",\"recordId\":\"" + EscapeJsonValue(recordId) +
+         L"\",\"targetPath\":\"" + EscapeJsonValue(targetPath) + L"\",\"payloadJson\":\"" + EscapeJsonValue(payloadJson) +
+         L"\"}";
+}
+
+std::wstring FormatWindowsErrorMessage(const DWORD error) {
+  LPWSTR buffer = nullptr;
+  const auto flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+  const auto length = FormatMessageW(flags, nullptr, error, 0, reinterpret_cast<LPWSTR>(&buffer), 0, nullptr);
+  if (length == 0 || buffer == nullptr) {
+    return L"Windows error " + std::to_wstring(error);
+  }
+
+  std::wstring message(buffer, length);
+  LocalFree(buffer);
+
+  while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' ')) {
+    message.pop_back();
+  }
+  return message;
 }
 
 PamPostureSummary QueryPamPosture(const AgentConfig& config) {
@@ -350,13 +493,92 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
 }
 
 QuarantineActionResult RestoreQuarantinedItem(const AgentConfig& config, const std::wstring& recordId) {
-  QuarantineStore store(config.quarantineRootPath, config.runtimeDatabasePath);
-  return store.RestoreFile(recordId);
+  const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.restore", recordId);
+  if (!brokerResult.success) {
+    return QuarantineActionResult{
+        .success = false,
+        .recordId = recordId,
+        .errorMessage = brokerResult.errorMessage.empty()
+                            ? L"Fenrir could not broker the quarantine restore action through the protection service."
+                            : brokerResult.errorMessage};
+  }
+
+  return QuarantineActionResult{
+      .success = true,
+      .recordId = ExtractJsonString(brokerResult.responseJson, "recordId").value_or(recordId)};
 }
 
 QuarantineActionResult DeleteQuarantinedItem(const AgentConfig& config, const std::wstring& recordId) {
-  QuarantineStore store(config.quarantineRootPath, config.runtimeDatabasePath);
-  return store.DeleteRecord(recordId);
+  const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.delete", recordId);
+  if (!brokerResult.success) {
+    return QuarantineActionResult{
+        .success = false,
+        .recordId = recordId,
+        .errorMessage = brokerResult.errorMessage.empty()
+                            ? L"Fenrir could not broker the quarantine delete action through the protection service."
+                            : brokerResult.errorMessage};
+  }
+
+  return QuarantineActionResult{
+      .success = true,
+      .recordId = ExtractJsonString(brokerResult.responseJson, "recordId").value_or(recordId)};
+}
+
+LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig&, const std::wstring& type, const std::wstring& recordId,
+                                                const std::wstring& payloadJson, const std::wstring& targetPath) {
+  constexpr DWORD kReadTimeoutMilliseconds = 10'000;
+  constexpr DWORD kBufferBytes = 64 * 1024;
+
+  const auto requestJson = BuildBrokerRequestJson(type, recordId, payloadJson, targetPath);
+  const auto requestUtf8 = WideToUtf8(requestJson);
+  std::vector<char> responseBuffer(kBufferBytes, '\0');
+  DWORD bytesRead = 0;
+
+  const auto success = CallNamedPipeW(kFenrirLocalControlPipeName, const_cast<char*>(requestUtf8.data()),
+                                      static_cast<DWORD>(requestUtf8.size()),
+                                      responseBuffer.data(), kBufferBytes, &bytesRead, kReadTimeoutMilliseconds);
+  if (success == FALSE) {
+    const auto error = GetLastError();
+    const auto message = error == ERROR_FILE_NOT_FOUND || error == ERROR_PIPE_BUSY
+                             ? L"Fenrir local control is unavailable. Start the protection service and try again."
+                             : L"Fenrir local control request failed: " + FormatWindowsErrorMessage(error);
+    return LocalBrokerCommandResult{.success = false, .statusCode = static_cast<int>(error), .errorMessage = message};
+  }
+
+  const auto responseJson = Utf8ToWide(std::string(responseBuffer.data(), responseBuffer.data() + bytesRead));
+  return LocalBrokerCommandResult{
+      .success = ExtractJsonBool(responseJson, "success").value_or(false),
+      .statusCode = ExtractJsonInt(responseJson, "statusCode").value_or(0),
+      .responseJson = ExtractJsonString(responseJson, "resultJson").value_or(L""),
+      .errorMessage = ExtractJsonString(responseJson, "errorMessage").value_or(L"")};
+}
+
+PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId) {
+  const auto payloadJson = std::wstring(L"{\"softwareId\":\"") + EscapeJsonValue(softwareId) + L"\"}";
+  const auto brokerResult = SendLocalBrokerCommand(config, L"patch.software.install", L"", payloadJson);
+  if (!brokerResult.success) {
+    return PatchExecutionResult{
+        .success = false,
+        .targetId = softwareId,
+        .status = L"broker_failed",
+        .errorCode = std::to_wstring(brokerResult.statusCode),
+        .detailJson = std::wstring(L"{\"error\":\"") +
+                      EscapeJsonValue(brokerResult.errorMessage.empty() ? L"Fenrir local broker request failed."
+                                                                       : brokerResult.errorMessage) +
+                      L"\"}"};
+  }
+
+  return PatchExecutionResult{
+      .success = ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"installed" ||
+                 ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"updated" ||
+                 ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"available",
+      .rebootRequired = ExtractJsonBool(brokerResult.responseJson, "rebootRequired").value_or(false),
+      .action = ExtractJsonString(brokerResult.responseJson, "action").value_or(L"patch.software.install"),
+      .targetId = ExtractJsonString(brokerResult.responseJson, "targetId").value_or(softwareId),
+      .provider = ExtractJsonString(brokerResult.responseJson, "provider").value_or(L"service-broker"),
+      .status = ExtractJsonString(brokerResult.responseJson, "status").value_or(L"unknown"),
+      .errorCode = ExtractJsonString(brokerResult.responseJson, "errorCode").value_or(L""),
+      .detailJson = ExtractJsonString(brokerResult.responseJson, "detailJson").value_or(L"{}")};
 }
 
 }  // namespace antivirus::agent

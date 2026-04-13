@@ -1,0 +1,54 @@
+{
+  "trustAnchors": {
+    "platform": [
+      {
+        "keyId": "fenrir-platform-prod-2026",
+        "usage": "platform_release",
+        "minimumVersion": "0.4.0"
+      }
+    ],
+    "content": [
+      {
+        "keyId": "fenrir-content-prod-2026",
+        "usage": "signature_and_rule_updates",
+        "minimumGeneration": 1
+      }
+    ]
+  },
+  "rotation": {
+    "allowOverlappingAnchors": true,
+    "requireSignedRevocationBundle": true,
+    "emergencyRevocationSupported": true
+  },
+  "antiDowngrade": {
+    "blockPlatformDowngrade": true,
+    "allowSignedRollbackOnly": true,
+    "blockContentGenerationRollback": true
+  },
+  "packageProvenance": {
+    "requireManifestSignature": true,
+    "requirePayloadHashMatch": true,
+    "requireTrustedChannel": true,
+    "requirePackageTypeMatch": true
+  },
+  "classes": {
+    "rules": {
+      "signerClass": "content",
+      "rebootExpected": false
+    },
+    "platform": {
+      "signerClass": "platform",
+      "rebootExpected": "possible"
+    },
+    "driver": {
+      "signerClass": "platform",
+      "rebootExpected": true,
+      "extraValidation": true
+    }
+  },
+  "channelRecovery": {
+    "fallbackToLastTrustedManifest": true,
+    "rejectUntrustedPayloads": true,
+    "markChannelUnhealthyOnTrustFailure": true
+  }
+}

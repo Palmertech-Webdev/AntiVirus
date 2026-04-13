@@ -5,7 +5,9 @@ param(
     [string]$PackageType = 'platform',
     [string]$TargetVersion = '0.1.0-alpha',
     [string]$Channel = 'stable',
+    [string]$SigningKeyId = 'fenrir-platform-prod-2026',
     [string]$PackageSigner = '',
+    [switch]$AllowDowngrade,
     [string[]]$Files = @(
         'fenrir-agent-service.exe',
         'fenrir-amsi-provider.dll',
@@ -26,6 +28,10 @@ $manifestLines.Add("package_id=$PackageId")
 $manifestLines.Add("package_type=$PackageType")
 $manifestLines.Add("target_version=$TargetVersion")
 $manifestLines.Add("channel=$Channel")
+$manifestLines.Add("signing_key_id=$SigningKeyId")
+if ($AllowDowngrade) {
+    $manifestLines.Add("allow_downgrade=true")
+}
 if ($PackageSigner) {
     $manifestLines.Add("package_signer=$PackageSigner")
 }

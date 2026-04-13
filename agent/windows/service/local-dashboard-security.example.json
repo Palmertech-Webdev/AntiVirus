@@ -1,0 +1,75 @@
+{
+  "transport": {
+    "mode": "named_pipe_primary",
+    "pipeName": "\\\\.\\pipe\\Fenrir.Endpoint.LocalApi",
+    "allowLoopbackHttpBridge": false,
+    "loopbackAddresses": [
+      "127.0.0.1",
+      "::1"
+    ],
+    "requireEphemeralPortPerSession": true
+  },
+  "acl": {
+    "system": "full_control",
+    "administrators": "full_control",
+    "interactiveUsers": "read_only_handshake"
+  },
+  "roles": {
+    "device_owner_admin": {
+      "view": "device_wide",
+      "actions": [
+        "quarantine_restore",
+        "quarantine_delete",
+        "patch_install",
+        "patch_rollback",
+        "service_repair",
+        "policy_edit",
+        "uninstall"
+      ]
+    },
+    "local_admin": {
+      "view": "device_wide",
+      "actions": [
+        "quarantine_restore",
+        "quarantine_delete",
+        "patch_install",
+        "service_repair",
+        "policy_edit"
+      ]
+    },
+    "standard_user": {
+      "view": "self_plus_device_summary",
+      "actions": [
+        "request_patch",
+        "request_restore",
+        "request_elevation"
+      ]
+    },
+    "child_or_managed_user": {
+      "view": "device_summary_only",
+      "actions": [
+        "request_help"
+      ]
+    }
+  },
+  "webSecurity": {
+    "allowedOrigins": [
+      "app://fenrir-local-ui"
+    ],
+    "enforceOriginChecks": true,
+    "enforceHostChecks": true,
+    "requireCsrfNonceForPrivilegedActions": true,
+    "bindSessionToLogonSession": true
+  },
+  "session": {
+    "readOnlyIdleTimeoutMinutes": 30,
+    "privilegedIdleTimeoutMinutes": 5,
+    "reauthenticateFor": [
+      "quarantine_restore",
+      "patch_install",
+      "service_repair",
+      "policy_edit",
+      "uninstall"
+    ]
+  }
+}

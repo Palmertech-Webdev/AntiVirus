@@ -1,0 +1,37 @@
+{
+  "retentionDays": {
+    "telemetrySpool": 7,
+    "evidenceMetadata": 30,
+    "quarantinePayloads": 30,
+    "patchHistory": 180,
+    "pamAudit": 180,
+    "serviceLogs": 30
+  },
+  "quotasMb": {
+    "telemetrySpool": 256,
+    "evidenceMetadata": 512,
+    "quarantinePayloads": 2048,
+    "patchHistory": 128,
+    "pamAudit": 128,
+    "serviceLogs": 128
+  },
+  "diskPressure": {
+    "minimumFreeDiskPercent": 10,
+    "minimumFreeDiskGb": 5,
+    "pruneOrder": [
+      "expired_quarantine_payloads",
+      "old_telemetry_spool",
+      "rotated_logs",
+      "old_evidence_blobs"
+    ]
+  },
+  "deletion": {
+    "bestEffortSecureDelete": true,
+    "recordSecureDeleteIntent": true
+  },
+  "export": {
+    "incidentFormat": "fenrir-incident-bundle-v1",
+    "patchHistoryFormat": "fenrir-patch-history-v1",
+    "supportBundleFormat": "fenrir-support-bundle-v1"
+  }
+}

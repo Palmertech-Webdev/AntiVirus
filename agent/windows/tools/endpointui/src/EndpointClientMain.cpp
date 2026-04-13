@@ -30,6 +30,7 @@
 #include "AgentConfig.h"
 #include "DeviceInventoryCollector.h"
 #include "EndpointClient.h"
+#include "LocalSecurity.h"
 #include "ProcessInventory.h"
 #include "LocalScanRunner.h"
 #include "LocalStateStore.h"
@@ -405,7 +406,22 @@ bool HasSwitch(const std::vector<std::wstring>& arguments, const wchar_t* value)
 }
 
 bool IsCurrentUserAdmin() {
-  return IsUserAnAdmin() != FALSE;
+  return antivirus::agent::IsCurrentUserElevatedAdmin();
+}
+
+bool RequireAuthorizedLocalAction(HWND hwnd, const antivirus::agent::LocalAction action, const wchar_t* title) {
+  const auto authorization = antivirus::agent::AuthorizeCurrentUser(action);
+  if (authorization.allowed) {
+    return true;
+  }
+
+  std::wstring message = authorization.reason;
+  if (authorization.requestOnly) {
+    message += L"\r\n\r\nUse an administrator account or a Fenrir-approved PAM flow for this action.";
+  }
+
+  MessageBoxW(hwnd, message.c_str(), title, MB_OK | MB_ICONWARNING);
+  return false;
 }
 
 bool StartsWithSwitchPrefix(const std::wstring& value) {
@@ -4874,8 +4890,8 @@ void RunSoftwarePatchActionAsync(HWND hwnd, UiContext& context, std::wstring sof
     payload->targetId = softwareId;
     payload->searchOnly = searchOnly;
     try {
-      antivirus::agent::PatchOrchestrator orchestrator(config);
-      const auto result = orchestrator.UpdateSoftware(softwareId, searchOnly);
+      const auto result = searchOnly ? antivirus::agent::PatchOrchestrator(config).UpdateSoftware(softwareId, true)
+                                     : antivirus::agent::ExecuteSoftwarePatchThroughService(config, softwareId);
       payload->summary = BuildPatchExecutionSummary(result, searchOnly);
       payload->success = result.success;
       payload->informational = IsPatchResultInformational(result);
@@ -5134,9 +5150,7 @@ void PerformQuarantineAction(UiContext& context, const bool restore) {
     return;
   }
 
-  if (restore && !IsCurrentUserAdmin()) {
-    MessageBoxW(context.hwnd, L"Restoring quarantined files requires an elevated administrator session.",
-                kWindowTitle, MB_OK | MB_ICONWARNING);
+  if (!RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::QuarantineMutate, kWindowTitle)) {
     return;
   }
 
@@ -5256,11 +5270,18 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
     }
 
     const auto searchOnly = _wcsicmp(action.c_str(), L"softwareCheck") == 0;
+    if (!searchOnly &&
+        !RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::PatchInstall, kWindowTitle)) {
+      return;
+    }
     RunSoftwarePatchActionAsync(context.hwnd, context, softwareId, searchOnly);
     return;
   }
 
   if (_wcsicmp(action.c_str(), L"startService") == 0) {
+    if (!RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::StartServiceAction, kWindowTitle)) {
+      return;
+    }
     if (!antivirus::agent::StartAgentService()) {
       MessageBoxW(context.hwnd, L"Unable to start the protection service from the local client.", kWindowTitle,
                   MB_OK | MB_ICONWARNING);
@@ -5277,6 +5298,9 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
   }
 
   if (_wcsicmp(action.c_str(), L"openExclusions") == 0) {
+    if (!RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::EditExclusions, kWindowTitle)) {
+      return;
+    }
     context.manageExclusionsMode = true;
     SelectPage(context, ClientPage::Settings);
     RefreshSnapshot(context);
@@ -5475,6 +5499,10 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
       return;
     }
 
+    if (!RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::QuarantineMutate, kWindowTitle)) {
+      return;
+    }
+
     const auto result = RestoreQuarantinedItem(context.config, id);
     if (!result.success) {
       const auto messageText = result.errorMessage.empty() ? L"Unable to restore the selected item."
@@ -5491,6 +5519,10 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
   if (_wcsicmp(action.c_str(), L"quarantineDelete") == 0) {
     const auto id = GetQueryValue(pairs, L"id");
     if (id.empty()) {
+      return;
+    }
+
+    if (!RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::QuarantineMutate, kWindowTitle)) {
       return;
     }
 
@@ -5898,6 +5930,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
           return 0;
         }
         case IDC_BUTTON_STARTSERVICE:
+          if (!RequireAuthorizedLocalAction(hwnd, antivirus::agent::LocalAction::StartServiceAction, kWindowTitle)) {
+            return 0;
+          }
           if (!antivirus::agent::StartAgentService()) {
             MessageBoxW(hwnd, L"Unable to start the protection service from the local client.",
                         kWindowTitle, MB_OK | MB_ICONWARNING);
@@ -5913,6 +5948,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
               return 0;
             }
 
+            if (!RequireAuthorizedLocalAction(hwnd, antivirus::agent::LocalAction::EditExclusions, kWindowTitle)) {
+              return 0;
+            }
             if (!LaunchExclusionsEditor(hwnd)) {
               MessageBoxW(hwnd, L"Unable to open the elevated exclusions editor.", kWindowTitle,
                           MB_OK | MB_ICONWARNING);

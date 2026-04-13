@@ -15,12 +15,14 @@
 #include "EventEnvelope.h"
 #include "FileDeltaTracker.h"
 #include "HardeningManager.h"
+#include "LocalControlChannel.h"
 #include "LocalStateStore.h"
 #include "PatchOrchestrator.h"
 #include "PolicySnapshot.h"
 #include "ProcessDeltaTracker.h"
 #include "RemediationEngine.h"
 #include "ScanVerdict.h"
+#include "SupportBundleService.h"
 #include "TelemetryQueueStore.h"
 #include "RealtimeProtectionBroker.h"
 #include "UpdaterService.h"
@@ -71,6 +73,8 @@ class AgentService {
   std::wstring ExecuteUpdateCommand(const RemoteCommand& command, bool rollback);
   std::wstring ExecuteRepairCommand(const RemoteCommand& command);
   std::wstring ExecutePatchCommand(const RemoteCommand& command, bool installWindows, bool installSoftware, bool runCycle);
+  std::wstring ExecuteSupportBundleCommand(const RemoteCommand& command, bool sanitized);
+  std::wstring ExecuteStorageMaintenanceCommand(const RemoteCommand& command);
   std::wstring ExecuteProcessTerminationCommand(const RemoteCommand& command, bool includeChildren);
   std::wstring ExecutePersistenceCleanupCommand(const RemoteCommand& command);
   std::wstring ExecutePathRemediationCommand(const RemoteCommand& command);
@@ -108,6 +112,7 @@ class AgentService {
   FileDeltaTracker fileDeltaTracker_{};
   std::vector<TelemetryRecord> pendingTelemetry_{};
   std::unique_ptr<RealtimeProtectionBroker> realtimeProtectionBroker_{};
+  std::unique_ptr<LocalControlChannel> localControlChannel_{};
   std::unique_ptr<ProcessEtwSensor> processEtwSensor_{};
   std::unique_ptr<NetworkIsolationManager> networkIsolationManager_{};
   bool lastControlPlaneSyncFailed_{false};

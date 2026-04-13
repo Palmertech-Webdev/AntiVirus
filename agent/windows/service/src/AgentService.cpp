@@ -1391,6 +1391,9 @@ int AgentService::Run(const AgentRunMode mode) {
     commandJournalStore_ = std::make_unique<CommandJournalStore>(config_.runtimeDatabasePath);
     telemetryQueueStore_ = std::make_unique<TelemetryQueueStore>(config_.runtimeDatabasePath, config_.telemetryQueuePath);
     realtimeProtectionBroker_ = std::make_unique<RealtimeProtectionBroker>(config_);
+    localControlChannel_ =
+        std::make_unique<LocalControlChannel>([this](const RemoteCommand& command) { return ExecuteCommand(command); },
+                                             [this]() { return ShouldStop(); });
     processEtwSensor_ = std::make_unique<ProcessEtwSensor>(config_);
     networkIsolationManager_ = std::make_unique<NetworkIsolationManager>(config_);
 
@@ -1400,6 +1403,7 @@ int AgentService::Run(const AgentRunMode mode) {
     processEtwSensor_->SetDeviceId(state_.deviceId);
     networkIsolationManager_->SetDeviceId(state_.deviceId);
     realtimeProtectionBroker_->Start();
+    localControlChannel_->Start();
     processEtwSensor_->Start();
     networkIsolationManager_->Start();
     QueueEndpointStatusTelemetry();
@@ -1428,6 +1432,7 @@ int AgentService::Run(const AgentRunMode mode) {
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
+    localControlChannel_->Stop();
     networkIsolationManager_->Stop();
     processEtwSensor_->Stop();
     realtimeProtectionBroker_->Stop();
@@ -1976,6 +1981,18 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecutePatchCommand(command, true, true, true);
   }
 
+  if (command.type == L"support.bundle.export") {
+    return ExecuteSupportBundleCommand(command, true);
+  }
+
+  if (command.type == L"support.bundle.export.full") {
+    return ExecuteSupportBundleCommand(command, false);
+  }
+
+  if (command.type == L"storage.maintenance.run") {
+    return ExecuteStorageMaintenanceCommand(command);
+  }
+
   if (command.type == L"software.block") {
     return ExecuteSoftwareBlockCommand(command);
   }
@@ -2210,6 +2227,45 @@ std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, con
          result.status + L"\",\"rebootRequired\":" +
          (result.rebootRequired ? std::wstring(L"true") : std::wstring(L"false")) + L",\"errorCode\":\"" +
          result.errorCode + L"\",\"detailJson\":" + result.detailJson + L"}";
+}
+
+std::wstring AgentService::ExecuteSupportBundleCommand(const RemoteCommand& command, const bool sanitized) {
+  const auto result = ExportSupportBundle(config_, state_, policy_, sanitized);
+  if (!result.success) {
+    throw std::runtime_error(WideToUtf8(result.errorMessage.empty() ? L"Support bundle export failed" : result.errorMessage));
+  }
+
+  QueueTelemetryEvent(L"support.bundle.exported", L"support-bundle",
+                      sanitized ? L"Fenrir exported a sanitized local support bundle."
+                                : L"Fenrir exported a full local support bundle.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"sanitized\":" +
+                          (sanitized ? std::wstring(L"true") : std::wstring(L"false")) + L",\"bundleRoot\":\"" +
+                          Utf8ToWide(EscapeJsonString(result.bundleRoot.wstring())) + L"\",\"manifestPath\":\"" +
+                          Utf8ToWide(EscapeJsonString(result.manifestPath.wstring())) + L"\",\"copiedFileCount\":" +
+                          std::to_wstring(result.copiedFileCount) + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"sanitized\":" +
+         (sanitized ? std::wstring(L"true") : std::wstring(L"false")) + L",\"bundleRoot\":\"" +
+         Utf8ToWide(EscapeJsonString(result.bundleRoot.wstring())) + L"\",\"manifestPath\":\"" +
+         Utf8ToWide(EscapeJsonString(result.manifestPath.wstring())) + L"\",\"copiedFileCount\":" +
+         std::to_wstring(result.copiedFileCount) + L"}";
+}
+
+std::wstring AgentService::ExecuteStorageMaintenanceCommand(const RemoteCommand& command) {
+  const auto result = RunStorageMaintenance(config_);
+  if (!result.success) {
+    throw std::runtime_error(WideToUtf8(result.errorMessage.empty() ? L"Storage maintenance failed" : result.errorMessage));
+  }
+
+  QueueTelemetryEvent(L"storage.maintenance.completed", L"support-bundle", result.summary,
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"deletedEntries\":" +
+                          std::to_wstring(result.deletedEntries) + L",\"reclaimedBytes\":" +
+                          std::to_wstring(result.reclaimedBytes) + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"deletedEntries\":" +
+         std::to_wstring(result.deletedEntries) + L",\"reclaimedBytes\":" +
+         std::to_wstring(result.reclaimedBytes) + L",\"summary\":\"" +
+         Utf8ToWide(EscapeJsonString(result.summary)) + L"\"}";
 }
 
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {

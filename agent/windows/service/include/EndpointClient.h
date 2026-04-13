@@ -44,6 +44,13 @@ struct EndpointClientSnapshot {
   std::vector<PatchHistoryRecord> patchHistory;
 };
 
+struct LocalBrokerCommandResult {
+  bool success{false};
+  int statusCode{0};
+  std::wstring responseJson;
+  std::wstring errorMessage;
+};
+
 LocalServiceState QueryAgentServiceState();
 std::wstring LocalServiceStateToString(LocalServiceState state);
 bool StartAgentService();
@@ -56,5 +63,10 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, std
 
 QuarantineActionResult RestoreQuarantinedItem(const AgentConfig& config, const std::wstring& recordId);
 QuarantineActionResult DeleteQuarantinedItem(const AgentConfig& config, const std::wstring& recordId);
+LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig& config, const std::wstring& type,
+                                                const std::wstring& recordId = L"",
+                                                const std::wstring& payloadJson = L"{}",
+                                                const std::wstring& targetPath = L"");
+PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId);
 
 }  // namespace antivirus::agent

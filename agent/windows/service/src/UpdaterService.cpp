@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 
@@ -46,6 +47,119 @@ std::vector<std::wstring> SplitWide(const std::wstring& value, const wchar_t sep
 
   parts.push_back(TrimWide(current));
   return parts;
+}
+
+bool ParseBoolText(const std::wstring& value) {
+  const auto lower = ToLowerCopy(TrimWide(value));
+  return lower == L"1" || lower == L"true" || lower == L"yes";
+}
+
+std::vector<std::wstring> SplitVersionTokens(const std::wstring& value) {
+  std::vector<std::wstring> tokens;
+  std::wstring current;
+  for (const auto ch : value) {
+    if ((ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z')) {
+      current.push_back(static_cast<wchar_t>(std::towlower(ch)));
+      continue;
+    }
+
+    if (!current.empty()) {
+      tokens.push_back(current);
+      current.clear();
+    }
+  }
+
+  if (!current.empty()) {
+    tokens.push_back(current);
+  }
+  return tokens;
+}
+
+int CompareVersionStrings(const std::wstring& left, const std::wstring& right) {
+  const auto leftTokens = SplitVersionTokens(left);
+  const auto rightTokens = SplitVersionTokens(right);
+  const auto limit = std::max(leftTokens.size(), rightTokens.size());
+
+  for (std::size_t index = 0; index < limit; ++index) {
+    const auto leftToken = index < leftTokens.size() ? leftTokens[index] : std::wstring(L"0");
+    const auto rightToken = index < rightTokens.size() ? rightTokens[index] : std::wstring(L"0");
+
+    const auto leftNumeric = std::all_of(leftToken.begin(), leftToken.end(), [](const wchar_t ch) { return iswdigit(ch) != 0; });
+    const auto rightNumeric =
+        std::all_of(rightToken.begin(), rightToken.end(), [](const wchar_t ch) { return iswdigit(ch) != 0; });
+    if (leftNumeric && rightNumeric) {
+      const auto leftValue = std::stoll(leftToken);
+      const auto rightValue = std::stoll(rightToken);
+      if (leftValue < rightValue) {
+        return -1;
+      }
+      if (leftValue > rightValue) {
+        return 1;
+      }
+      continue;
+    }
+
+    if (leftToken < rightToken) {
+      return -1;
+    }
+    if (leftToken > rightToken) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+std::vector<std::wstring> LoadKeyList(const std::filesystem::path& path) {
+  std::vector<std::wstring> values;
+  std::wifstream input(path);
+  if (!input.is_open()) {
+    return values;
+  }
+
+  std::wstring line;
+  while (std::getline(input, line)) {
+    const auto trimmed = TrimWide(line);
+    if (!trimmed.empty() && !trimmed.starts_with(L"#") && !trimmed.starts_with(L";")) {
+      values.push_back(trimmed);
+    }
+  }
+  return values;
+}
+
+std::vector<std::wstring> TrustedKeyIdsForPackageType(const AgentConfig& config, const std::wstring& packageType) {
+  const auto lowerType = ToLowerCopy(packageType);
+  const auto trustRoot = config.updateRootPath / L"trust";
+  auto trusted = LoadKeyList((lowerType == L"rules" || lowerType == L"signatures")
+                                 ? (trustRoot / L"content-trusted-key-ids.txt")
+                                 : (trustRoot / L"platform-trusted-key-ids.txt"));
+  if (!trusted.empty()) {
+    return trusted;
+  }
+
+  if (lowerType == L"rules" || lowerType == L"signatures") {
+    return {L"fenrir-content-prod-2026"};
+  }
+  return {L"fenrir-platform-prod-2026"};
+}
+
+bool SigningKeyRevoked(const AgentConfig& config, const std::wstring& signingKeyId) {
+  const auto revoked = LoadKeyList(config.updateRootPath / L"trust" / L"revoked-key-ids.txt");
+  return std::find(revoked.begin(), revoked.end(), signingKeyId) != revoked.end();
+}
+
+std::optional<std::wstring> LatestKnownPackageVersion(const RuntimeDatabase& database, const std::wstring& packageId) {
+  const auto journal = database.ListUpdateJournal(100);
+  std::optional<std::wstring> latest;
+  for (const auto& record : journal) {
+    if (record.packageId != packageId || record.targetVersion.empty()) {
+      continue;
+    }
+    if (!latest.has_value() || CompareVersionStrings(record.targetVersion, *latest) > 0) {
+      latest = record.targetVersion;
+    }
+  }
+  return latest;
 }
 
 std::wstring NormalizePathForCompare(const std::filesystem::path& path) {
@@ -120,6 +234,16 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
       continue;
     }
 
+    if (key == L"signing_key_id") {
+      manifest.signingKeyId = value;
+      continue;
+    }
+
+    if (key == L"allow_downgrade") {
+      manifest.allowDowngrade = ParseBoolText(value);
+      continue;
+    }
+
     if (key == L"file") {
       const auto parts = SplitWide(value, L'|');
       if (parts.size() < 3) {
@@ -152,6 +276,46 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
   }
 
   return manifest;
+}
+
+void VerifyManifestPolicy(const UpdateManifest& manifest, const AgentConfig& config, const RuntimeDatabase& database) {
+  static const std::vector<std::wstring> allowedPackageTypes = {L"platform", L"driver", L"rules", L"signatures"};
+  static const std::vector<std::wstring> allowedChannels = {L"stable", L"beta", L"alpha", L"dev", L"lab"};
+
+  const auto lowerType = ToLowerCopy(manifest.packageType);
+  const auto lowerChannel = ToLowerCopy(manifest.channel);
+  if (std::find(allowedPackageTypes.begin(), allowedPackageTypes.end(), lowerType) == allowedPackageTypes.end()) {
+    throw std::runtime_error("Update manifest package type is not allowed");
+  }
+  if (manifest.channel.empty() ||
+      std::find(allowedChannels.begin(), allowedChannels.end(), lowerChannel) == allowedChannels.end()) {
+    throw std::runtime_error("Update manifest channel is not allowed");
+  }
+  if (manifest.packageSigner.empty()) {
+    throw std::runtime_error("Update manifest must declare a package signer");
+  }
+  if (manifest.signingKeyId.empty()) {
+    throw std::runtime_error("Update manifest must declare a signing key id");
+  }
+  if (SigningKeyRevoked(config, manifest.signingKeyId)) {
+    throw std::runtime_error("Update manifest signing key has been revoked");
+  }
+
+  const auto trustedKeyIds = TrustedKeyIdsForPackageType(config, manifest.packageType);
+  if (std::find(trustedKeyIds.begin(), trustedKeyIds.end(), manifest.signingKeyId) == trustedKeyIds.end()) {
+    throw std::runtime_error("Update manifest signing key id is not trusted for this package type");
+  }
+
+  if (!manifest.allowDowngrade) {
+    const auto baselineVersion =
+        (lowerType == L"platform" || lowerType == L"driver")
+            ? std::optional<std::wstring>(config.platformVersion)
+            : LatestKnownPackageVersion(database, manifest.packageId);
+
+    if (baselineVersion.has_value() && CompareVersionStrings(manifest.targetVersion, *baselineVersion) < 0) {
+      throw std::runtime_error("Update manifest target version is lower than the current trusted baseline");
+    }
+  }
 }
 
 void VerifyPlan(const UpdateManifest& manifest) {
@@ -259,6 +423,7 @@ UpdateResult UpdaterService::ApplyPackage(const std::filesystem::path& manifestP
 
   try {
     const auto manifest = LoadManifestFile(manifestPath, installRoot_);
+    VerifyManifestPolicy(manifest, config_, database);
     VerifyPlan(manifest);
 
     result.packageId = manifest.packageId;
