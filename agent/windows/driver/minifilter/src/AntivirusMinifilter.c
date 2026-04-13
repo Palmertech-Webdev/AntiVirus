@@ -50,6 +50,9 @@ AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME
 static BOOLEAN
 AntivirusHasConnectedBroker(VOID);
 
+static BOOLEAN
+AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation);
+
 const FLT_OPERATION_REGISTRATION gCallbacks[] = {
     {IRP_MJ_CREATE, 0, AntivirusPreCreate, NULL},
     {IRP_MJ_WRITE, 0, AntivirusPreWrite, NULL},
@@ -242,7 +245,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   UNREFERENCED_PARAMETER(FltObjects);
 
   if (!AntivirusHasConnectedBroker()) {
-    return STATUS_SUCCESS;
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   RtlZeroMemory(&request, sizeof(request));
@@ -250,7 +253,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
 
   status = AntivirusBuildRequest(Data, Operation, &request);
   if (!NT_SUCCESS(status)) {
-    return STATUS_SUCCESS;
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   ExAcquireFastMutex(&gClientPortLock);
@@ -258,7 +261,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   ExReleaseFastMutex(&gClientPortLock);
 
   if (clientPort == NULL) {
-    return STATUS_SUCCESS;
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   request.protocolVersion = ANTIVIRUS_REALTIME_PROTOCOL_VERSION;
@@ -273,11 +276,19 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
 
   status = FltSendMessage(gFilterHandle, &clientPort, &request, sizeof(request), &reply, &replyLength, &timeout);
   if (!NT_SUCCESS(status)) {
-    return STATUS_SUCCESS;
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+  }
+
+  if (replyLength < sizeof(reply) || reply.protocolVersion != ANTIVIRUS_REALTIME_PROTOCOL_VERSION) {
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   if (reply.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK) {
     return STATUS_ACCESS_DENIED;
+  }
+
+  if (reply.action != ANTIVIRUS_REALTIME_RESPONSE_ACTION_ALLOW) {
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   return STATUS_SUCCESS;
@@ -354,4 +365,11 @@ AntivirusHasConnectedBroker(VOID) {
   ExReleaseFastMutex(&gClientPortLock);
 
   return hasClientPort;
+}
+
+static BOOLEAN
+AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation) {
+  return Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE;
 }

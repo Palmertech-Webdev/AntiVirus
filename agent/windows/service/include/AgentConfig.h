@@ -26,6 +26,11 @@ struct AgentConfig {
   int syncIterations{1};
   int telemetryBatchSize{25};
   int realtimeBrokerRetrySeconds{5};
+  bool enforceOperationalGates{true};
+  int maxMemoryLoadPercent{90};
+  int minFreeDiskMb{1024};
+  bool deferHeavyActionsOnBattery{true};
+  bool enforceReleasePromotionGates{true};
   bool isolationAllowLoopback{true};
   std::vector<std::wstring> isolationAllowedRemoteAddresses{};
   std::vector<std::wstring> isolationAllowedApplications{};

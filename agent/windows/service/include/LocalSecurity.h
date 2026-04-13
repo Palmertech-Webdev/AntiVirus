@@ -6,12 +6,14 @@ namespace antivirus::agent {
 
 enum class LocalUserRole {
   Unknown,
+  DeviceOwnerAdmin,
   LocalAdmin,
   StandardUser
 };
 
 enum class LocalAction {
   ViewStatus,
+  IssueSessionApproval,
   StartServiceAction,
   PatchRefresh,
   PatchInstall,
@@ -29,6 +31,8 @@ struct LocalActionAuthorization {
 
 LocalUserRole QueryCurrentLocalUserRole();
 bool IsCurrentUserElevatedAdmin();
+bool IsCurrentTokenElevated();
+std::wstring QueryCurrentUserSid();
 std::wstring LocalUserRoleToString(LocalUserRole role);
 LocalActionAuthorization AuthorizeCurrentUser(LocalAction action);
 

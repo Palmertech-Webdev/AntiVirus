@@ -48,6 +48,7 @@ constexpr wchar_t kPamRequestEventName[] = L"Global\\FenrirPamRequestReady";
 constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
 constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
 constexpr wchar_t kPamPolicyFileName[] = L"pam-policy.json";
+constexpr std::size_t kMaxCommandPayloadChars = 64 * 1024;
 
 struct PamRequestPayload {
   std::wstring requestedAt;
@@ -156,6 +157,10 @@ std::string UnescapeJsonString(const std::string& value) {
 }
 
 std::optional<std::wstring> ExtractPayloadString(const std::wstring& json, const std::string& key) {
+  if (json.size() > kMaxCommandPayloadChars) {
+    return std::nullopt;
+  }
+
   const auto utf8Json = WideToUtf8(json);
   const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"");
   std::smatch match;
@@ -167,6 +172,10 @@ std::optional<std::wstring> ExtractPayloadString(const std::wstring& json, const
 }
 
 std::optional<std::uint32_t> ExtractPayloadUInt32(const std::wstring& json, const std::string& key) {
+  if (json.size() > kMaxCommandPayloadChars) {
+    return std::nullopt;
+  }
+
   const auto utf8Json = WideToUtf8(json);
   const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(\\d+)");
   std::smatch match;
@@ -178,6 +187,10 @@ std::optional<std::uint32_t> ExtractPayloadUInt32(const std::wstring& json, cons
 }
 
 std::optional<bool> ExtractPayloadBool(const std::wstring& json, const std::string& key) {
+  if (json.size() > kMaxCommandPayloadChars) {
+    return std::nullopt;
+  }
+
   const auto utf8Json = WideToUtf8(json);
   const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(true|false|1|0)");
   std::smatch match;
@@ -191,6 +204,10 @@ std::optional<bool> ExtractPayloadBool(const std::wstring& json, const std::stri
 
 std::vector<std::wstring> ExtractPayloadStringArray(const std::wstring& json, const std::string& key) {
   std::vector<std::wstring> values;
+  if (json.size() > kMaxCommandPayloadChars) {
+    return values;
+  }
+
   const auto utf8Json = WideToUtf8(json);
   const std::regex arrayPattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*\\[(.*?)\\]");
   std::smatch arrayMatch;
@@ -275,6 +292,45 @@ void EnsureRuntimeLayoutReady(const AgentConfig& config, const RuntimePathValida
   EnsureDirectoryExists(config.journalRootPath, L"journal root");
   EnsureDirectoryExists(config.quarantineRootPath, L"quarantine root");
   EnsureDirectoryExists(config.evidenceRootPath, L"evidence root");
+}
+
+std::optional<std::wstring> EvaluateHeavyOperationGate(const AgentConfig& config, const std::wstring& operationName) {
+  if (!config.enforceOperationalGates) {
+    return std::nullopt;
+  }
+
+  MEMORYSTATUSEX memoryStatus{};
+  memoryStatus.dwLength = sizeof(memoryStatus);
+  if (GlobalMemoryStatusEx(&memoryStatus) != FALSE &&
+      static_cast<int>(memoryStatus.dwMemoryLoad) > config.maxMemoryLoadPercent) {
+    return std::wstring(L"Fenrir deferred ") + operationName + L" because memory pressure exceeded policy budget (" +
+           std::to_wstring(memoryStatus.dwMemoryLoad) + L"% > " + std::to_wstring(config.maxMemoryLoadPercent) + L"%).";
+  }
+
+  const auto runtimeRoot = ResolveRuntimeRoot(config);
+  if (!runtimeRoot.empty()) {
+    ULARGE_INTEGER freeBytesAvailable{};
+    ULARGE_INTEGER totalBytes{};
+    ULARGE_INTEGER totalFreeBytes{};
+    if (GetDiskFreeSpaceExW(runtimeRoot.c_str(), &freeBytesAvailable, &totalBytes, &totalFreeBytes) != FALSE) {
+      const auto freeMegabytes = freeBytesAvailable.QuadPart / (1024ull * 1024ull);
+      if (freeMegabytes < static_cast<unsigned long long>(std::max(config.minFreeDiskMb, 1))) {
+        return std::wstring(L"Fenrir deferred ") + operationName +
+               L" because free disk is below the configured safety floor (" + std::to_wstring(freeMegabytes) +
+               L" MB < " + std::to_wstring(config.minFreeDiskMb) + L" MB).";
+      }
+    }
+  }
+
+  if (config.deferHeavyActionsOnBattery) {
+    SYSTEM_POWER_STATUS powerStatus{};
+    if (GetSystemPowerStatus(&powerStatus) != FALSE && powerStatus.ACLineStatus == 0) {
+      return std::wstring(L"Fenrir deferred ") + operationName +
+             L" because the device is on battery power and heavy-operation gating is enabled.";
+    }
+  }
+
+  return std::nullopt;
 }
 
 std::optional<EventEnvelope> BuildBehaviorEventFromProcessTelemetry(const TelemetryRecord& record,
@@ -2011,6 +2067,10 @@ std::wstring AgentService::ExecuteTargetedScan(const RemoteCommand& command) {
     throw std::runtime_error("Targeted scan path does not exist");
   }
 
+  if (const auto gate = EvaluateHeavyOperationGate(config_, L"targeted scan"); gate.has_value()) {
+    throw std::runtime_error(WideToUtf8(*gate));
+  }
+
   auto findings = ScanTargets({targetPath}, policy_, ScanProgressCallback{}, config_.scanExcludedPaths);
   QuarantineStore quarantineStore(config_.quarantineRootPath, config_.runtimeDatabasePath);
   EvidenceRecorder evidenceRecorder(config_.evidenceRootPath, config_.runtimeDatabasePath);
@@ -2118,6 +2178,11 @@ std::wstring AgentService::ExecuteQuarantineMutation(const RemoteCommand& comman
 }
 
 std::wstring AgentService::ExecuteUpdateCommand(const RemoteCommand& command, const bool rollback) {
+  if (const auto gate = EvaluateHeavyOperationGate(config_, rollback ? L"update rollback" : L"update apply");
+      gate.has_value()) {
+    throw std::runtime_error(WideToUtf8(*gate));
+  }
+
   const auto installRoot = ResolveInstallRootForConfig(config_);
   UpdaterService updater(config_, installRoot);
   const auto result =
@@ -2182,6 +2247,12 @@ std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, con
            L"\",\"action\":\"run_windows_update\",\"status\":\"queued_for_pam\",\"queued\":true}";
   }
 
+  if ((installWindows || installSoftware || runCycle)) {
+    if (const auto gate = EvaluateHeavyOperationGate(config_, L"patch orchestration action"); gate.has_value()) {
+      throw std::runtime_error(WideToUtf8(*gate));
+    }
+  }
+
   PatchOrchestrator orchestrator(config_);
   PatchExecutionResult result{};
 
@@ -2230,6 +2301,12 @@ std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, con
 }
 
 std::wstring AgentService::ExecuteSupportBundleCommand(const RemoteCommand& command, const bool sanitized) {
+  if (!sanitized) {
+    if (const auto gate = EvaluateHeavyOperationGate(config_, L"full support bundle export"); gate.has_value()) {
+      throw std::runtime_error(WideToUtf8(*gate));
+    }
+  }
+
   const auto result = ExportSupportBundle(config_, state_, policy_, sanitized);
   if (!result.success) {
     throw std::runtime_error(WideToUtf8(result.errorMessage.empty() ? L"Support bundle export failed" : result.errorMessage));

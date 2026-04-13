@@ -47,6 +47,8 @@ struct EndpointClientSnapshot {
 struct LocalBrokerCommandResult {
   bool success{false};
   int statusCode{0};
+  bool requestOnly{false};
+  bool requiresReauth{false};
   std::wstring responseJson;
   std::wstring errorMessage;
 };
@@ -66,7 +68,8 @@ QuarantineActionResult DeleteQuarantinedItem(const AgentConfig& config, const st
 LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig& config, const std::wstring& type,
                                                 const std::wstring& recordId = L"",
                                                 const std::wstring& payloadJson = L"{}",
-                                                const std::wstring& targetPath = L"");
+                                                const std::wstring& targetPath = L"",
+                                                const std::wstring& sessionAuth = L"");
 PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId);
 
 }  // namespace antivirus::agent

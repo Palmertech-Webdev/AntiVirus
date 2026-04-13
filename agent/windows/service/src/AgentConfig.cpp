@@ -536,6 +536,19 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   config.realtimeBrokerRetrySeconds =
       ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_REALTIME_BROKER_RETRY_SECONDS"),
                        config.realtimeBrokerRetrySeconds);
+    config.enforceOperationalGates = ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_OPERATIONAL_GATES"),
+                             config.enforceOperationalGates);
+    config.maxMemoryLoadPercent =
+      std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_MAX_MEMORY_LOAD_PERCENT"),
+                    config.maxMemoryLoadPercent),
+           1, 100);
+    config.minFreeDiskMb =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_MIN_FREE_DISK_MB"), config.minFreeDiskMb);
+    config.deferHeavyActionsOnBattery = ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_DEFER_HEAVY_ON_BATTERY"),
+                              config.deferHeavyActionsOnBattery);
+    config.enforceReleasePromotionGates =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_RELEASE_GATES"),
+              config.enforceReleasePromotionGates);
   config.isolationAllowLoopback =
       ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ISOLATION_ALLOW_LOOPBACK"), config.isolationAllowLoopback);
   config.isolationAllowedRemoteAddresses =

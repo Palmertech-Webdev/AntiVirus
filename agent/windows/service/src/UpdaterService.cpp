@@ -54,6 +54,34 @@ bool ParseBoolText(const std::wstring& value) {
   return lower == L"1" || lower == L"true" || lower == L"yes";
 }
 
+constexpr std::size_t kMaxManifestLineChars = 4096;
+constexpr std::size_t kMaxManifestFiles = 512;
+
+void EnsureManifestFieldLength(const std::wstring& value, const std::size_t maxChars, const char* fieldName) {
+  if (value.size() <= maxChars) {
+    return;
+  }
+
+  throw std::runtime_error(std::string("Update manifest field exceeded allowed length: ") + fieldName);
+}
+
+bool IsSha256HexString(const std::wstring& value) {
+  if (value.size() != 64) {
+    return false;
+  }
+
+  return std::all_of(value.begin(), value.end(), [](const wchar_t ch) { return iswxdigit(ch) != 0; });
+}
+
+std::wstring DefaultTrustDomainForPackageType(const std::wstring& packageType) {
+  const auto lowerType = ToLowerCopy(packageType);
+  if (lowerType == L"rules" || lowerType == L"signatures") {
+    return L"content";
+  }
+
+  return L"platform";
+}
+
 std::vector<std::wstring> SplitVersionTokens(const std::wstring& value) {
   std::vector<std::wstring> tokens;
   std::wstring current;
@@ -127,9 +155,19 @@ std::vector<std::wstring> LoadKeyList(const std::filesystem::path& path) {
   return values;
 }
 
-std::vector<std::wstring> TrustedKeyIdsForPackageType(const AgentConfig& config, const std::wstring& packageType) {
+std::vector<std::wstring> TrustedKeyIdsForPackageType(const AgentConfig& config, const std::wstring& packageType,
+                                                      const std::wstring& trustDomain) {
   const auto lowerType = ToLowerCopy(packageType);
+  const auto lowerDomain = ToLowerCopy(trustDomain);
   const auto trustRoot = config.updateRootPath / L"trust";
+
+  if (!lowerDomain.empty()) {
+    const auto domainTrusted = LoadKeyList(trustRoot / (lowerDomain + L"-trusted-key-ids.txt"));
+    if (!domainTrusted.empty()) {
+      return domainTrusted;
+    }
+  }
+
   auto trusted = LoadKeyList((lowerType == L"rules" || lowerType == L"signatures")
                                  ? (trustRoot / L"content-trusted-key-ids.txt")
                                  : (trustRoot / L"platform-trusted-key-ids.txt"));
@@ -197,6 +235,10 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
   const auto manifestDirectory = manifest.manifestPath.parent_path();
   std::wstring line;
   while (std::getline(input, line)) {
+    if (line.size() > kMaxManifestLineChars) {
+      throw std::runtime_error("Update manifest line exceeded the safety size limit");
+    }
+
     const auto trimmed = TrimWide(line);
     if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
       continue;
@@ -210,31 +252,61 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
     const auto key = ToLowerCopy(TrimWide(trimmed.substr(0, separator)));
     const auto value = TrimWide(trimmed.substr(separator + 1));
     if (key == L"package_id") {
+      EnsureManifestFieldLength(value, 128, "package_id");
       manifest.packageId = value;
       continue;
     }
 
     if (key == L"package_type") {
+      EnsureManifestFieldLength(value, 64, "package_type");
       manifest.packageType = value;
       continue;
     }
 
     if (key == L"target_version") {
+      EnsureManifestFieldLength(value, 64, "target_version");
       manifest.targetVersion = value;
       continue;
     }
 
     if (key == L"channel") {
+      EnsureManifestFieldLength(value, 32, "channel");
       manifest.channel = value;
       continue;
     }
 
+    if (key == L"trust_domain") {
+      EnsureManifestFieldLength(value, 32, "trust_domain");
+      manifest.trustDomain = value;
+      continue;
+    }
+
+    if (key == L"promotion_track") {
+      EnsureManifestFieldLength(value, 64, "promotion_track");
+      manifest.promotionTrack = value;
+      continue;
+    }
+
+    if (key == L"promotion_gate") {
+      EnsureManifestFieldLength(value, 32, "promotion_gate");
+      manifest.promotionGate = value;
+      continue;
+    }
+
+    if (key == L"approval_ticket") {
+      EnsureManifestFieldLength(value, 128, "approval_ticket");
+      manifest.approvalTicket = value;
+      continue;
+    }
+
     if (key == L"package_signer") {
+      EnsureManifestFieldLength(value, 256, "package_signer");
       manifest.packageSigner = value;
       continue;
     }
 
     if (key == L"signing_key_id") {
+      EnsureManifestFieldLength(value, 128, "signing_key_id");
       manifest.signingKeyId = value;
       continue;
     }
@@ -244,13 +316,25 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
       continue;
     }
 
+    if (key == L"break_glass") {
+      manifest.breakGlass = ParseBoolText(value);
+      continue;
+    }
+
     if (key == L"file") {
       const auto parts = SplitWide(value, L'|');
       if (parts.size() < 3) {
         throw std::runtime_error("Update manifest file entries require source|target|sha256");
       }
 
+      if (manifest.files.size() >= kMaxManifestFiles) {
+        throw std::runtime_error("Update manifest defined too many file entries");
+      }
+
       UpdateFilePlan filePlan;
+      EnsureManifestFieldLength(parts[0], 1024, "file.source");
+      EnsureManifestFieldLength(parts[1], 1024, "file.target");
+      EnsureManifestFieldLength(parts[2], 128, "file.sha256");
       filePlan.sourcePath = std::filesystem::absolute(manifestDirectory / parts[0]).lexically_normal();
       filePlan.targetPath = ResolveTargetPath(parts[1], installRoot);
       filePlan.sha256 = ToLowerCopy(parts[2]);
@@ -268,6 +352,15 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
   if (manifest.packageType.empty()) {
     manifest.packageType = L"platform";
   }
+  if (manifest.trustDomain.empty()) {
+    manifest.trustDomain = DefaultTrustDomainForPackageType(manifest.packageType);
+  }
+  if (manifest.promotionTrack.empty()) {
+    manifest.promotionTrack = manifest.channel;
+  }
+  if (manifest.promotionGate.empty()) {
+    manifest.promotionGate = L"unspecified";
+  }
   if (manifest.targetVersion.empty()) {
     manifest.targetVersion = L"unknown";
   }
@@ -284,6 +377,8 @@ void VerifyManifestPolicy(const UpdateManifest& manifest, const AgentConfig& con
 
   const auto lowerType = ToLowerCopy(manifest.packageType);
   const auto lowerChannel = ToLowerCopy(manifest.channel);
+  const auto lowerTrustDomain = ToLowerCopy(manifest.trustDomain);
+  const auto lowerPromotionGate = ToLowerCopy(manifest.promotionGate);
   if (std::find(allowedPackageTypes.begin(), allowedPackageTypes.end(), lowerType) == allowedPackageTypes.end()) {
     throw std::runtime_error("Update manifest package type is not allowed");
   }
@@ -297,11 +392,40 @@ void VerifyManifestPolicy(const UpdateManifest& manifest, const AgentConfig& con
   if (manifest.signingKeyId.empty()) {
     throw std::runtime_error("Update manifest must declare a signing key id");
   }
+  if (lowerTrustDomain.empty()) {
+    throw std::runtime_error("Update manifest must declare a trust domain");
+  }
+
+  const auto expectedTrustDomain = DefaultTrustDomainForPackageType(manifest.packageType);
+  if (lowerTrustDomain != expectedTrustDomain) {
+    throw std::runtime_error("Update manifest trust domain does not match the package type trust boundary");
+  }
+
+  if (lowerPromotionGate == L"blocked" || lowerPromotionGate == L"rejected") {
+    throw std::runtime_error("Update manifest promotion gate explicitly blocks release application");
+  }
+
+  if (manifest.breakGlass && lowerChannel == L"stable") {
+    throw std::runtime_error("Break-glass update manifests are not allowed on the stable channel");
+  }
+
+  if (config.enforceReleasePromotionGates) {
+    if ((lowerChannel == L"stable" || lowerChannel == L"beta") && lowerPromotionGate != L"approved") {
+      throw std::runtime_error("Update manifest promotion gate is not approved for this release channel");
+    }
+    if ((lowerChannel == L"stable" || lowerChannel == L"beta") && manifest.approvalTicket.empty()) {
+      throw std::runtime_error("Update manifest is missing an approval ticket for promoted release channels");
+    }
+    if (manifest.promotionTrack.empty()) {
+      throw std::runtime_error("Update manifest is missing a promotion track");
+    }
+  }
+
   if (SigningKeyRevoked(config, manifest.signingKeyId)) {
     throw std::runtime_error("Update manifest signing key has been revoked");
   }
 
-  const auto trustedKeyIds = TrustedKeyIdsForPackageType(config, manifest.packageType);
+  const auto trustedKeyIds = TrustedKeyIdsForPackageType(config, manifest.packageType, manifest.trustDomain);
   if (std::find(trustedKeyIds.begin(), trustedKeyIds.end(), manifest.signingKeyId) == trustedKeyIds.end()) {
     throw std::runtime_error("Update manifest signing key id is not trusted for this package type");
   }
@@ -322,6 +446,10 @@ void VerifyPlan(const UpdateManifest& manifest) {
   for (const auto& file : manifest.files) {
     if (!std::filesystem::exists(file.sourcePath)) {
       throw std::runtime_error("Update source file is missing");
+    }
+
+    if (!IsSha256HexString(file.sha256)) {
+      throw std::runtime_error("Update manifest file hash must be a 64-character SHA-256 hex string");
     }
 
     if (ToLowerCopy(ComputeFileSha256(file.sourcePath)) != ToLowerCopy(file.sha256)) {

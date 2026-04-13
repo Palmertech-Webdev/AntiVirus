@@ -211,10 +211,10 @@ std::wstring EscapeJsonValue(const std::wstring& value) {
 }
 
 std::wstring BuildBrokerRequestJson(const std::wstring& type, const std::wstring& recordId, const std::wstring& payloadJson,
-                                    const std::wstring& targetPath) {
+                                    const std::wstring& targetPath, const std::wstring& sessionAuth) {
   return std::wstring(L"{\"type\":\"") + EscapeJsonValue(type) + L"\",\"recordId\":\"" + EscapeJsonValue(recordId) +
          L"\",\"targetPath\":\"" + EscapeJsonValue(targetPath) + L"\",\"payloadJson\":\"" + EscapeJsonValue(payloadJson) +
-         L"\"}";
+         L"\",\"sessionAuth\":\"" + EscapeJsonValue(sessionAuth) + L"\"}";
 }
 
 std::wstring FormatWindowsErrorMessage(const DWORD error) {
@@ -232,6 +232,33 @@ std::wstring FormatWindowsErrorMessage(const DWORD error) {
     message.pop_back();
   }
   return message;
+}
+
+std::optional<std::wstring> AcquireLocalSessionApproval(const AgentConfig& config, std::wstring* errorMessage) {
+  const auto approvalResult = SendLocalBrokerCommand(config, L"local.auth.session.begin");
+  if (!approvalResult.success) {
+    if (errorMessage != nullptr) {
+      if (!approvalResult.errorMessage.empty()) {
+        *errorMessage = approvalResult.errorMessage;
+      } else if (approvalResult.requestOnly) {
+        *errorMessage =
+            L"Fenrir requires a device-owner administrator approval before this action can run for this user.";
+      } else {
+        *errorMessage = L"Fenrir could not establish a local approval session for this sensitive action.";
+      }
+    }
+    return std::nullopt;
+  }
+
+  const auto sessionAuth = ExtractJsonString(approvalResult.responseJson, "sessionAuth");
+  if (!sessionAuth.has_value() || sessionAuth->empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir approval session handshake did not return a valid session token.";
+    }
+    return std::nullopt;
+  }
+
+  return sessionAuth;
 }
 
 PamPostureSummary QueryPamPosture(const AgentConfig& config) {
@@ -493,7 +520,18 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
 }
 
 QuarantineActionResult RestoreQuarantinedItem(const AgentConfig& config, const std::wstring& recordId) {
-  const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.restore", recordId);
+  std::wstring approvalError;
+  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
+  if (!approvalToken.has_value()) {
+    return QuarantineActionResult{
+        .success = false,
+        .recordId = recordId,
+        .errorMessage = approvalError.empty()
+                            ? L"Fenrir could not open an approval session for quarantine restore."
+                            : approvalError};
+  }
+
+  const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.restore", recordId, L"{}", L"", *approvalToken);
   if (!brokerResult.success) {
     return QuarantineActionResult{
         .success = false,
@@ -509,7 +547,18 @@ QuarantineActionResult RestoreQuarantinedItem(const AgentConfig& config, const s
 }
 
 QuarantineActionResult DeleteQuarantinedItem(const AgentConfig& config, const std::wstring& recordId) {
-  const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.delete", recordId);
+  std::wstring approvalError;
+  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
+  if (!approvalToken.has_value()) {
+    return QuarantineActionResult{
+        .success = false,
+        .recordId = recordId,
+        .errorMessage = approvalError.empty()
+                            ? L"Fenrir could not open an approval session for quarantine delete."
+                            : approvalError};
+  }
+
+  const auto brokerResult = SendLocalBrokerCommand(config, L"quarantine.delete", recordId, L"{}", L"", *approvalToken);
   if (!brokerResult.success) {
     return QuarantineActionResult{
         .success = false,
@@ -525,11 +574,12 @@ QuarantineActionResult DeleteQuarantinedItem(const AgentConfig& config, const st
 }
 
 LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig&, const std::wstring& type, const std::wstring& recordId,
-                                                const std::wstring& payloadJson, const std::wstring& targetPath) {
+                                                const std::wstring& payloadJson, const std::wstring& targetPath,
+                                                const std::wstring& sessionAuth) {
   constexpr DWORD kReadTimeoutMilliseconds = 10'000;
   constexpr DWORD kBufferBytes = 64 * 1024;
 
-  const auto requestJson = BuildBrokerRequestJson(type, recordId, payloadJson, targetPath);
+  const auto requestJson = BuildBrokerRequestJson(type, recordId, payloadJson, targetPath, sessionAuth);
   const auto requestUtf8 = WideToUtf8(requestJson);
   std::vector<char> responseBuffer(kBufferBytes, '\0');
   DWORD bytesRead = 0;
@@ -546,16 +596,41 @@ LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig&, const std::w
   }
 
   const auto responseJson = Utf8ToWide(std::string(responseBuffer.data(), responseBuffer.data() + bytesRead));
-  return LocalBrokerCommandResult{
+  auto result = LocalBrokerCommandResult{
       .success = ExtractJsonBool(responseJson, "success").value_or(false),
       .statusCode = ExtractJsonInt(responseJson, "statusCode").value_or(0),
+      .requestOnly = ExtractJsonBool(responseJson, "requestOnly").value_or(false),
+      .requiresReauth = ExtractJsonBool(responseJson, "requiresReauth").value_or(false),
       .responseJson = ExtractJsonString(responseJson, "resultJson").value_or(L""),
       .errorMessage = ExtractJsonString(responseJson, "errorMessage").value_or(L"")};
+
+  if (!result.success && result.errorMessage.empty()) {
+    if (result.requiresReauth) {
+      result.errorMessage = L"Fenrir requires a fresh approval session for this sensitive action.";
+    } else if (result.requestOnly) {
+      result.errorMessage = L"Fenrir policy requires elevated owner approval for this local action.";
+    }
+  }
+
+  return result;
 }
 
 PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId) {
   const auto payloadJson = std::wstring(L"{\"softwareId\":\"") + EscapeJsonValue(softwareId) + L"\"}";
-  const auto brokerResult = SendLocalBrokerCommand(config, L"patch.software.install", L"", payloadJson);
+  std::wstring approvalError;
+  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
+  if (!approvalToken.has_value()) {
+    return PatchExecutionResult{
+        .success = false,
+        .targetId = softwareId,
+        .status = L"approval_required",
+        .errorCode = L"approval-session",
+        .detailJson = std::wstring(L"{\"error\":\"") +
+                      EscapeJsonValue(approvalError.empty() ? L"Fenrir local approval session is required." : approvalError) +
+                      L"\"}"};
+  }
+
+  const auto brokerResult = SendLocalBrokerCommand(config, L"patch.software.install", L"", payloadJson, L"", *approvalToken);
   if (!brokerResult.success) {
     return PatchExecutionResult{
         .success = false,

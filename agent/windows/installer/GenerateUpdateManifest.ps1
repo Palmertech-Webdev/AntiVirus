@@ -5,9 +5,14 @@ param(
     [string]$PackageType = 'platform',
     [string]$TargetVersion = '0.1.0-alpha',
     [string]$Channel = 'stable',
+    [string]$TrustDomain = '',
+    [string]$PromotionTrack = '',
+    [string]$PromotionGate = 'approved',
+    [string]$ApprovalTicket = 'local-dev',
     [string]$SigningKeyId = 'fenrir-platform-prod-2026',
     [string]$PackageSigner = '',
     [switch]$AllowDowngrade,
+    [switch]$BreakGlass,
     [string[]]$Files = @(
         'fenrir-agent-service.exe',
         'fenrir-amsi-provider.dll',
@@ -22,15 +27,30 @@ if (-not $OutputPath) {
     $OutputPath = Join-Path $releaseRoot "$PackageId.manifest"
 }
 
+if (-not $TrustDomain) {
+    $TrustDomain = if ($PackageType -in @('rules', 'signatures')) { 'content' } else { 'platform' }
+}
+
+if (-not $PromotionTrack) {
+    $PromotionTrack = $Channel
+}
+
 $manifestLines = [System.Collections.Generic.List[string]]::new()
 $manifestLines.Add('# Fenrir update manifest')
 $manifestLines.Add("package_id=$PackageId")
 $manifestLines.Add("package_type=$PackageType")
 $manifestLines.Add("target_version=$TargetVersion")
 $manifestLines.Add("channel=$Channel")
+$manifestLines.Add("trust_domain=$TrustDomain")
+$manifestLines.Add("promotion_track=$PromotionTrack")
+$manifestLines.Add("promotion_gate=$PromotionGate")
+$manifestLines.Add("approval_ticket=$ApprovalTicket")
 $manifestLines.Add("signing_key_id=$SigningKeyId")
 if ($AllowDowngrade) {
     $manifestLines.Add("allow_downgrade=true")
+}
+if ($BreakGlass) {
+    $manifestLines.Add("break_glass=true")
 }
 if ($PackageSigner) {
     $manifestLines.Add("package_signer=$PackageSigner")

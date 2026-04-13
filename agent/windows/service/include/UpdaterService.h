@@ -26,9 +26,14 @@ struct UpdateManifest {
   std::wstring packageType;
   std::wstring targetVersion;
   std::wstring channel;
+  std::wstring trustDomain;
+  std::wstring promotionTrack;
+  std::wstring promotionGate;
+  std::wstring approvalTicket;
   std::wstring packageSigner;
   std::wstring signingKeyId;
   bool allowDowngrade{false};
+  bool breakGlass{false};
   std::filesystem::path manifestPath;
   std::vector<UpdateFilePlan> files;
 };

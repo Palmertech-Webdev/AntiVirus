@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cwctype>
 #include <mutex>
 #include <optional>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "LocalSecurity.h"
@@ -26,7 +28,42 @@ struct LocalPipeRequest {
   std::wstring recordId;
   std::wstring targetPath;
   std::wstring payloadJson;
+  std::wstring sessionAuth;
 };
+
+struct SessionApprovalGrant {
+  std::wstring userSid;
+  std::chrono::steady_clock::time_point expiresAt;
+};
+
+constexpr std::size_t kMaxPipeMessageBytes = 64 * 1024;
+constexpr std::size_t kMaxCommandTypeChars = 96;
+constexpr std::size_t kMaxRecordIdChars = 128;
+constexpr std::size_t kMaxTargetPathChars = 4096;
+constexpr std::size_t kMaxPayloadJsonChars = 32 * 1024;
+constexpr std::size_t kMaxSessionAuthChars = 128;
+constexpr auto kSessionApprovalLifetime = std::chrono::minutes(5);
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool IsSafeCommandType(const std::wstring& type) {
+  if (type.empty() || type.size() > kMaxCommandTypeChars) {
+    return false;
+  }
+
+  return std::all_of(type.begin(), type.end(), [](const wchar_t ch) {
+    return (ch >= L'a' && ch <= L'z') || (ch >= L'0' && ch <= L'9') || ch == L'.' || ch == L'_' || ch == L'-';
+  });
+}
+
+bool RequiresSessionApproval(const std::wstring& type) {
+  return type == L"quarantine.restore" || type == L"quarantine.delete" || type == L"patch.software.install" ||
+         type == L"patch.windows.install" || type == L"patch.cycle.run";
+}
 
 std::string EscapeRegex(const std::string& value) {
   std::string escaped;
@@ -122,7 +159,8 @@ std::wstring EscapeJsonValue(const std::wstring& value) {
 
 std::wstring BuildResponseJson(const bool success, const int statusCode, const std::wstring& resultJson,
                                const std::wstring& errorMessage, const std::wstring& role = L"",
-                               const std::wstring& requester = L"") {
+                               const std::wstring& requester = L"", const bool requestOnly = false,
+                               const bool requiresReauth = false) {
   std::wstring json = L"{\"success\":";
   json += success ? L"true" : L"false";
   json += L",\"statusCode\":";
@@ -142,11 +180,21 @@ std::wstring BuildResponseJson(const bool success, const int statusCode, const s
     json += EscapeJsonValue(requester);
     json += L"\"";
   }
+  if (requestOnly) {
+    json += L",\"requestOnly\":true";
+  }
+  if (requiresReauth) {
+    json += L",\"requiresReauth\":true";
+  }
   json += L"}";
   return json;
 }
 
 LocalAction ResolveActionForCommandType(const std::wstring& type) {
+  if (type == L"local.auth.session.begin") {
+    return LocalAction::IssueSessionApproval;
+  }
+
   if (type == L"quarantine.restore" || type == L"quarantine.delete") {
     return LocalAction::QuarantineMutate;
   }
@@ -167,7 +215,8 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
 }
 
 bool IsSupportedLocalCommand(const std::wstring& type) {
-  static const std::array<const wchar_t*, 9> kSupportedTypes = {
+  static const std::array<const wchar_t*, 10> kSupportedTypes = {
+      L"local.auth.session.begin",
       L"quarantine.restore",      L"quarantine.delete",    L"patch.scan",         L"patch.software.install",
       L"patch.windows.install",   L"patch.cycle.run",      L"support.bundle.export", L"support.bundle.export.full",
       L"storage.maintenance.run"};
@@ -187,6 +236,9 @@ bool ReadPipeMessage(const HANDLE pipe, std::wstring* message) {
 
   for (;;) {
     if (ReadFile(pipe, chunk.data(), static_cast<DWORD>(chunk.size()), &bytesRead, nullptr) != FALSE) {
+      if (buffer.size() + bytesRead > kMaxPipeMessageBytes) {
+        return false;
+      }
       buffer.append(chunk.data(), chunk.data() + bytesRead);
       break;
     }
@@ -196,6 +248,9 @@ bool ReadPipeMessage(const HANDLE pipe, std::wstring* message) {
       return false;
     }
 
+    if (buffer.size() + bytesRead > kMaxPipeMessageBytes) {
+      return false;
+    }
     buffer.append(chunk.data(), chunk.data() + bytesRead);
   }
 
@@ -217,10 +272,17 @@ bool ParsePipeRequest(const std::wstring& json, LocalPipeRequest* request, std::
     return false;
   }
 
-  const auto type = ExtractPayloadString(json, "type");
-  if (!type.has_value() || type->empty()) {
+  if (json.size() > kMaxPipeMessageBytes) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir local control request is missing a command type.";
+      *errorMessage = L"Fenrir local control rejected a request larger than the allowed pipe payload limit.";
+    }
+    return false;
+  }
+
+  const auto type = ExtractPayloadString(json, "type");
+  if (!type.has_value() || type->empty() || !IsSafeCommandType(*type)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir local control request contains an invalid command type.";
     }
     return false;
   }
@@ -229,6 +291,23 @@ bool ParsePipeRequest(const std::wstring& json, LocalPipeRequest* request, std::
   request->recordId = ExtractPayloadString(json, "recordId").value_or(L"");
   request->targetPath = ExtractPayloadString(json, "targetPath").value_or(L"");
   request->payloadJson = ExtractPayloadString(json, "payloadJson").value_or(L"{}");
+  request->sessionAuth = ExtractPayloadString(json, "sessionAuth").value_or(L"");
+
+  if (request->recordId.size() > kMaxRecordIdChars || request->targetPath.size() > kMaxTargetPathChars ||
+      request->payloadJson.size() > kMaxPayloadJsonChars || request->sessionAuth.size() > kMaxSessionAuthChars) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir local control request exceeded one or more field safety limits.";
+    }
+    return false;
+  }
+
+  if (request->payloadJson.find(L'\0') != std::wstring::npos) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir local control rejected a malformed request payload.";
+    }
+    return false;
+  }
+
   return true;
 }
 
@@ -259,6 +338,74 @@ std::wstring BuildLocalCommandId() {
   return L"local-" + CurrentUtcTimestamp() + L"-" + GenerateGuidString();
 }
 
+void PurgeExpiredSessionApprovals(std::unordered_map<std::wstring, SessionApprovalGrant>* grants) {
+  if (grants == nullptr) {
+    return;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  for (auto it = grants->begin(); it != grants->end();) {
+    if (it->second.expiresAt <= now) {
+      it = grants->erase(it);
+      continue;
+    }
+    ++it;
+  }
+}
+
+std::wstring BuildSessionApprovalResultJson(const std::wstring& sessionAuth) {
+  return std::wstring(L"{\"sessionAuth\":\"") + EscapeJsonValue(sessionAuth) +
+         L"\",\"expiresInSeconds\":" + std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(
+                                                     kSessionApprovalLifetime)
+                                                     .count()) +
+         L"}";
+}
+
+std::wstring IssueSessionApprovalToken(std::unordered_map<std::wstring, SessionApprovalGrant>* grants,
+                                       const std::wstring& callerSid) {
+  if (grants == nullptr) {
+    return {};
+  }
+
+  PurgeExpiredSessionApprovals(grants);
+  const auto token = GenerateGuidString();
+  (*grants)[token] = SessionApprovalGrant{
+      .userSid = ToLowerCopy(callerSid),
+      .expiresAt = std::chrono::steady_clock::now() + kSessionApprovalLifetime};
+  return token;
+}
+
+bool ConsumeSessionApprovalToken(std::unordered_map<std::wstring, SessionApprovalGrant>* grants,
+                                 const std::wstring& sessionAuth, const std::wstring& callerSid,
+                                 std::wstring* errorMessage) {
+  if (grants == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir local approval state is unavailable.";
+    }
+    return false;
+  }
+
+  PurgeExpiredSessionApprovals(grants);
+  const auto grant = grants->find(sessionAuth);
+  if (grant == grants->end()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir local approval session is missing or expired. Re-authenticate and try again.";
+    }
+    return false;
+  }
+
+  if (ToLowerCopy(callerSid) != grant->second.userSid) {
+    grants->erase(grant);
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir local approval session did not match the caller identity.";
+    }
+    return false;
+  }
+
+  grants->erase(grant);
+  return true;
+}
+
 }  // namespace
 
 class LocalControlChannelState {
@@ -266,6 +413,8 @@ class LocalControlChannelState {
   std::mutex lock;
   HANDLE activePipe{INVALID_HANDLE_VALUE};
   std::thread worker;
+  std::mutex sessionApprovalLock;
+  std::unordered_map<std::wstring, SessionApprovalGrant> sessionApprovals;
 };
 
 struct LocalControlChannel::State : public LocalControlChannelState {};
@@ -400,9 +549,11 @@ void LocalControlChannel::Run() {
 
     LocalActionAuthorization authorization{};
     std::wstring requester = L"unknown";
+    std::wstring callerSid;
     if (ImpersonateNamedPipeClient(pipe) != FALSE) {
       authorization = AuthorizeCurrentUser(ResolveActionForCommandType(request.type));
       requester = QueryImpersonatedUserName();
+      callerSid = QueryCurrentUserSid();
       RevertToSelf();
     } else {
       authorization = LocalActionAuthorization{
@@ -413,8 +564,10 @@ void LocalControlChannel::Run() {
     }
 
     if (!authorization.allowed) {
-      WritePipeMessage(pipe, BuildResponseJson(false, 403, L"", authorization.reason, LocalUserRoleToString(authorization.role),
-                                               requester));
+      const auto deniedStatusCode = authorization.requestOnly ? 423 : 403;
+      WritePipeMessage(pipe,
+                       BuildResponseJson(false, deniedStatusCode, L"", authorization.reason,
+                                         LocalUserRoleToString(authorization.role), requester, authorization.requestOnly));
       FlushFileBuffers(pipe);
       DisconnectNamedPipe(pipe);
       {
@@ -425,6 +578,84 @@ void LocalControlChannel::Run() {
       }
       CloseHandle(pipe);
       continue;
+    }
+
+    if (request.type == L"local.auth.session.begin") {
+      if (callerSid.empty()) {
+        WritePipeMessage(pipe, BuildResponseJson(false, 401, L"",
+                                                 L"Fenrir could not bind a local approval session to the caller identity.",
+                                                 LocalUserRoleToString(authorization.role), requester, false, true));
+      } else {
+        std::wstring sessionAuth;
+        {
+          std::lock_guard guard(state->sessionApprovalLock);
+          sessionAuth = IssueSessionApprovalToken(&state->sessionApprovals, callerSid);
+        }
+
+        if (sessionAuth.empty()) {
+          WritePipeMessage(pipe,
+                           BuildResponseJson(false, 500, L"",
+                                             L"Fenrir could not issue a local approval session for this request.",
+                                             LocalUserRoleToString(authorization.role), requester, false, true));
+        } else {
+          WritePipeMessage(pipe,
+                           BuildResponseJson(true, 200, BuildSessionApprovalResultJson(sessionAuth), L"",
+                                             LocalUserRoleToString(authorization.role), requester));
+        }
+      }
+
+      FlushFileBuffers(pipe);
+      DisconnectNamedPipe(pipe);
+      {
+        std::lock_guard guard(state->lock);
+        if (state->activePipe == pipe) {
+          state->activePipe = INVALID_HANDLE_VALUE;
+        }
+      }
+      CloseHandle(pipe);
+      continue;
+    }
+
+    if (RequiresSessionApproval(request.type)) {
+      if (request.sessionAuth.empty() || callerSid.empty()) {
+        WritePipeMessage(pipe, BuildResponseJson(false, 401, L"",
+                                                 L"Fenrir requires a fresh local approval session for this sensitive action.",
+                                                 LocalUserRoleToString(authorization.role), requester, false, true));
+        FlushFileBuffers(pipe);
+        DisconnectNamedPipe(pipe);
+        {
+          std::lock_guard guard(state->lock);
+          if (state->activePipe == pipe) {
+            state->activePipe = INVALID_HANDLE_VALUE;
+          }
+        }
+        CloseHandle(pipe);
+        continue;
+      }
+
+      std::wstring sessionValidationError;
+      bool approved = false;
+      {
+        std::lock_guard guard(state->sessionApprovalLock);
+        approved = ConsumeSessionApprovalToken(&state->sessionApprovals, request.sessionAuth, callerSid,
+                                               &sessionValidationError);
+      }
+
+      if (!approved) {
+        WritePipeMessage(pipe,
+                         BuildResponseJson(false, 403, L"", sessionValidationError,
+                                           LocalUserRoleToString(authorization.role), requester, false, true));
+        FlushFileBuffers(pipe);
+        DisconnectNamedPipe(pipe);
+        {
+          std::lock_guard guard(state->lock);
+          if (state->activePipe == pipe) {
+            state->activePipe = INVALID_HANDLE_VALUE;
+          }
+        }
+        CloseHandle(pipe);
+        continue;
+      }
     }
 
     try {
