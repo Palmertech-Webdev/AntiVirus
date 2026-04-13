@@ -10,10 +10,12 @@ namespace antivirus::agent {
 
 struct AgentConfig {
   std::wstring controlPlaneBaseUrl{L"http://127.0.0.1:4000"};
+  std::filesystem::path installRootPath{};
   std::filesystem::path runtimeDatabasePath{std::filesystem::path(L"runtime") / L"agent-runtime.db"};
   std::filesystem::path stateFilePath{std::filesystem::path(L"runtime") / L"agent-state.ini"};
   std::filesystem::path telemetryQueuePath{std::filesystem::path(L"runtime") / L"telemetry-queue.tsv"};
   std::filesystem::path updateRootPath{std::filesystem::path(L"runtime") / L"updates"};
+  std::filesystem::path journalRootPath{std::filesystem::path(L"runtime") / L"journal"};
   std::filesystem::path elamDriverPath{};
   std::filesystem::path quarantineRootPath{std::filesystem::path(L"runtime") / L"quarantine"};
   std::filesystem::path evidenceRootPath{std::filesystem::path(L"runtime") / L"evidence"};
@@ -30,8 +32,16 @@ struct AgentConfig {
   std::vector<std::filesystem::path> scanExcludedPaths{};
 };
 
+struct RuntimePathValidation {
+  bool trusted{false};
+  std::filesystem::path installRootPath;
+  std::filesystem::path runtimeRootPath;
+  std::wstring message;
+};
+
 AgentConfig LoadAgentConfig();
 AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle);
+RuntimePathValidation ValidateRuntimePaths(const AgentConfig& config);
 std::vector<std::filesystem::path> LoadConfiguredScanExclusions();
 bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& exclusions);
 

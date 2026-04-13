@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "AgentService.h"
@@ -111,6 +112,48 @@ std::filesystem::path GetInstallRoot() {
   return modulePath.has_parent_path() ? modulePath.parent_path() : std::filesystem::current_path();
 }
 
+bool EnsureDirectoryReady(const std::filesystem::path& path, const wchar_t* label, std::wstring* errorMessage) {
+  if (path.empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = std::wstring(label) + L" is empty.";
+    }
+    return false;
+  }
+
+  std::error_code error;
+  std::filesystem::create_directories(path, error);
+  if (error || !std::filesystem::exists(path, error)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = std::wstring(L"Could not prepare ") + label + L" at " + path.wstring();
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool PrepareRuntimeLayout(const antivirus::agent::AgentConfig& config, std::wstring* errorMessage) {
+  const auto runtimeValidation = antivirus::agent::ValidateRuntimePaths(config);
+  if (!runtimeValidation.trusted) {
+    if (errorMessage != nullptr) {
+      *errorMessage = runtimeValidation.message.empty() ? L"Runtime boundaries are not trusted."
+                                                        : runtimeValidation.message;
+    }
+    return false;
+  }
+
+  const auto runtimeRoot = runtimeValidation.runtimeRootPath.empty() ? config.runtimeDatabasePath.parent_path()
+                                                                      : runtimeValidation.runtimeRootPath;
+  return EnsureDirectoryReady(runtimeRoot, L"runtime root", errorMessage) &&
+         EnsureDirectoryReady(config.runtimeDatabasePath.parent_path(), L"runtime database root", errorMessage) &&
+         EnsureDirectoryReady(config.stateFilePath.parent_path(), L"state root", errorMessage) &&
+         EnsureDirectoryReady(config.telemetryQueuePath.parent_path(), L"telemetry queue root", errorMessage) &&
+         EnsureDirectoryReady(config.updateRootPath, L"update root", errorMessage) &&
+         EnsureDirectoryReady(config.journalRootPath, L"journal root", errorMessage) &&
+         EnsureDirectoryReady(config.quarantineRootPath, L"quarantine root", errorMessage) &&
+         EnsureDirectoryReady(config.evidenceRootPath, L"evidence root", errorMessage);
+}
+
 void ConfigureServiceHardening(SC_HANDLE service) {
   SERVICE_DESCRIPTIONW description{};
   description.lpDescription = const_cast<LPWSTR>(kServiceDescription);
@@ -137,6 +180,10 @@ void ConfigureServiceHardening(SC_HANDLE service) {
   failureActions.cActions = static_cast<DWORD>(std::size(actions));
   failureActions.lpsaActions = actions;
   ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS, &failureActions);
+
+  SERVICE_FAILURE_ACTIONS_FLAG failureActionsFlag{};
+  failureActionsFlag.fFailureActionsOnNonCrashFailures = TRUE;
+  ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &failureActionsFlag);
 }
 
 bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToken) {
@@ -189,7 +236,16 @@ bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToke
   ConfigureServiceHardening(service);
 
   auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
-  antivirus::agent::HardeningManager hardeningManager(config, GetInstallRoot());
+  std::wstring runtimeLayoutError;
+  if (!PrepareRuntimeLayout(config, &runtimeLayoutError)) {
+    std::wcerr << L"Runtime layout preparation failed: " << runtimeLayoutError << std::endl;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
+  antivirus::agent::HardeningManager hardeningManager(
+      config, config.installRootPath.empty() ? GetInstallRoot() : config.installRootPath);
   std::wstring hardeningError;
   const auto hardeningApplied = hardeningManager.ApplyPostInstallHardening(uninstallToken, &hardeningError);
   if (!hardeningApplied) {

@@ -21,6 +21,7 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Configurable sync loop for development and testing
 - Cached-policy startup when the control plane is unavailable
 - Executable-relative runtime paths so service launches do not write into `System32`
+- Trusted runtime-root boundary validation across runtime database, state, telemetry, update staging, quarantine, evidence, and journal paths
 - A shared on-demand scan engine used by `antivirus-scannercli`
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
 - Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories
@@ -94,6 +95,7 @@ The purpose of this folder is to establish the internal contracts we will build 
 - `ANTIVIRUS_AGENT_STATE_FILE`
 - `ANTIVIRUS_TELEMETRY_QUEUE_FILE`
 - `ANTIVIRUS_UPDATE_ROOT`
+- `ANTIVIRUS_JOURNAL_ROOT`
 - `ANTIVIRUS_ELAM_DRIVER_PATH`
 - `ANTIVIRUS_QUARANTINE_ROOT`
 - `ANTIVIRUS_EVIDENCE_ROOT`

@@ -585,10 +585,14 @@ HardeningStatus HardeningManager::QueryStatus(const std::wstring& serviceName) c
     RegCloseKey(key);
   }
 
-  status.installPathProtected = std::filesystem::exists(installRoot_);
-  status.runtimePathsProtected = std::filesystem::exists(config_.runtimeDatabasePath.parent_path()) &&
+  const auto runtimeValidation = ValidateRuntimePaths(config_);
+  const auto effectiveInstallRoot = runtimeValidation.installRootPath.empty() ? installRoot_ : runtimeValidation.installRootPath;
+  status.installPathProtected = std::filesystem::exists(effectiveInstallRoot);
+  status.runtimePathsTrusted = runtimeValidation.trusted;
+  status.runtimePathsProtected = status.runtimePathsTrusted && std::filesystem::exists(runtimeValidation.runtimeRootPath) &&
                                  std::filesystem::exists(config_.quarantineRootPath) &&
                                  std::filesystem::exists(config_.evidenceRootPath) &&
+                                 std::filesystem::exists(config_.journalRootPath) &&
                                  std::filesystem::exists(config_.updateRootPath);
   const auto effectiveElamPath =
       !config_.elamDriverPath.empty() ? config_.elamDriverPath : std::filesystem::path(status.elamDriverPath);
@@ -599,12 +603,18 @@ HardeningStatus HardeningManager::QueryStatus(const std::wstring& serviceName) c
     status.launchProtectedConfigured = queriedLaunchProtected;
   }
 
-  status.statusMessage =
-      status.registryConfigured && status.runtimePathsProtected && status.serviceControlProtected
-          ? (status.launchProtectedConfigured
-                 ? L"Tamper protection, service stop-hardening, ELAM-backed certificate registration, and launch-protected service posture are configured."
-                 : L"Tamper protection and service stop-hardening are configured, but launch-protected service registration is not yet active.")
-          : L"Tamper-protection is only partially configured.";
+  if (!status.runtimePathsTrusted) {
+    status.statusMessage = runtimeValidation.message.empty()
+                             ? L"Runtime path boundaries are not trusted."
+                             : runtimeValidation.message;
+  } else {
+    status.statusMessage =
+        status.registryConfigured && status.runtimePathsProtected && status.serviceControlProtected
+            ? (status.launchProtectedConfigured
+                   ? L"Tamper protection, trusted runtime path boundaries, service stop-hardening, ELAM-backed certificate registration, and launch-protected service posture are configured."
+                   : L"Tamper protection, trusted runtime path boundaries, and service stop-hardening are configured, but launch-protected service registration is not yet active.")
+            : L"Tamper-protection is only partially configured.";
+  }
   return status;
 }
 

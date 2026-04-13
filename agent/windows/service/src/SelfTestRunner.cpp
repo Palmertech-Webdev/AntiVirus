@@ -259,11 +259,24 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
              L"Sign production binaries before packaging, rollout, and protected-service onboarding.");
   }
 
+  const auto runtimeValidation = ValidateRuntimePaths(config);
+  AddCheck(report, L"runtime_path_boundaries", L"Trusted runtime boundaries",
+           runtimeValidation.trusted ? SelfTestStatus::Pass : SelfTestStatus::Fail,
+           runtimeValidation.trusted
+               ? L"Trusted runtime root: " + runtimeValidation.runtimeRootPath.wstring() +
+                     L"; install root: " + runtimeValidation.installRootPath.wstring()
+               : (runtimeValidation.message.empty()
+                      ? L"Runtime boundaries are not trusted."
+                      : runtimeValidation.message),
+           L"Re-run install or repair so runtime database, state, telemetry, update, quarantine, evidence, and journal paths stay within one trusted runtime root.");
+
   const auto hardeningManager = HardeningManager(config, installRoot);
   const auto hardeningStatus = hardeningManager.QueryStatus();
   AddCheck(report, L"hardening", L"Service hardening",
-           hardeningStatus.registryConfigured && hardeningStatus.runtimePathsProtected ? SelfTestStatus::Pass
-                                                                                      : SelfTestStatus::Warning,
+           hardeningStatus.registryConfigured && hardeningStatus.runtimePathsTrusted &&
+                   hardeningStatus.runtimePathsProtected
+               ? SelfTestStatus::Pass
+               : SelfTestStatus::Warning,
            hardeningStatus.statusMessage.empty() ? L"Hardening status is available." : hardeningStatus.statusMessage,
            L"Run fenrir-agent-service.exe --repair from an elevated context to reapply registry and ACL hardening.");
 
@@ -376,14 +389,32 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                                  : L"The FenrirAgent service is not installed in the SCM on this host.",
            L"Run fenrir-agent-service.exe --install from an elevated install context.");
 
-  if (std::filesystem::create_directories(config.updateRootPath) || PathExists(config.updateRootPath)) {
-    AddCheck(report, L"update_root", L"Update staging root", SelfTestStatus::Pass,
-             L"The update root is available at " + config.updateRootPath.wstring() + L".");
-  } else {
-    AddCheck(report, L"update_root", L"Update staging root", SelfTestStatus::Fail,
-             L"The update root could not be created at " + config.updateRootPath.wstring() + L".",
-             L"Ensure the runtime update directory is writable before testing rollback-aware upgrades.");
-  }
+  const auto runtimeRoot = runtimeValidation.runtimeRootPath.empty() ? config.runtimeDatabasePath.parent_path()
+                                                                      : runtimeValidation.runtimeRootPath;
+  const auto addRuntimeRootAvailabilityCheck = [&report](const std::wstring& id, const std::wstring& name,
+                                                          const std::filesystem::path& rootPath,
+                                                          const std::wstring& remediation) {
+    std::error_code error;
+    std::filesystem::create_directories(rootPath, error);
+    if (!error && PathExists(rootPath)) {
+      AddCheck(report, id, name, SelfTestStatus::Pass, L"The root is available at " + rootPath.wstring() + L".");
+      return;
+    }
+
+    AddCheck(report, id, name, SelfTestStatus::Fail,
+             L"The root could not be prepared at " + rootPath.wstring() + L".", remediation);
+  };
+
+  addRuntimeRootAvailabilityCheck(L"runtime_root", L"Runtime root", runtimeRoot,
+                                  L"Ensure the configured runtime root is writable before starting the service.");
+  addRuntimeRootAvailabilityCheck(L"update_root", L"Update staging root", config.updateRootPath,
+                                  L"Ensure the runtime update directory is writable before testing rollback-aware upgrades.");
+  addRuntimeRootAvailabilityCheck(L"quarantine_root", L"Quarantine root", config.quarantineRootPath,
+                                  L"Ensure local quarantine storage is writable by the service account.");
+  addRuntimeRootAvailabilityCheck(L"evidence_root", L"Evidence root", config.evidenceRootPath,
+                                  L"Ensure local evidence storage is writable by the service account.");
+  addRuntimeRootAvailabilityCheck(L"journal_root", L"Journal root", config.journalRootPath,
+                                  L"Ensure the local journal path is writable for audit and recovery events.");
 
   const auto failures = std::count_if(report.checks.begin(), report.checks.end(),
                                       [](const auto& check) { return check.status == SelfTestStatus::Fail; });

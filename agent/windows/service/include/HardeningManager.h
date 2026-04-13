@@ -11,6 +11,7 @@ struct HardeningStatus {
   bool registryConfigured{false};
   bool uninstallProtectionEnabled{false};
   bool runtimePathsProtected{false};
+  bool runtimePathsTrusted{false};
   bool installPathProtected{false};
   bool serviceControlProtected{false};
   bool elamDriverPresent{false};

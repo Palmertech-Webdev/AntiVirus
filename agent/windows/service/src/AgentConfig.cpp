@@ -64,6 +64,62 @@ std::wstring ToLowerCopy(std::wstring value) {
   return value;
 }
 
+std::filesystem::path NormalizeAbsolutePath(const std::filesystem::path& value) {
+  if (value.empty()) {
+    return {};
+  }
+
+  std::error_code error;
+  const auto absolute = std::filesystem::absolute(value, error);
+  if (error) {
+    return value.lexically_normal();
+  }
+
+  return absolute.lexically_normal();
+}
+
+std::wstring NormalizePathForCompare(const std::filesystem::path& value) {
+  auto normalized = ToLowerCopy(NormalizeAbsolutePath(value).wstring());
+  if (!normalized.empty() && normalized.back() != L'\\' && normalized.back() != L'/') {
+    normalized.push_back(L'\\');
+  }
+  return normalized;
+}
+
+bool IsPathWithinRoot(const std::filesystem::path& candidate, const std::filesystem::path& root) {
+  if (candidate.empty() || root.empty()) {
+    return false;
+  }
+
+  const auto normalizedCandidate = NormalizePathForCompare(candidate);
+  const auto normalizedRoot = NormalizePathForCompare(root);
+  return !normalizedCandidate.empty() && !normalizedRoot.empty() && normalizedCandidate.starts_with(normalizedRoot);
+}
+
+std::filesystem::path NormalizeRuntimeArtifactPath(const std::filesystem::path& candidate,
+                                                   const std::filesystem::path& runtimeRoot,
+                                                   const std::filesystem::path& fallbackLeafName) {
+  if (runtimeRoot.empty()) {
+    return NormalizeAbsolutePath(candidate);
+  }
+
+  if (candidate.empty()) {
+    return runtimeRoot / fallbackLeafName;
+  }
+
+  const auto normalizedCandidate = NormalizeAbsolutePath(candidate);
+  if (IsPathWithinRoot(normalizedCandidate, runtimeRoot)) {
+    return normalizedCandidate;
+  }
+
+  const auto leafName = normalizedCandidate.filename();
+  if (!leafName.empty() && leafName != L"." && leafName != L"..") {
+    return runtimeRoot / leafName;
+  }
+
+  return runtimeRoot / fallbackLeafName;
+}
+
 std::vector<std::wstring> ParseWideList(const std::wstring& rawValue) {
   std::vector<std::wstring> results;
   std::wstring current;
@@ -394,6 +450,7 @@ AgentConfig LoadAgentConfig() {
 AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   AgentConfig config;
   const auto installRoot = GetModuleDirectory(moduleHandle);
+  config.installRootPath = NormalizeAbsolutePath(installRoot);
 
   for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
     const auto registeredControlPlaneUrl = ReadRegistryString(hive, kControlPlaneBaseUrlValueName);
@@ -430,6 +487,12 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   const auto updateRootPathOverridden = !updateRootPath.empty();
   if (!updateRootPath.empty()) {
     config.updateRootPath = std::filesystem::path(updateRootPath);
+  }
+
+  const auto journalRootPath = ReadEnvironmentVariable(L"ANTIVIRUS_JOURNAL_ROOT");
+  const auto journalRootPathOverridden = !journalRootPath.empty();
+  if (!journalRootPath.empty()) {
+    config.journalRootPath = std::filesystem::path(journalRootPath);
   }
 
   const auto elamDriverPath = ReadEnvironmentVariable(L"ANTIVIRUS_ELAM_DRIVER_PATH");
@@ -491,7 +554,8 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
 
   const auto runtimeRootOverridden =
       runtimeDatabasePathOverridden || stateFilePathOverridden || telemetryQueuePathOverridden ||
-      updateRootPathOverridden || quarantineRootPathOverridden || evidenceRootPathOverridden;
+      updateRootPathOverridden || journalRootPathOverridden || quarantineRootPathOverridden ||
+      evidenceRootPathOverridden;
   const std::optional<std::filesystem::path> preferredRuntimeRoot =
       runtimeRootOverridden ? std::optional<std::filesystem::path>{} : DeterminePreferredRuntimeRoot(moduleHandle);
 
@@ -499,11 +563,29 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   config.stateFilePath = ResolveRuntimePath(config.stateFilePath, moduleHandle, preferredRuntimeRoot);
   config.telemetryQueuePath = ResolveRuntimePath(config.telemetryQueuePath, moduleHandle, preferredRuntimeRoot);
   config.updateRootPath = ResolveRuntimePath(config.updateRootPath, moduleHandle, preferredRuntimeRoot);
+  config.journalRootPath = ResolveRuntimePath(config.journalRootPath, moduleHandle, preferredRuntimeRoot);
   if (!config.elamDriverPath.empty()) {
     config.elamDriverPath = ResolveRuntimePath(config.elamDriverPath, moduleHandle);
+    config.elamDriverPath = NormalizeAbsolutePath(config.elamDriverPath);
   }
   config.quarantineRootPath = ResolveRuntimePath(config.quarantineRootPath, moduleHandle, preferredRuntimeRoot);
   config.evidenceRootPath = ResolveRuntimePath(config.evidenceRootPath, moduleHandle, preferredRuntimeRoot);
+
+  auto runtimeRoot = NormalizeAbsolutePath(config.runtimeDatabasePath.parent_path());
+  if (runtimeRoot.empty()) {
+    runtimeRoot = preferredRuntimeRoot.has_value() ? NormalizeAbsolutePath(*preferredRuntimeRoot)
+                                                   : NormalizeAbsolutePath(config.installRootPath / L"runtime");
+  }
+
+  config.runtimeDatabasePath = NormalizeRuntimeArtifactPath(config.runtimeDatabasePath, runtimeRoot, L"agent-runtime.db");
+  runtimeRoot = NormalizeAbsolutePath(config.runtimeDatabasePath.parent_path());
+  config.stateFilePath = NormalizeRuntimeArtifactPath(config.stateFilePath, runtimeRoot, L"agent-state.ini");
+  config.telemetryQueuePath =
+      NormalizeRuntimeArtifactPath(config.telemetryQueuePath, runtimeRoot, L"telemetry-queue.tsv");
+  config.updateRootPath = NormalizeRuntimeArtifactPath(config.updateRootPath, runtimeRoot, L"updates");
+  config.journalRootPath = NormalizeRuntimeArtifactPath(config.journalRootPath, runtimeRoot, L"journal");
+  config.quarantineRootPath = NormalizeRuntimeArtifactPath(config.quarantineRootPath, runtimeRoot, L"quarantine");
+  config.evidenceRootPath = NormalizeRuntimeArtifactPath(config.evidenceRootPath, runtimeRoot, L"evidence");
 
   const auto appendScanExclusion = [&config](const std::filesystem::path& path) {
     if (!path.empty()) {
@@ -516,14 +598,71 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   appendScanExclusion(config.stateFilePath);
   appendScanExclusion(config.telemetryQueuePath);
   appendScanExclusion(config.updateRootPath);
+  appendScanExclusion(config.journalRootPath);
   appendScanExclusion(config.quarantineRootPath);
   appendScanExclusion(config.evidenceRootPath);
 
   if (preferredRuntimeRoot.has_value()) {
-    PersistRuntimeRootMarker(*preferredRuntimeRoot, installRoot);
+    PersistRuntimeRootMarker(runtimeRoot, config.installRootPath);
   }
 
   return config;
+}
+
+RuntimePathValidation ValidateRuntimePaths(const AgentConfig& config) {
+  RuntimePathValidation validation;
+  validation.installRootPath = NormalizeAbsolutePath(config.installRootPath);
+
+  auto runtimeRoot = config.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = config.runtimeDatabasePath;
+  }
+  validation.runtimeRootPath = NormalizeAbsolutePath(runtimeRoot);
+
+  if (validation.installRootPath.empty() || !validation.installRootPath.is_absolute()) {
+    validation.message = L"Install root path is not fully resolved.";
+    return validation;
+  }
+
+  if (validation.runtimeRootPath.empty() || !validation.runtimeRootPath.is_absolute()) {
+    validation.message = L"Runtime root path is not fully resolved.";
+    return validation;
+  }
+
+  if (NormalizeAbsolutePath(validation.runtimeRootPath.root_path()) == validation.runtimeRootPath) {
+    validation.message = L"Runtime root path cannot be a drive root.";
+    return validation;
+  }
+
+  const auto ensurePathWithinRuntimeRoot = [&validation](const std::filesystem::path& path,
+                                                         const wchar_t* label) -> bool {
+    const auto normalizedPath = NormalizeAbsolutePath(path);
+    if (normalizedPath.empty() || !normalizedPath.is_absolute()) {
+      validation.message = std::wstring(label) + L" is not an absolute path.";
+      return false;
+    }
+
+    if (!IsPathWithinRoot(normalizedPath, validation.runtimeRootPath)) {
+      validation.message = std::wstring(label) + L" escaped the trusted runtime root boundary.";
+      return false;
+    }
+
+    return true;
+  };
+
+  if (!ensurePathWithinRuntimeRoot(config.runtimeDatabasePath, L"Runtime database path") ||
+      !ensurePathWithinRuntimeRoot(config.stateFilePath, L"State file path") ||
+      !ensurePathWithinRuntimeRoot(config.telemetryQueuePath, L"Telemetry queue path") ||
+      !ensurePathWithinRuntimeRoot(config.updateRootPath, L"Update root path") ||
+      !ensurePathWithinRuntimeRoot(config.journalRootPath, L"Journal root path") ||
+      !ensurePathWithinRuntimeRoot(config.quarantineRootPath, L"Quarantine root path") ||
+      !ensurePathWithinRuntimeRoot(config.evidenceRootPath, L"Evidence root path")) {
+    return validation;
+  }
+
+  validation.trusted = true;
+  validation.message = L"Trusted runtime boundaries are configured.";
+  return validation;
 }
 
 }  // namespace antivirus::agent

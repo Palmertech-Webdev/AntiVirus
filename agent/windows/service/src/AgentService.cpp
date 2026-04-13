@@ -202,6 +202,48 @@ bool PathStartsWith(std::wstring path, std::wstring prefix) {
   return path == prefix.substr(0, prefix.size() - 1) || path.starts_with(prefix);
 }
 
+std::filesystem::path ResolveRuntimeRoot(const AgentConfig& config) {
+  auto runtimeRoot = config.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = config.runtimeDatabasePath;
+  }
+  return runtimeRoot;
+}
+
+std::filesystem::path ResolveInstallRootForConfig(const AgentConfig& config) {
+  if (!config.installRootPath.empty()) {
+    return config.installRootPath;
+  }
+
+  const auto runtimeRoot = ResolveRuntimeRoot(config);
+  return runtimeRoot.has_parent_path() ? runtimeRoot.parent_path() : std::filesystem::current_path();
+}
+
+void EnsureDirectoryExists(const std::filesystem::path& path, const wchar_t* label) {
+  if (path.empty()) {
+    throw std::runtime_error("Runtime layout path is empty");
+  }
+
+  std::error_code error;
+  std::filesystem::create_directories(path, error);
+  if (error || !std::filesystem::exists(path, error)) {
+    throw std::runtime_error("Could not prepare runtime layout path for " + WideToUtf8(std::wstring(label)));
+  }
+}
+
+void EnsureRuntimeLayoutReady(const AgentConfig& config, const RuntimePathValidation& runtimeValidation) {
+  const auto runtimeRoot = runtimeValidation.runtimeRootPath.empty() ? ResolveRuntimeRoot(config)
+                                                                     : runtimeValidation.runtimeRootPath;
+  EnsureDirectoryExists(runtimeRoot, L"runtime root");
+  EnsureDirectoryExists(config.runtimeDatabasePath.parent_path(), L"runtime database root");
+  EnsureDirectoryExists(config.stateFilePath.parent_path(), L"state root");
+  EnsureDirectoryExists(config.telemetryQueuePath.parent_path(), L"telemetry queue root");
+  EnsureDirectoryExists(config.updateRootPath, L"update root");
+  EnsureDirectoryExists(config.journalRootPath, L"journal root");
+  EnsureDirectoryExists(config.quarantineRootPath, L"quarantine root");
+  EnsureDirectoryExists(config.evidenceRootPath, L"evidence root");
+}
+
 std::optional<EventEnvelope> BuildBehaviorEventFromProcessTelemetry(const TelemetryRecord& record,
                                                                     const std::wstring& deviceId) {
   if (record.eventType == L"process.started") {
@@ -949,6 +991,36 @@ int AgentService::Run(const AgentRunMode mode) {
     }
 
     config_ = LoadAgentConfig();
+    const auto runtimeValidation = ValidateRuntimePaths(config_);
+    if (!runtimeValidation.trusted) {
+      throw std::runtime_error("Runtime path boundary validation failed: " +
+                               WideToUtf8(runtimeValidation.message.empty()
+                                              ? L"Unknown runtime path boundary failure"
+                                              : runtimeValidation.message));
+    }
+
+    EnsureRuntimeLayoutReady(config_, runtimeValidation);
+    if (mode == AgentRunMode::Service) {
+      HardeningManager startupHardeningManager(config_, ResolveInstallRootForConfig(config_));
+      const auto startupStatus = startupHardeningManager.QueryStatus(L"FenrirAgent");
+      const auto protectedServiceExpected = startupStatus.elamDriverPresent || !config_.elamDriverPath.empty();
+      const auto hardeningReady = startupStatus.registryConfigured && startupStatus.runtimePathsTrusted &&
+                                  startupStatus.runtimePathsProtected && startupStatus.serviceControlProtected &&
+                                  (!protectedServiceExpected || startupStatus.launchProtectedConfigured);
+      if (!hardeningReady) {
+        std::wstring hardeningError;
+        const auto hardeningApplied = startupHardeningManager.ApplyPostInstallHardening(
+            ReadEnvironmentVariable(L"ANTIVIRUS_UNINSTALL_TOKEN"), &hardeningError);
+        std::wstring serviceControlError;
+        const auto serviceControlApplied =
+            startupHardeningManager.ApplyServiceControlProtection(L"FenrirAgent", nullptr, &serviceControlError);
+        if (!hardeningApplied || !serviceControlApplied) {
+          std::wcerr << L"Startup hardening repair is incomplete: "
+                     << (hardeningError.empty() ? serviceControlError : hardeningError) << std::endl;
+        }
+      }
+    }
+
     stateStore_ = std::make_unique<LocalStateStore>(config_.runtimeDatabasePath, config_.stateFilePath);
     controlPlaneClient_ = std::make_unique<ControlPlaneClient>(config_.controlPlaneBaseUrl);
     commandJournalStore_ = std::make_unique<CommandJournalStore>(config_.runtimeDatabasePath);
@@ -1073,11 +1145,11 @@ std::vector<std::filesystem::path> AgentService::GetPamRequestPaths() const {
 }
 
 std::filesystem::path AgentService::GetPamAuditJournalPath() const {
-  auto runtimeRoot = config_.runtimeDatabasePath.parent_path();
-  if (runtimeRoot.empty()) {
-    runtimeRoot = config_.runtimeDatabasePath;
+  auto journalRoot = config_.journalRootPath;
+  if (journalRoot.empty()) {
+    journalRoot = ResolveRuntimeRoot(config_);
   }
-  return runtimeRoot / kPamAuditFileName;
+  return journalRoot / kPamAuditFileName;
 }
 
 void AgentService::ProcessPamRequests() {
@@ -1620,7 +1692,7 @@ std::wstring AgentService::ExecuteQuarantineMutation(const RemoteCommand& comman
 }
 
 std::wstring AgentService::ExecuteUpdateCommand(const RemoteCommand& command, const bool rollback) {
-  const auto installRoot = config_.runtimeDatabasePath.parent_path().parent_path();
+  const auto installRoot = ResolveInstallRootForConfig(config_);
   UpdaterService updater(config_, installRoot);
   const auto result =
       rollback ? updater.RollbackTransaction(command.recordId)
@@ -1645,7 +1717,7 @@ std::wstring AgentService::ExecuteUpdateCommand(const RemoteCommand& command, co
 }
 
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {
-  const auto installRoot = config_.runtimeDatabasePath.parent_path().parent_path();
+  const auto installRoot = ResolveInstallRootForConfig(config_);
   HardeningManager hardeningManager(config_, installRoot);
   std::wstring errorMessage;
   const auto applied = hardeningManager.ApplyPostInstallHardening(ReadEnvironmentVariable(L"ANTIVIRUS_UNINSTALL_TOKEN"),
@@ -1974,18 +2046,21 @@ void AgentService::PrintStatus() const {
 }
 
 void AgentService::QueueEndpointStatusTelemetry() {
-  const auto installRoot = config_.runtimeDatabasePath.parent_path().parent_path();
+  const auto installRoot = ResolveInstallRootForConfig(config_);
   HardeningManager hardeningManager(config_, installRoot);
   const auto hardeningStatus = hardeningManager.QueryStatus();
   const auto protectedServiceExpected = hardeningStatus.elamDriverPresent || !config_.elamDriverPath.empty();
   lastHardeningCheckFailed_ =
-      !(hardeningStatus.registryConfigured && hardeningStatus.runtimePathsProtected &&
+      !(hardeningStatus.registryConfigured && hardeningStatus.runtimePathsTrusted &&
+        hardeningStatus.runtimePathsProtected &&
         hardeningStatus.serviceControlProtected &&
         (!protectedServiceExpected || hardeningStatus.launchProtectedConfigured));
   QueueTelemetryEvent(lastHardeningCheckFailed_ ? L"tamper.protection.degraded" : L"tamper.protection.ready",
                       L"hardening-manager", hardeningStatus.statusMessage,
                       std::wstring(L"{\"registryConfigured\":") +
                           (hardeningStatus.registryConfigured ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimePathsTrusted\":" +
+                          (hardeningStatus.runtimePathsTrusted ? std::wstring(L"true") : std::wstring(L"false")) +
                           L",\"runtimePathsProtected\":" +
                           (hardeningStatus.runtimePathsProtected ? std::wstring(L"true") : std::wstring(L"false")) +
                           L",\"serviceControlProtected\":" +
