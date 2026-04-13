@@ -54,7 +54,22 @@ try {
 
 $phase6Checks = @()
 if ($null -ne $selfTestReport.checks) {
-  $phase6Checks = @($selfTestReport.checks | Where-Object { $_.id -like "phase6_*" })
+  foreach ($check in @($selfTestReport.checks)) {
+    if ($null -eq $check) {
+      continue
+    }
+
+    $checkId = ""
+    try {
+      $checkId = [string]$check.id
+    } catch {
+      $checkId = ""
+    }
+
+    if ($checkId.StartsWith("phase6_", [System.StringComparison]::OrdinalIgnoreCase)) {
+      $phase6Checks += $check
+    }
+  }
 }
 
 $indexedChecks = @{}
@@ -82,8 +97,19 @@ foreach ($requiredId in $RequiredCheckIds) {
   }
 }
 
-$phase6UnexpectedChecks = @($phase6Checks | Where-Object { $RequiredCheckIds -notcontains "$($_.id)" })
-$allCriteriaPass = @($criteria | Where-Object { $_.Status -ne "pass" }).Count -eq 0
+$phase6UnexpectedChecks = @()
+foreach ($check in $phase6Checks) {
+  if ($RequiredCheckIds -notcontains ([string]$check.id)) {
+    $phase6UnexpectedChecks += $check
+  }
+}
+$failedCriteriaCount = 0
+foreach ($criterion in $criteria) {
+  if ([string]$criterion.Status -ne "pass") {
+    $failedCriteriaCount++
+  }
+}
+$allCriteriaPass = $failedCriteriaCount -eq 0
 $reportPath = Join-Path $workingRootAbsolute "phase6-exitcriteria-report.json"
 $report = [PSCustomObject]@{
   generatedAtUtc = [DateTime]::UtcNow.ToString("o")

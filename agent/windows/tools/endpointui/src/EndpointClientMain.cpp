@@ -33,6 +33,7 @@
 #include "ProcessInventory.h"
 #include "LocalScanRunner.h"
 #include "LocalStateStore.h"
+#include "PatchOrchestrator.h"
 #include "ServiceInventory.h"
 #include "StringUtils.h"
 #include "WebView2.h"
@@ -52,6 +53,7 @@ constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kScanCompleteMessage = WM_APP + 2;
 constexpr UINT kScanProgressMessage = WM_APP + 3;
+constexpr UINT kPatchActionCompleteMessage = WM_APP + 4;
 constexpr UINT_PTR kRefreshTimerId = 100;
 constexpr UINT kRefreshIntervalMs = 10000;
 constexpr UINT kFenrirPngResourceId = 101;
@@ -98,8 +100,10 @@ enum : int {
   IDM_TRAY_PAM_DISKCLEANUP = 2006,
   IDM_TRAY_PAM_APP = 2007,
   IDM_TRAY_PAM_ELEVATE_2M = 2008,
-  IDM_TRAY_QUARANTINE = 2009,
-  IDM_TRAY_EXIT = 2010
+  IDM_TRAY_PAM_WINDOWSUPDATE = 2009,
+  IDM_TRAY_PAM_NETWORKRESET = 2010,
+  IDM_TRAY_QUARANTINE = 2011,
+  IDM_TRAY_EXIT = 2012
 };
 
 enum class ScanPreset {
@@ -123,9 +127,10 @@ enum class ClientPage : int {
   Threats = 1,
   Quarantine = 2,
   Scans = 3,
-  Service = 4,
-  History = 5,
-  Settings = 6
+  Updates = 4,
+  Service = 5,
+  History = 6,
+  Settings = 7
 };
 
 struct ScanCompletePayload {
@@ -137,6 +142,14 @@ struct ScanProgressPayload {
   std::wstring status;
   std::uint32_t completedTargets{0};
   std::uint32_t totalTargets{0};
+};
+
+struct PatchActionCompletePayload {
+  std::wstring summary;
+  std::wstring targetId;
+  bool informational{true};
+  bool success{true};
+  bool searchOnly{false};
 };
 
 struct LaunchOptions {
@@ -224,6 +237,10 @@ struct UiContext {
   std::uint32_t scanProgressTotal{0};
   std::atomic_bool scanRunning{false};
   std::wstring activeScanLabel;
+  std::atomic_bool patchActionRunning{false};
+  std::wstring patchActionStatus{L"Idle"};
+  std::wstring patchActionTarget;
+  bool patchActionSearchOnly{false};
   ClientPage currentPage{ClientPage::Dashboard};
   bool webViewReady{false};
   bool webViewEnabled{false};
@@ -873,6 +890,30 @@ bool SubmitDiskCleanupPamRequest(HWND hwnd, UiContext& context) {
                                   L"User approved built-in PAM tool launch");
 }
 
+bool SubmitWindowsUpdatePamRequest(HWND hwnd, UiContext& context) {
+  const auto targetPath = GetSystemBinaryPath(L"control.exe");
+  if (targetPath.empty()) {
+    MessageBoxW(hwnd, L"Fenrir could not resolve Windows Update controls for PAM elevation.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_windows_update", targetPath, L"",
+                                  L"User requested Windows Update with PAM approval");
+}
+
+bool SubmitNetworkResetPamRequest(HWND hwnd, UiContext& context) {
+  const auto targetPath = GetSystemBinaryPath(L"cmd.exe");
+  if (targetPath.empty()) {
+    MessageBoxW(hwnd, L"Fenrir could not resolve the network reset utility for PAM elevation.",
+                kWindowTitle, MB_OK | MB_ICONWARNING);
+    return false;
+  }
+
+  return SubmitPamRequestFromTray(hwnd, context, L"run_network_reset", targetPath, L"",
+                                  L"User requested a network stack reset with PAM approval");
+}
+
 bool SubmitApplicationPamRequest(HWND hwnd, UiContext& context) {
   std::wstring targetPath;
   if (!PromptForPamTarget(hwnd, &targetPath)) {
@@ -1070,6 +1111,16 @@ std::wstring BuildDetailsCardText(const EndpointClientSnapshot& snapshot) {
       stream << L"\r\n" << record.source;
     }
   }
+
+  const auto availableSoftwareUpdateCount = std::count_if(
+      snapshot.softwarePatches.begin(), snapshot.softwarePatches.end(), [](const auto& patch) {
+        return _wcsicmp(patch.updateState.c_str(), L"available") == 0 ||
+               _wcsicmp(patch.updateState.c_str(), L"provider_ready") == 0;
+      });
+  stream << L"\r\n\r\nPatch posture\r\n"
+         << snapshot.windowsUpdates.size() << L" Windows update(s), "
+         << availableSoftwareUpdateCount << L" software update(s) available.";
+
   return stream.str();
 }
 
@@ -1080,6 +1131,33 @@ std::wstring BuildMetricCardText(const std::wstring& label, const std::wstring& 
     stream << L"\r\n" << detail;
   }
   return stream.str();
+}
+
+std::wstring BuildPatchExecutionSummary(const antivirus::agent::PatchExecutionResult& result, const bool searchOnly) {
+  std::wstringstream stream;
+  stream << (searchOnly ? L"Software update check finished." : L"Software update action finished.")
+         << L"\r\n\r\n"
+         << L"Target: " << NullableText(result.targetId, L"(unknown)") << L"\r\n"
+         << L"Provider: " << NullableText(result.provider, L"(unknown)") << L"\r\n"
+         << L"Status: " << NullableText(result.status, L"(unknown)");
+
+  if (!result.errorCode.empty()) {
+    stream << L"\r\nError: " << result.errorCode;
+  }
+
+  if (result.rebootRequired) {
+    stream << L"\r\nReboot required: yes";
+  }
+
+  return stream.str();
+}
+
+bool IsPatchResultInformational(const antivirus::agent::PatchExecutionResult& result) {
+  return result.success || _wcsicmp(result.status.c_str(), L"current") == 0 ||
+         _wcsicmp(result.status.c_str(), L"available") == 0 ||
+         _wcsicmp(result.status.c_str(), L"provider_ready") == 0 ||
+         _wcsicmp(result.status.c_str(), L"manual") == 0 ||
+         _wcsicmp(result.status.c_str(), L"unsupported") == 0;
 }
 
 std::wstring BuildSubtitleText() {
@@ -1120,6 +1198,8 @@ std::wstring PageTitle(const ClientPage page) {
       return L"Quarantine";
     case ClientPage::Scans:
       return L"Scans";
+    case ClientPage::Updates:
+      return L"Updates";
     case ClientPage::Service:
       return L"Service";
     case ClientPage::History:
@@ -1140,6 +1220,8 @@ std::wstring PageKey(const ClientPage page) {
       return L"quarantine";
     case ClientPage::Scans:
       return L"scans";
+    case ClientPage::Updates:
+      return L"updates";
     case ClientPage::Service:
       return L"service";
     case ClientPage::History:
@@ -1160,6 +1242,8 @@ std::wstring PageSubtitle(const ClientPage page, const EndpointClientSnapshot& s
       return L"Review contained items, confirm whether anything should be restored, and keep the device clean.";
     case ClientPage::Scans:
       return L"Launch quick, full, or targeted scans and follow the latest scan activity from this device.";
+    case ClientPage::Updates:
+      return L"Inspect software and Windows update posture, then run guided check or install actions per application.";
     case ClientPage::Service:
       return L"Runtime health, upload queue, service posture, and local protection readiness.";
     case ClientPage::History:
@@ -1183,6 +1267,8 @@ std::wstring PrimarySectionTitle(const ClientPage page) {
       return L"Quarantine inventory";
     case ClientPage::Scans:
       return L"Recent scans";
+    case ClientPage::Updates:
+      return L"Patch inventory";
     case ClientPage::History:
       return L"Activity timeline";
     case ClientPage::Service:
@@ -1201,6 +1287,8 @@ std::wstring SecondarySectionTitle(const ClientPage page) {
       return L"Item detail";
     case ClientPage::Threats:
       return L"Threat detail";
+    case ClientPage::Updates:
+      return L"Update detail";
     case ClientPage::Service:
       return L"Runtime detail";
     case ClientPage::Settings:
@@ -1223,6 +1311,8 @@ int NavButtonIdForPage(const ClientPage page) {
     case ClientPage::Quarantine:
       return IDC_NAV_QUARANTINE;
     case ClientPage::Scans:
+      return IDC_NAV_SCANS;
+    case ClientPage::Updates:
       return IDC_NAV_SCANS;
     case ClientPage::Service:
       return IDC_NAV_SERVICE;
@@ -1703,6 +1793,15 @@ std::wstring BuildServiceOverviewText(const UiContext& context) {
   const auto riskyServiceCount = std::count_if(services.begin(), services.end(), [](const auto& service) {
     return service.risky;
   });
+  const auto availableSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return _wcsicmp(patch.updateState.c_str(), L"available") == 0 ||
+               _wcsicmp(patch.updateState.c_str(), L"provider_ready") == 0;
+      });
+  const auto manualSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return patch.manualOnly || _wcsicmp(patch.updateState.c_str(), L"manual") == 0;
+      });
 
   std::wstringstream stream;
   stream << L"Runtime posture\r\n\r\n"
@@ -1727,6 +1826,9 @@ std::wstring BuildServiceOverviewText(const UiContext& context) {
          ? (context.snapshot.localAdminExposure ? L"elevated risk" : L"reduced")
          : L"(unavailable)")
        << L"\r\n"
+      << L"Windows update debt: " << context.snapshot.windowsUpdates.size() << L" pending update(s)\r\n"
+      << L"Software updates: " << availableSoftwareUpdateCount << L" available / "
+      << manualSoftwareUpdateCount << L" manual\r\n"
           << L"Processes observed: " << processes.size() << L" (" << prioritizedProcessCount << L" prioritized)\r\n"
           << L"Services observed: " << services.size() << L" (" << riskyServiceCount << L" flagged)\r\n"
          << L"Agent version: " << NullableText(context.config.agentVersion) << L"\r\n"
@@ -1763,6 +1865,74 @@ std::wstring BuildServiceOverviewText(const UiContext& context) {
   return stream.str();
 }
 
+std::wstring BuildUpdatesOverviewText(const UiContext& context) {
+  const auto availableSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return _wcsicmp(patch.updateState.c_str(), L"available") == 0 ||
+               _wcsicmp(patch.updateState.c_str(), L"provider_ready") == 0;
+      });
+  const auto manualSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return patch.manualOnly || _wcsicmp(patch.updateState.c_str(), L"manual") == 0;
+      });
+  const auto blockedSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(),
+      [](const auto& patch) { return patch.blocked; });
+  const auto unsupportedSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return !patch.supported || _wcsicmp(patch.updateState.c_str(), L"unsupported") == 0;
+      });
+
+  std::wstringstream stream;
+  stream << L"Update posture\r\n\r\n"
+         << L"Windows updates pending: " << context.snapshot.windowsUpdates.size() << L"\r\n"
+         << L"Software records: " << context.snapshot.softwarePatches.size() << L"\r\n"
+         << L"Ready to install: " << availableSoftwareUpdateCount << L"\r\n"
+         << L"Manual workflows: " << manualSoftwareUpdateCount << L"\r\n"
+         << L"Unsupported entries: " << unsupportedSoftwareUpdateCount << L"\r\n"
+         << L"Blocked entries: " << blockedSoftwareUpdateCount << L"\r\n"
+         << L"Patch history records: " << context.snapshot.patchHistory.size() << L"\r\n"
+         << L"Reboot required: " << (context.snapshot.rebootCoordinator.rebootRequired ? L"yes" : L"no")
+         << L"\r\n"
+         << L"Reboot reasons: "
+         << NullableText(context.snapshot.rebootCoordinator.rebootReasons, L"none");
+
+  if (!context.snapshot.softwarePatches.empty()) {
+    stream << L"\r\n\r\nTop software entries\r\n";
+    const auto topCount = std::min<std::size_t>(5, context.snapshot.softwarePatches.size());
+    for (std::size_t index = 0; index < topCount; ++index) {
+      const auto& patch = context.snapshot.softwarePatches[index];
+      stream << L"- " << NullableText(patch.displayName, L"(unknown)") << L" ["
+             << NullableText(patch.updateState, L"unknown") << L"]";
+      if (!patch.availableVersion.empty()) {
+        stream << L" -> " << patch.availableVersion;
+      }
+      if (patch.manualOnly) {
+        stream << L" (manual)";
+      }
+      if (patch.blocked) {
+        stream << L" (blocked)";
+      }
+      stream << L"\r\n";
+    }
+  }
+
+  if (!context.snapshot.windowsUpdates.empty()) {
+    stream << L"\r\nWindows updates (top 3)\r\n";
+    const auto topCount = std::min<std::size_t>(3, context.snapshot.windowsUpdates.size());
+    for (std::size_t index = 0; index < topCount; ++index) {
+      const auto& update = context.snapshot.windowsUpdates[index];
+      stream << L"- " << NullableText(update.title, L"(unknown)");
+      if (!update.kbArticles.empty()) {
+        stream << L" (" << update.kbArticles << L")";
+      }
+      stream << L" [" << NullableText(update.status, L"unknown") << L"]\r\n";
+    }
+  }
+
+  return stream.str();
+}
+
 std::wstring BuildSettingsOverviewText(const UiContext& context) {
   const auto exclusions = antivirus::agent::LoadConfiguredScanExclusions();
   std::wstringstream stream;
@@ -1794,6 +1964,8 @@ std::wstring DefaultDetailText(const UiContext& context) {
         return L"Quarantine detail\r\n\r\nNo items are currently being held in local quarantine.";
       }
       return L"Quarantine detail\r\n\r\nSelect a quarantined item to review where it came from and decide whether to restore or delete it.";
+    case ClientPage::Updates:
+      return BuildUpdatesOverviewText(context);
     case ClientPage::Service:
       return BuildServiceOverviewText(context);
     case ClientPage::Settings:
@@ -2031,6 +2203,23 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
     statusTone = L"good";
   }
 
+  const auto availableSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return _wcsicmp(patch.updateState.c_str(), L"available") == 0 ||
+               _wcsicmp(patch.updateState.c_str(), L"provider_ready") == 0;
+      });
+  const auto manualSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return patch.manualOnly || _wcsicmp(patch.updateState.c_str(), L"manual") == 0;
+      });
+  const auto unsupportedSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(), [](const auto& patch) {
+        return !patch.supported || _wcsicmp(patch.updateState.c_str(), L"unsupported") == 0;
+      });
+  const auto blockedSoftwareUpdateCount = std::count_if(
+      context.snapshot.softwarePatches.begin(), context.snapshot.softwarePatches.end(),
+      [](const auto& patch) { return patch.blocked; });
+
   std::wstring detailText = DefaultDetailText(context);
   if (exclusionsMode) {
     detailText = L"Choose a source below and add only exclusions you trust.\r\n\r\nFile and folder exclusions use File Explorer pickers.\r\nProcess exclusions use the current process list.\r\nApplication exclusions use the installed software inventory.";
@@ -2080,6 +2269,10 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
        << L",\"status\":\"" << JsonEscape(context.scanStatusText) << L"\",\"completed\":" << context.scanProgressCompleted
        << L",\"total\":" << context.scanProgressTotal << L",\"label\":\"" << JsonEscape(context.activeScanLabel)
        << L"\"},";
+    json << L"\"patchAction\":{\"running\":" << (context.patchActionRunning.load() ? 1 : 0)
+      << L",\"status\":\"" << JsonEscape(context.patchActionStatus) << L"\",\"target\":\""
+      << JsonEscape(context.patchActionTarget) << L"\",\"mode\":\""
+      << JsonEscape(context.patchActionSearchOnly ? L"check" : L"update") << L"\"},";
   json << L"\"brand\":{\"logo\":\"" << JsonEscape(context.webViewLogoDataUri) << L"\",\"device\":\""
        << JsonEscape(NullableText(context.snapshot.agentState.hostname, L"Local device")) << L"\",\"status\":\""
        << JsonEscape(OverallStatusChip(context.snapshot)) << L"\",\"policy\":\""
@@ -2091,6 +2284,16 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
        << JsonEscape(NullableText(context.snapshot.agentState.lastHeartbeatAt, L"(never)")) << L"\",\"lastPolicySync\":\""
        << JsonEscape(NullableText(context.snapshot.agentState.lastPolicySyncAt, L"(never)")) << L"\",\"queuedTelemetry\":\""
        << context.snapshot.queuedTelemetryCount << L"\",\"lastScan\":\"" << JsonEscape(lastScan) << L"\"},";
+    json << L"\"updates\":{\"windowsCount\":" << context.snapshot.windowsUpdates.size()
+      << L",\"softwareCount\":" << context.snapshot.softwarePatches.size()
+      << L",\"availableSoftwareCount\":" << availableSoftwareUpdateCount
+      << L",\"manualSoftwareCount\":" << manualSoftwareUpdateCount
+      << L",\"unsupportedSoftwareCount\":" << unsupportedSoftwareUpdateCount
+      << L",\"blockedSoftwareCount\":" << blockedSoftwareUpdateCount
+      << L",\"historyCount\":" << context.snapshot.patchHistory.size()
+      << L",\"rebootRequired\":" << (context.snapshot.rebootCoordinator.rebootRequired ? 1 : 0)
+      << L",\"rebootReasons\":\"" << JsonEscape(NullableText(context.snapshot.rebootCoordinator.rebootReasons, L"none"))
+      << L"\"},";
 
   const auto appendCard = [&json](const std::wstring& label, const std::wstring& value, const std::wstring& detail,
                                   const std::wstring& tone) {
@@ -2165,6 +2368,44 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
          << JsonEscape(NullableText(software.publisher, L"")) << L"\",\"location\":\""
          << JsonEscape(NullableText(software.installLocation, L"")) << L"\",\"blocked\":"
          << (software.blocked ? 1 : 0) << L"}";
+  }
+  json << L"],";
+
+  json << L"\"softwareUpdates\":[";
+  for (std::size_t index = 0; index < context.snapshot.softwarePatches.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& patch = context.snapshot.softwarePatches[index];
+    const auto canInstall = patch.supported && !patch.manualOnly && !patch.blocked;
+    json << L"{\"id\":\"" << JsonEscape(patch.softwareId) << L"\",\"name\":\""
+         << JsonEscape(NullableText(patch.displayName, L"(unknown)")) << L"\",\"version\":\""
+         << JsonEscape(NullableText(patch.displayVersion, L"")) << L"\",\"availableVersion\":\""
+         << JsonEscape(NullableText(patch.availableVersion, L"")) << L"\",\"publisher\":\""
+         << JsonEscape(NullableText(patch.publisher, L"")) << L"\",\"provider\":\""
+         << JsonEscape(NullableText(patch.provider, L"manual")) << L"\",\"state\":\""
+         << JsonEscape(NullableText(patch.updateState, L"unknown")) << L"\",\"summary\":\""
+         << JsonEscape(NullableText(patch.updateSummary, L"")) << L"\",\"supported\":"
+         << (patch.supported ? 1 : 0) << L",\"manualOnly\":" << (patch.manualOnly ? 1 : 0)
+         << L",\"blocked\":" << (patch.blocked ? 1 : 0) << L",\"highRisk\":" << (patch.highRisk ? 1 : 0)
+         << L",\"rebootRequired\":" << (patch.rebootRequired ? 1 : 0) << L",\"canInstall\":"
+         << (canInstall ? 1 : 0) << L"}";
+  }
+  json << L"],";
+
+  json << L"\"windowsUpdates\":[";
+  for (std::size_t index = 0; index < context.snapshot.windowsUpdates.size(); ++index) {
+    if (index != 0) {
+      json << L",";
+    }
+    const auto& update = context.snapshot.windowsUpdates[index];
+    json << L"{\"id\":\"" << JsonEscape(update.updateId) << L"\",\"title\":\""
+         << JsonEscape(NullableText(update.title, L"(unknown)")) << L"\",\"kb\":\""
+         << JsonEscape(NullableText(update.kbArticles, L"")) << L"\",\"severity\":\""
+         << JsonEscape(NullableText(update.severity, L"")) << L"\",\"classification\":\""
+         << JsonEscape(NullableText(update.classification, L"")) << L"\",\"status\":\""
+         << JsonEscape(NullableText(update.status, L"unknown")) << L"\",\"rebootRequired\":"
+         << (update.rebootRequired ? 1 : 0) << L"}";
   }
   json << L"],";
 
@@ -2310,6 +2551,14 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
     .actions button.good { background: rgba(82,201,143,.12); border-color: rgba(82,201,143,.2); }
     .actions button.warning { background: rgba(228,164,80,.12); border-color: rgba(228,164,80,.2); }
     .actions button.danger { background: rgba(227,111,123,.12); border-color: rgba(227,111,123,.2); }
+    .nav button:disabled,
+    .tabs button:disabled,
+    .actions button:disabled,
+    .inline-actions button:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+      transform: none;
+    }
     .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 12px; }
     .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
     .eyebrow { text-transform: uppercase; letter-spacing: .16em; color: var(--muted); font-size: 10px; }
@@ -2424,6 +2673,10 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
     .source-badges .chip { min-height: 26px; padding: 0 10px; }
     .inline-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
     .inline-actions button { padding: 8px 12px; border-radius: 999px; font-size: 12px; }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+    .pager .meta { color: var(--muted); font-size: 12px; }
+    .pager .actions { margin: 0; }
+    .status-row { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .detail-card { border: 1px solid rgba(255,255,255,.05); border-radius: 18px; background: rgba(255,255,255,.015); padding: 14px; }
     .detail-card .title { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
     .detail-card .text { color: var(--muted); font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
@@ -2473,11 +2726,17 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
     const selection = Object.create(null);
     let exclusionMode = 'current';
     let exclusionSearch = '';
+    let updateFilter = 'actionable';
+    let updateSort = 'priority';
+    let updateSearch = '';
+    let updatePageIndex = 0;
+    const updatesPageSize = 8;
     const pages = [
       { key: 'dashboard', label: 'Home' },
       { key: 'threats', label: 'Threats' },
       { key: 'quarantine', label: 'Quarantine' },
       { key: 'scans', label: 'Scans' },
+      { key: 'updates', label: 'Updates' },
       { key: 'history', label: 'History' },
       { key: 'settings', label: 'Settings' }
     ];
@@ -2502,6 +2761,7 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       if (pageKey === 'threats') return appState.threats || [];
       if (pageKey === 'quarantine') return appState.quarantine || [];
       if (pageKey === 'scans') return (appState.history || []).filter((item) => item.kind === 'scan-session');
+      if (pageKey === 'updates') return appState.softwareUpdates || [];
       return appState.settings || [];
     }
 
@@ -2527,9 +2787,13 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
 
     function buildActions() {
       const page = appState.pageKey;
+      const patchBusy = Boolean(appState.patchAction && appState.patchAction.running);
+      const patchDisabled = patchBusy ? ' disabled' : '';
       const actions = [];
       if (page === 'dashboard') {
         actions.push(`<button class="primary" data-action="scan" data-preset="quick">Quick scan</button>`);
+        actions.push(`<button data-action="softwareUpdatesRefresh"${patchDisabled}>Refresh updates</button>`);
+        actions.push(`<button data-action="requestWindowsUpdatePam">Windows Update (PAM)</button>`);
         actions.push(`<button data-action="openQuarantine">Review quarantine</button>`);
         actions.push(`<button data-action="refresh">Refresh</button>`);
       } else if (page === 'threats') {
@@ -2542,6 +2806,11 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         actions.push(`<button data-action="scan" data-preset="full">Full scan</button>`);
         actions.push(`<button data-action="scan" data-preset="folder">Scan folder</button>`);
         actions.push(`<button data-action="refresh">Refresh</button>`);
+      } else if (page === 'updates') {
+        actions.push(`<button class="primary" data-action="softwareUpdatesRefresh"${patchDisabled}>Refresh updates</button>`);
+        actions.push(`<button data-action="requestWindowsUpdatePam">Request Windows Update (PAM)</button>`);
+        actions.push(`<button data-action="requestNetworkResetPam">Request network reset (PAM)</button>`);
+        actions.push(`<button data-nav="dashboard">Back to dashboard</button>`);
       } else if (page === 'history') {
         actions.push(`<button data-action="refresh">Refresh</button>`);
       } else if (page === 'settings') {
@@ -2570,8 +2839,12 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
 
     function buildHeroActions() {
       const page = appState.pageKey;
+      const patchBusy = Boolean(appState.patchAction && appState.patchAction.running);
+      const patchDisabled = patchBusy ? ' disabled' : '';
       if (page === 'dashboard') {
         return [
+          `<button class="primary" data-nav="updates">Open updates workspace</button>`,
+          `<button data-action="softwareUpdatesRefresh"${patchDisabled}>Refresh software inventory</button>`,
           `<button class="primary" data-action="navigate" data-page="threats">Review threats</button>`,
           `<button data-action="navigate" data-page="quarantine">Open quarantine</button>`,
           `<button data-action="scan" data-preset="quick">Run quick scan</button>`
@@ -2600,8 +2873,269 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       `).join('');
     }
 
+    function softwareUpdateTone(item) {
+      const state = String(item?.state || '').toLowerCase();
+      if (item?.blocked) return 'danger';
+      if (state === 'available') return 'warning';
+      if (state === 'failed' || state === 'missing_recipe') return 'danger';
+      if (state === 'provider_ready' || state === 'completed' || state === 'current') return 'good';
+      return 'info';
+    }
+
+    function softwareUpdatePriority(item) {
+      const state = String(item?.state || '').toLowerCase();
+      if (item?.blocked) return 0;
+      if (state === 'available') return 1;
+      if (state === 'provider_ready') return 2;
+      if (item?.highRisk) return 3;
+      if (item?.manualOnly) return 4;
+      if (state === 'failed' || state === 'missing_recipe') return 5;
+      return 6;
+    }
+
+    function sortSoftwareUpdates(updates, mode) {
+      return [...updates].sort((left, right) => {
+        const leftName = String(left?.name || '').toLowerCase();
+        const rightName = String(right?.name || '').toLowerCase();
+        const leftState = String(left?.state || '').toLowerCase();
+        const rightState = String(right?.state || '').toLowerCase();
+        const leftPublisher = String(left?.publisher || '').toLowerCase();
+        const rightPublisher = String(right?.publisher || '').toLowerCase();
+
+        if (mode === 'name') {
+          return leftName.localeCompare(rightName);
+        }
+        if (mode === 'state') {
+          const stateCompare = leftState.localeCompare(rightState);
+          return stateCompare !== 0 ? stateCompare : leftName.localeCompare(rightName);
+        }
+        if (mode === 'publisher') {
+          const publisherCompare = leftPublisher.localeCompare(rightPublisher);
+          return publisherCompare !== 0 ? publisherCompare : leftName.localeCompare(rightName);
+        }
+        if (mode === 'risk') {
+          if (Boolean(left?.highRisk) !== Boolean(right?.highRisk)) {
+            return left?.highRisk ? -1 : 1;
+          }
+        }
+
+        const priorityCompare = softwareUpdatePriority(left) - softwareUpdatePriority(right);
+        return priorityCompare !== 0 ? priorityCompare : leftName.localeCompare(rightName);
+      });
+    }
+
+    function matchesUpdateFilter(item, mode) {
+      const state = String(item?.state || '').toLowerCase();
+      if (mode === 'actionable') return Boolean(item?.canInstall) || state === 'available' || state === 'provider_ready';
+      if (mode === 'manual') return Boolean(item?.manualOnly) || state === 'manual';
+      if (mode === 'blocked') return Boolean(item?.blocked);
+      if (mode === 'unsupported') return !Boolean(item?.supported) || state === 'unsupported';
+      if (mode === 'highrisk') return Boolean(item?.highRisk);
+      return true;
+    }
+
+    function buildUpdatesDataset() {
+      const query = updateSearch.trim().toLowerCase();
+      const all = appState.softwareUpdates || [];
+      const filtered = all.filter((item) => {
+        if (!matchesUpdateFilter(item, updateFilter)) {
+          return false;
+        }
+        if (!query) {
+          return true;
+        }
+        return String(item.name || '').toLowerCase().includes(query) ||
+               String(item.publisher || '').toLowerCase().includes(query) ||
+               String(item.provider || '').toLowerCase().includes(query) ||
+               String(item.state || '').toLowerCase().includes(query) ||
+               String(item.summary || '').toLowerCase().includes(query);
+      });
+
+      const sorted = sortSoftwareUpdates(filtered, updateSort);
+      const pageCount = Math.max(1, Math.ceil(sorted.length / updatesPageSize));
+      if (updatePageIndex >= pageCount) {
+        updatePageIndex = pageCount - 1;
+      }
+      const startIndex = updatePageIndex * updatesPageSize;
+      const items = sorted.slice(startIndex, startIndex + updatesPageSize);
+      return {
+        totalCount: sorted.length,
+        pageCount,
+        pageIndex: updatePageIndex,
+        startIndex,
+        endIndex: startIndex + items.length,
+        items
+      };
+    }
+
+    function buildSoftwareUpdateCards(items = null, options = {}) {
+      const updates = Array.isArray(items) ? items : (appState.softwareUpdates || []);
+      const ordered = options.keepOrder ? [...updates] : sortSoftwareUpdates(updates, 'priority');
+      const limit = Number.isInteger(options.limit) ? options.limit : 0;
+      const visible = limit > 0 ? ordered.slice(0, limit) : ordered;
+      if (!visible.length) {
+        return `<div class="empty">No software update inventory is available yet. Select Refresh updates to build a local patch view.</div>`;
+      }
+
+      const patchBusy = Boolean(appState.patchAction && appState.patchAction.running);
+      const patchDisabled = patchBusy ? ' disabled' : '';
+      return `${visible.map((item) => {
+        const fromVersion = item.version || '(unknown)';
+        const toVersion = item.availableVersion || '';
+        const state = item.state || 'unknown';
+        const stateTone = softwareUpdateTone(item);
+        const canInstall = Boolean(item.canInstall);
+        const primaryAction = canInstall
+          ? `<button class="primary" data-action="softwareUpdate" data-software-id="${esc(item.id)}"${patchDisabled}>Update now</button>`
+          : '';
+
+        return `<div class="record">
+          <div>
+            <div class="record-title">${esc(item.name || 'Unknown software')}</div>
+            <div class="record-meta">${esc(item.publisher || '(unknown publisher)')}\n${esc(toVersion ? `${fromVersion} -> ${toVersion}` : fromVersion)}\n${esc(item.summary || '')}</div>
+          </div>
+          <div class="record-badges">
+            ${badgeForTone(stateTone, state)}
+            ${badgeForTone(item.highRisk ? 'warning' : 'info', item.highRisk ? 'High risk' : 'Standard risk')}
+            ${badgeForTone(item.manualOnly ? 'warning' : 'info', item.manualOnly ? 'Manual workflow' : (item.provider || 'provider'))}
+          </div>
+          <div class="inline-actions" style="margin-top: 10px; grid-column: 1 / -1; justify-content: flex-start;">
+            <button data-action="softwareCheck" data-software-id="${esc(item.id)}"${patchDisabled}>Check</button>
+            ${primaryAction}
+          </div>
+        </div>`;
+      }).join('')}${limit > 0 && updates.length > visible.length ? `<div class="empty">Showing ${visible.length} of ${updates.length} software entries. Open the Updates page for full inventory controls.</div>` : ''}`;
+    }
+
+    function buildWindowsUpdateSummary(limit = 3) {
+      const updates = appState.windowsUpdates || [];
+      const top = updates.slice(0, limit);
+      if (!top.length) {
+        return `Windows Update inventory is currently empty for this device.`;
+      }
+
+      return top.map((item) => {
+        const kb = item.kb ? ` (${item.kb})` : '';
+        const reboot = item.rebootRequired ? 'reboot required' : 'no reboot';
+        return `${item.title}${kb} - ${item.classification || 'update'} / ${item.status || 'unknown'} / ${reboot}`;
+      }).join('\n');
+    }
+
+    function buildSoftwareUpdatesBody() {
+      const posture = appState.updates || {};
+      const patchAction = appState.patchAction || {};
+      const patchBusy = Boolean(patchAction.running);
+      const patchDisabled = patchBusy ? ' disabled' : '';
+      return `
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Software updates</div>
+              <div class="section-title">Patch posture and per-app actions</div>
+              <div class="section-text">Review available updates, manual-only software, and reboot posture directly from the endpoint dashboard.</div>
+            </div>
+            <div class="chip ${posture.rebootRequired ? 'warning' : 'info'}">${posture.rebootRequired ? 'Reboot pending' : 'No reboot pending'}</div>
+          </div>
+          <div class="status-row">
+            <div class="chip ${patchBusy ? 'warning' : 'info'}">${patchBusy ? 'Update task running' : 'Update task idle'}</div>
+            ${patchBusy ? `<div class="chip info">${esc(patchAction.status || '')}</div>` : ''}
+            <button data-nav="updates">Open full updates page</button>
+          </div>
+          <div class="hero-status" style="margin-top: 14px;">
+            <div class="hero-chip"><div class="label">Windows updates</div><div class="value">${esc(posture.windowsCount ?? 0)}</div><div class="detail">Queued from local Windows Update inventory</div></div>
+            <div class="hero-chip"><div class="label">Software available</div><div class="value">${esc(posture.availableSoftwareCount ?? 0)}</div><div class="detail">Auto-capable updates ready to run</div></div>
+            <div class="hero-chip"><div class="label">Manual workflows</div><div class="value">${esc(posture.manualSoftwareCount ?? 0)}</div><div class="detail">Require analyst or user-guided steps</div></div>
+            <div class="hero-chip"><div class="label">Unsupported / blocked</div><div class="value">${esc((posture.unsupportedSoftwareCount ?? 0) + (posture.blockedSoftwareCount ?? 0))}</div><div class="detail">Coverage gaps and blocked software posture</div></div>
+          </div>
+          <div class="actions" style="margin-top: 14px;">
+            <button data-action="softwareUpdatesRefresh"${patchDisabled}>Refresh updates</button>
+            <button data-action="requestWindowsUpdatePam">Request Windows Update (PAM)</button>
+            <button data-action="requestNetworkResetPam">Request network reset (PAM)</button>
+          </div>
+          <div class="source-list" style="margin-top: 14px;">${buildSoftwareUpdateCards(null, { limit: 6 })}</div>
+          <div class="detail-card" style="margin-top: 14px;">
+            <div class="title">Windows update highlights</div>
+            <div class="text">${esc(buildWindowsUpdateSummary())}</div>
+          </div>
+        </section>`;
+    }
+
+    function buildUpdatesPageBody() {
+      const posture = appState.updates || {};
+      const patchAction = appState.patchAction || {};
+      const patchBusy = Boolean(patchAction.running);
+      const patchDisabled = patchBusy ? ' disabled' : '';
+      const data = buildUpdatesDataset();
+      const rangeLabel = data.totalCount === 0 ? '0 of 0' : `${data.startIndex + 1}-${data.endIndex} of ${data.totalCount}`;
+      const prevDisabled = data.pageIndex <= 0 ? ' disabled' : '';
+      const nextDisabled = data.pageIndex >= data.pageCount - 1 ? ' disabled' : '';
+
+      return `
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Updates</div>
+              <div class="section-title">Software update command center</div>
+              <div class="section-text">Filter, sort, and execute software update checks or installs from a single workspace.</div>
+            </div>
+            <div class="chip ${patchBusy ? 'warning' : 'info'}">${patchBusy ? 'Task running' : 'Ready'}</div>
+          </div>
+          <div class="status-row">
+            <div class="chip ${posture.rebootRequired ? 'warning' : 'info'}">${posture.rebootRequired ? 'Reboot pending' : 'No reboot pending'}</div>
+            ${patchAction.status ? `<div class="chip info">${esc(patchAction.status)}</div>` : ''}
+          </div>
+          <div class="filter-row">
+            <input id="updateSearch" value="${esc(updateSearch)}" placeholder="Search software, publisher, provider, or state..." />
+          </div>
+          <div class="subtabs">
+            <button class="${updateFilter === 'actionable' ? 'active' : ''}" data-update-filter="actionable">Actionable</button>
+            <button class="${updateFilter === 'manual' ? 'active' : ''}" data-update-filter="manual">Manual</button>
+            <button class="${updateFilter === 'highrisk' ? 'active' : ''}" data-update-filter="highrisk">High risk</button>
+            <button class="${updateFilter === 'blocked' ? 'active' : ''}" data-update-filter="blocked">Blocked</button>
+            <button class="${updateFilter === 'unsupported' ? 'active' : ''}" data-update-filter="unsupported">Unsupported</button>
+            <button class="${updateFilter === 'all' ? 'active' : ''}" data-update-filter="all">All</button>
+          </div>
+          <div class="subtabs">
+            <button class="${updateSort === 'priority' ? 'active' : ''}" data-update-sort="priority">Sort: Priority</button>
+            <button class="${updateSort === 'name' ? 'active' : ''}" data-update-sort="name">Sort: Name</button>
+            <button class="${updateSort === 'state' ? 'active' : ''}" data-update-sort="state">Sort: State</button>
+            <button class="${updateSort === 'publisher' ? 'active' : ''}" data-update-sort="publisher">Sort: Publisher</button>
+            <button class="${updateSort === 'risk' ? 'active' : ''}" data-update-sort="risk">Sort: Risk</button>
+          </div>
+          <div class="actions" style="margin-top: 10px;">
+            <button class="primary" data-action="softwareUpdatesRefresh"${patchDisabled}>Refresh updates</button>
+            <button data-action="requestWindowsUpdatePam">Request Windows Update (PAM)</button>
+            <button data-action="requestNetworkResetPam">Request network reset (PAM)</button>
+          </div>
+          <div class="source-list" style="margin-top: 12px;">${buildSoftwareUpdateCards(data.items, { keepOrder: true })}</div>
+          <div class="pager">
+            <div class="meta">Showing ${esc(rangeLabel)}${data.totalCount > 0 ? ` - page ${data.pageIndex + 1} of ${data.pageCount}` : ''}</div>
+            <div class="actions">
+              <button data-update-page="prev"${prevDisabled}>Previous</button>
+              <button data-update-page="next"${nextDisabled}>Next</button>
+            </div>
+          </div>
+        </section>
+        <section class="section">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Windows updates</div>
+              <div class="section-title">Local Windows Update queue</div>
+              <div class="section-text">A condensed view of current Windows Update inventory and reboot impact.</div>
+            </div>
+            <div class="chip info">${esc(posture.windowsCount ?? 0)} record(s)</div>
+          </div>
+          <div class="detail-card" style="margin-top: 14px;">
+            <div class="title">Windows update summary</div>
+            <div class="text">${esc(buildWindowsUpdateSummary(8))}</div>
+          </div>
+        </section>`;
+    }
+
     function buildRuntimeKv() {
       const runtime = appState.runtime || {};
+      const updates = appState.updates || {};
+      const patchAction = appState.patchAction || {};
       const pairs = [
         ['Device ID', runtime.deviceId],
         ['Service state', runtime.serviceState],
@@ -2610,6 +3144,10 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         ['Last heartbeat', runtime.lastHeartbeat],
         ['Last policy sync', runtime.lastPolicySync],
         ['Queued telemetry', runtime.queuedTelemetry],
+        ['Windows updates', updates.windowsCount ?? 0],
+        ['Software updates available', updates.availableSoftwareCount ?? 0],
+        ['Update job', patchAction.running ? (patchAction.status || 'running') : 'idle'],
+        ['Patch history records', updates.historyCount ?? 0],
         ['Last scan', runtime.lastScan],
         ['Control plane', runtime.controlPlane]
       ];
@@ -2904,6 +3442,7 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
           <div class="actions" style="margin-top: 14px;">${buildHeroActions()}</div>
           <div class="hero-status" style="margin-top: 14px;">${buildMetrics()}</div>
         </section>
+        ${buildSoftwareUpdatesBody()}
         <section class="section">
           <div class="section-head">
             <div>
@@ -3025,6 +3564,10 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
             </div>
             <div style="margin-top: 14px;">${buildRecordCards('scans')}</div>
           </section>`;
+      }
+
+      if (pageKey === 'updates') {
+        return buildUpdatesPageBody();
       }
 
       if (pageKey === 'history') {
@@ -3195,12 +3738,35 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
     }
 
     document.addEventListener('click', (event) => {
-      const target = event.target.closest('[data-nav], [data-action], [data-select], [data-exclusion-mode]');
+      const target = event.target.closest('[data-nav], [data-action], [data-select], [data-exclusion-mode], [data-update-filter], [data-update-sort], [data-update-page]');
       if (!target) return;
       if (target.dataset.exclusionMode) {
         exclusionMode = target.dataset.exclusionMode;
         if (exclusionMode === 'current') {
           exclusionSearch = '';
+        }
+        render(appState);
+        return;
+      }
+      if (target.dataset.updateFilter) {
+        updateFilter = target.dataset.updateFilter;
+        updatePageIndex = 0;
+        render(appState);
+        return;
+      }
+      if (target.dataset.updateSort) {
+        updateSort = target.dataset.updateSort;
+        updatePageIndex = 0;
+        render(appState);
+        return;
+      }
+      if (target.dataset.updatePage) {
+        const data = buildUpdatesDataset();
+        if (target.dataset.updatePage === 'prev' && data.pageIndex > 0) {
+          updatePageIndex = data.pageIndex - 1;
+        }
+        if (target.dataset.updatePage === 'next' && data.pageIndex < data.pageCount - 1) {
+          updatePageIndex = data.pageIndex + 1;
         }
         render(appState);
         return;
@@ -3219,6 +3785,8 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         if (target.dataset.preset) payload.preset = target.dataset.preset;
         if (target.dataset.page) payload.page = target.dataset.page;
         if (target.dataset.id) payload.id = target.dataset.id;
+        if (target.dataset.softwareId) payload['software-id'] = target.dataset.softwareId;
+        if (target.dataset.path) payload.path = target.dataset.path;
         send(new URLSearchParams(payload).toString());
       }
     });
@@ -3227,6 +3795,12 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
       const target = event.target;
       if (target && target.id === 'exclusionSearch') {
         exclusionSearch = target.value || '';
+        render(appState);
+        return;
+      }
+      if (target && target.id === 'updateSearch') {
+        updateSearch = target.value || '';
+        updatePageIndex = 0;
         render(appState);
       }
     });
@@ -3981,6 +4555,7 @@ void UpdateActionButtons(UiContext& context) {
   const auto threatsMode = context.currentPage == ClientPage::Threats;
   const auto quarantineMode = context.currentPage == ClientPage::Quarantine;
   const auto scansMode = context.currentPage == ClientPage::Scans;
+  const auto updatesMode = context.currentPage == ClientPage::Updates;
   const auto historyMode = context.currentPage == ClientPage::History;
   const auto settingsMode = context.currentPage == ClientPage::Settings;
 
@@ -3996,7 +4571,7 @@ void UpdateActionButtons(UiContext& context) {
   ShowWindow(context.customScanButton, (dashboardMode || scansMode) ? SW_SHOW : SW_HIDE);
   ShowWindow(context.refreshButton,
              (!context.manageExclusionsMode &&
-              (dashboardMode || threatsMode || quarantineMode || scansMode || historyMode || settingsMode))
+            (dashboardMode || threatsMode || quarantineMode || scansMode || updatesMode || historyMode || settingsMode))
                  ? SW_SHOW
                  : SW_HIDE);
   ShowWindow(context.startServiceButton, (!context.manageExclusionsMode && needsServiceStart) ? SW_SHOW : SW_HIDE);
@@ -4128,6 +4703,15 @@ void UpdateScanProgress(UiContext& context, const std::wstring& statusText, cons
   const auto total = std::max<std::uint32_t>(totalTargets, 1);
   SendMessageW(context.progressBar, PBM_SETRANGE32, 0, total);
   SendMessageW(context.progressBar, PBM_SETPOS, std::min(completedTargets, total), 0);
+  PublishWebViewState(context);
+}
+
+void SetPatchActionRunning(UiContext& context, const bool running, const std::wstring& statusText,
+                           const std::wstring& targetId, const bool searchOnly) {
+  context.patchActionRunning.store(running);
+  context.patchActionStatus = statusText;
+  context.patchActionTarget = targetId;
+  context.patchActionSearchOnly = searchOnly;
   PublishWebViewState(context);
 }
 
@@ -4270,6 +4854,48 @@ void RunScanAsync(HWND hwnd, UiContext& context, const ScanPreset preset, const 
   }).detach();
 }
 
+void RunSoftwarePatchActionAsync(HWND hwnd, UiContext& context, std::wstring softwareId, const bool searchOnly) {
+  if (softwareId.empty()) {
+    return;
+  }
+
+  if (context.patchActionRunning.exchange(true)) {
+    MessageBoxW(context.hwnd, L"A software update action is already running. Wait for it to complete.",
+                kWindowTitle, MB_OK | MB_ICONINFORMATION);
+    return;
+  }
+
+  const auto actionLabel = searchOnly ? std::wstring(L"Checking updates for ") : std::wstring(L"Installing updates for ");
+  SetPatchActionRunning(context, true, actionLabel + softwareId + L"...", softwareId, searchOnly);
+
+  const auto config = context.config;
+  std::thread([hwnd, config, softwareId = std::move(softwareId), searchOnly]() mutable {
+    auto* payload = new PatchActionCompletePayload{};
+    payload->targetId = softwareId;
+    payload->searchOnly = searchOnly;
+    try {
+      antivirus::agent::PatchOrchestrator orchestrator(config);
+      const auto result = orchestrator.UpdateSoftware(softwareId, searchOnly);
+      payload->summary = BuildPatchExecutionSummary(result, searchOnly);
+      payload->success = result.success;
+      payload->informational = IsPatchResultInformational(result);
+      if (!result.targetId.empty()) {
+        payload->targetId = result.targetId;
+      }
+    } catch (const std::exception& error) {
+      payload->summary = std::wstring(L"Software update action failed: ") + antivirus::agent::Utf8ToWide(error.what());
+      payload->success = false;
+      payload->informational = false;
+    }
+
+    if (IsWindow(hwnd)) {
+      PostMessageW(hwnd, kPatchActionCompleteMessage, 0, reinterpret_cast<LPARAM>(payload));
+    } else {
+      delete payload;
+    }
+  }).detach();
+}
+
 void HideToTray(HWND hwnd) {
   ShowWindow(hwnd, SW_HIDE);
 }
@@ -4312,6 +4938,9 @@ void ShowTrayMenu(UiContext& context) {
   AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_POWERSHELL, L"PowerShell");
   AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_CMD, L"Command Prompt");
   AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_DISKCLEANUP, L"Disk Cleanup");
+  AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_WINDOWSUPDATE, L"Windows Update");
+  AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_NETWORKRESET, L"Network stack reset");
+  AppendMenuW(pamMenu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(pamMenu, MF_STRING, IDM_TRAY_PAM_APP, L"Run application as admin...");
   AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pamMenu), L"Run as admin");
   AppendMenuW(menu, MF_STRING, IDM_TRAY_PAM_ELEVATE_2M, L"Elevate as admin (2 minutes)");
@@ -4389,6 +5018,7 @@ void LayoutControls(UiContext& context) {
   const bool threatsPage = context.currentPage == ClientPage::Threats;
   const bool quarantinePage = context.currentPage == ClientPage::Quarantine;
   const bool scansPage = context.currentPage == ClientPage::Scans;
+  const bool updatesPage = context.currentPage == ClientPage::Updates;
   const bool servicePage = context.currentPage == ClientPage::Service;
   const bool historyPage = context.currentPage == ClientPage::History;
   const bool settingsPage = context.currentPage == ClientPage::Settings;
@@ -4397,7 +5027,7 @@ void LayoutControls(UiContext& context) {
   const bool showMetrics = dashboardPage;
   const bool showLists = threatsPage || quarantinePage || scansPage || historyPage;
   const bool showPrimaryList = showLists;
-  const bool showDetailPane = showLists || servicePage || settingsPage;
+  const bool showDetailPane = showLists || updatesPage || servicePage || settingsPage;
 
   ShowWindow(context.summaryCard, showHero ? SW_SHOW : SW_HIDE);
   ShowWindow(context.detailsCard, showHero ? SW_SHOW : SW_HIDE);
@@ -4542,6 +5172,8 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
       SelectPage(context, ClientPage::Quarantine);
     } else if (_wcsicmp(page.c_str(), L"scans") == 0) {
       SelectPage(context, ClientPage::Scans);
+    } else if (_wcsicmp(page.c_str(), L"updates") == 0) {
+      SelectPage(context, ClientPage::Updates);
     } else if (_wcsicmp(page.c_str(), L"history") == 0) {
       SelectPage(context, ClientPage::History);
     } else if (_wcsicmp(page.c_str(), L"settings") == 0) {
@@ -4552,6 +5184,50 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
   }
 
   if (_wcsicmp(action.c_str(), L"refresh") == 0) {
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"softwareUpdatesRefresh") == 0) {
+    if (context.patchActionRunning.load()) {
+      MessageBoxW(context.hwnd, L"A software update action is currently running. Wait for it to finish before refreshing inventory.",
+                  kWindowTitle, MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+
+    try {
+      antivirus::agent::PatchOrchestrator orchestrator(context.config);
+      const auto summary = orchestrator.RefreshPatchState();
+      RefreshSnapshot(context);
+      PublishWebViewState(context);
+
+      std::wstringstream stream;
+      stream << L"Patch inventory refreshed.\r\n\r\n"
+             << L"Windows updates: " << summary.windowsUpdateCount << L"\r\n"
+             << L"Software entries: " << summary.softwareCount << L"\r\n"
+             << L"Recipe coverage: " << summary.recipeCount << L"\r\n"
+             << L"Reboot pending: " << (summary.rebootPending ? L"yes" : L"no");
+      MessageBoxW(context.hwnd, stream.str().c_str(), kWindowTitle, MB_OK | MB_ICONINFORMATION);
+    } catch (const std::exception& error) {
+      MessageBoxW(context.hwnd,
+                  (L"Fenrir could not refresh software update posture.\r\n\r\n" +
+                   antivirus::agent::Utf8ToWide(error.what()))
+                      .c_str(),
+                  kWindowTitle, MB_OK | MB_ICONERROR);
+    }
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"requestWindowsUpdatePam") == 0) {
+    SubmitWindowsUpdatePamRequest(context.hwnd, context);
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"requestNetworkResetPam") == 0) {
+    SubmitNetworkResetPamRequest(context.hwnd, context);
     RefreshSnapshot(context);
     PublishWebViewState(context);
     return;
@@ -4569,6 +5245,18 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
         RunScanAsync(context.hwnd, context, ScanPreset::Folder, std::filesystem::path(*folder));
       }
     }
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"softwareCheck") == 0 ||
+      _wcsicmp(action.c_str(), L"softwareUpdate") == 0) {
+    const auto softwareId = GetQueryValue(pairs, L"software-id");
+    if (softwareId.empty()) {
+      return;
+    }
+
+    const auto searchOnly = _wcsicmp(action.c_str(), L"softwareCheck") == 0;
+    RunSoftwarePatchActionAsync(context.hwnd, context, softwareId, searchOnly);
     return;
   }
 
@@ -5261,6 +5949,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         case IDM_TRAY_PAM_DISKCLEANUP:
           SubmitDiskCleanupPamRequest(hwnd, *context);
           return 0;
+        case IDM_TRAY_PAM_WINDOWSUPDATE:
+          SubmitWindowsUpdatePamRequest(hwnd, *context);
+          return 0;
+        case IDM_TRAY_PAM_NETWORKRESET:
+          SubmitNetworkResetPamRequest(hwnd, *context);
+          return 0;
         case IDM_TRAY_PAM_APP:
           SubmitApplicationPamRequest(hwnd, *context);
           return 0;
@@ -5297,6 +5991,27 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         } else {
           ShowTrayNotification(*context, payload->success ? L"Scan completed" : L"Scan needs attention",
                                payload->summary, payload->success ? NIIF_INFO : NIIF_WARNING);
+        }
+      }
+      delete payload;
+      return 0;
+    }
+
+    case kPatchActionCompleteMessage: {
+      auto* context = GetContext(hwnd);
+      auto* payload = reinterpret_cast<PatchActionCompletePayload*>(lParam);
+      if (context != nullptr && payload != nullptr) {
+        SetPatchActionRunning(*context, false, payload->summary, payload->targetId, payload->searchOnly);
+        RefreshSnapshot(*context);
+        if (IsWindowInteractive(*context)) {
+          MessageBoxW(hwnd, payload->summary.c_str(), kWindowTitle,
+                      MB_OK | (payload->informational ? MB_ICONINFORMATION : MB_ICONWARNING));
+        } else {
+          const auto successTitle = payload->searchOnly ? L"Software check completed" : L"Software update completed";
+          const auto warningTitle = payload->searchOnly ? L"Software check needs attention"
+                                                        : L"Software update needs attention";
+          ShowTrayNotification(*context, payload->success ? successTitle : warningTitle, payload->summary,
+                               payload->informational ? NIIF_INFO : NIIF_WARNING);
         }
       }
       delete payload;

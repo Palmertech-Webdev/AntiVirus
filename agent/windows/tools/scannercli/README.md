@@ -154,7 +154,7 @@ Use `RunPhase6ExitCriteria.ps1` to evaluate the Phase 6 integration criteria fro
 Current required checks:
 
 - unified local posture snapshot combines AV, patch, reboot, PAM, and admin posture signals
-- local posture output preserves patch debt and PAM decision history for dashboard/reporting surfaces
+- local posture output preserves patch debt and PAM decision history (including built-in patch/remediation PAM actions) for dashboard/reporting surfaces
 
 Example:
 

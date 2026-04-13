@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "requireReason": true,
+  "allowBuiltInAdminTools": true,
+  "allowArbitraryApplications": true,
+  "maxTimedRuntimeSeconds": 120,
+  "allowedActions": [
+    "run_powershell",
+    "run_cmd",
+    "run_disk_cleanup",
+    "run_windows_update",
+    "run_network_reset",
+    "run_application",
+    "run_application_timed",
+    "elevate_2m"
+  ],
+  "allowedRequesters": [],
+  "blockedPathPrefixes": [
+    "C:\\Windows\\System32\\drivers",
+    "C:\\Windows\\System32\\config"
+  ],
+  "allowedPathPrefixes": []
+}

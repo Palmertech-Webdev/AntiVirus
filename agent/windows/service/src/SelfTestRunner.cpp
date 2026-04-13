@@ -1891,11 +1891,11 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
         const auto phase6AuditPath = phase6Config.journalRootPath / L"privilege-requests.jsonl";
         const auto phase6RequestPayload =
             L"{\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
-            L"\",\"requester\":\"selftest-user\",\"action\":\"run_application\",\"targetPath\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\"arguments\":\"/c whoami\",\"reason\":\"Phase 6 integration request\"}";
+          L"\",\"requester\":\"selftest-user\",\"action\":\"run_windows_update\",\"targetPath\":\"C:\\\\Windows\\\\System32\\\\control.exe\",\"arguments\":\"\",\"reason\":\"Phase 6 patch workflow request\"}";
         const auto phase6AuditPayload =
             L"{\"timestamp\":\"" + JsonEscape(CurrentUtcTimestamp()) +
             L"\",\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
-            L"\",\"requester\":\"selftest-user\",\"action\":\"run_application\",\"target\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\"reason\":\"Phase 6 integration request\",\"decision\":\"approved\",\"detail\":\"Launched process id 5151\",\"approvalSource\":\"policy\",\"durationSeconds\":0,\"terminationOutcome\":\"completed\"}\n";
+          L"\",\"requester\":\"selftest-user\",\"action\":\"run_windows_update\",\"target\":\"C:\\\\Windows\\\\System32\\\\control.exe\",\"reason\":\"Phase 6 patch workflow request\",\"decision\":\"approved\",\"detail\":\"Launched process id 5151\",\"approvalSource\":\"policy\",\"durationSeconds\":0,\"terminationOutcome\":\"completed\"}\n";
 
         if (!WriteSelfTestUtf8File(phase6RequestPath, phase6RequestPayload) ||
             !WriteSelfTestUtf8File(phase6AuditPath, phase6AuditPayload)) {

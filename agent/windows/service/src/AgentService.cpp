@@ -47,6 +47,7 @@ struct ProcessExecutionResult {
 constexpr wchar_t kPamRequestEventName[] = L"Global\\FenrirPamRequestReady";
 constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
 constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
+constexpr wchar_t kPamPolicyFileName[] = L"pam-policy.json";
 
 struct PamRequestPayload {
   std::wstring requestedAt;
@@ -62,6 +63,18 @@ struct PamLaunchPlan {
   std::wstring arguments;
   std::wstring targetPath;
   std::optional<std::uint32_t> maxRuntimeSeconds;
+};
+
+struct PamPolicySnapshot {
+  bool enabled{true};
+  bool requireReason{true};
+  bool allowBuiltInAdminTools{true};
+  bool allowArbitraryApplications{true};
+  std::uint32_t maxTimedRuntimeSeconds{120};
+  std::vector<std::wstring> allowedActions;
+  std::vector<std::wstring> allowedRequesters;
+  std::vector<std::wstring> blockedPathPrefixes;
+  std::vector<std::wstring> allowedPathPrefixes;
 };
 
 std::string EscapeRegex(const std::string& value) {
@@ -162,6 +175,18 @@ std::optional<std::uint32_t> ExtractPayloadUInt32(const std::wstring& json, cons
   }
 
   return std::nullopt;
+}
+
+std::optional<bool> ExtractPayloadBool(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(true|false|1|0)");
+  std::smatch match;
+  if (!std::regex_search(utf8Json, match, pattern)) {
+    return std::nullopt;
+  }
+
+  const auto token = match[1].str();
+  return token == "true" || token == "1";
 }
 
 std::vector<std::wstring> ExtractPayloadStringArray(const std::wstring& json, const std::string& key) {
@@ -565,6 +590,244 @@ std::wstring GetSystemBinaryPath(const wchar_t* relativePath) {
   return (std::filesystem::path(buffer) / relativePath).wstring();
 }
 
+std::wstring TrimWhitespace(std::wstring value) {
+  const auto first = value.find_first_not_of(L" \t\r\n");
+  if (first == std::wstring::npos) {
+    return {};
+  }
+
+  const auto last = value.find_last_not_of(L" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+PamPolicySnapshot CreateDefaultPamPolicySnapshot() {
+  PamPolicySnapshot policy;
+  policy.allowedActions = {
+      L"run_powershell",
+      L"run_cmd",
+      L"run_disk_cleanup",
+      L"run_windows_update",
+      L"run_network_reset",
+      L"run_application",
+      L"run_application_timed",
+      L"elevate_2m",
+  };
+  policy.blockedPathPrefixes = {
+      LR"(C:\Windows\System32\drivers)",
+      LR"(C:\Windows\System32\config)",
+  };
+  return policy;
+}
+
+std::filesystem::path ResolvePamPolicyPath(const AgentConfig& config) {
+  return ResolveRuntimeRoot(config) / kPamPolicyFileName;
+}
+
+bool IsPamRequesterAllowed(const PamPolicySnapshot& policy, const std::wstring& requester) {
+  if (policy.allowedRequesters.empty()) {
+    return true;
+  }
+
+  const auto requesterLower = ToLowerCopy(requester);
+  for (const auto& allowedRequester : policy.allowedRequesters) {
+    const auto allowedLower = ToLowerCopy(allowedRequester);
+    if (allowedLower.empty()) {
+      continue;
+    }
+
+    if (requesterLower == allowedLower) {
+      return true;
+    }
+
+    const auto qualifiedSuffix = std::wstring(L"\\") + allowedLower;
+    if (requesterLower.size() > qualifiedSuffix.size() && requesterLower.ends_with(qualifiedSuffix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool IsPamActionAllowed(const PamPolicySnapshot& policy, const std::wstring& actionLower) {
+  if (policy.allowedActions.empty()) {
+    return true;
+  }
+
+  return std::any_of(policy.allowedActions.begin(), policy.allowedActions.end(),
+                     [&actionLower](const auto& allowedAction) {
+                       return ToLowerCopy(allowedAction) == actionLower;
+                     });
+}
+
+bool TryLoadPamPolicy(const AgentConfig& config, PamPolicySnapshot* policy, std::wstring* errorMessage) {
+  if (policy == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy target was null.";
+    }
+    return false;
+  }
+
+  *policy = CreateDefaultPamPolicySnapshot();
+  const auto policyPath = ResolvePamPolicyPath(config);
+  std::error_code existsError;
+  if (!std::filesystem::exists(policyPath, existsError) || existsError) {
+    return true;
+  }
+
+  std::ifstream input(policyPath, std::ios::binary);
+  if (!input.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy file could not be opened at " + policyPath.wstring() + L".";
+    }
+    policy->enabled = false;
+    return false;
+  }
+
+  const std::string policyUtf8((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  if (!input.good() && !input.eof()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy file could not be read cleanly from " + policyPath.wstring() + L".";
+    }
+    policy->enabled = false;
+    return false;
+  }
+
+  const auto policyJson = Utf8ToWide(policyUtf8);
+  if (const auto enabled = ExtractPayloadBool(policyJson, "enabled"); enabled.has_value()) {
+    policy->enabled = *enabled;
+  }
+  if (const auto requireReason = ExtractPayloadBool(policyJson, "requireReason"); requireReason.has_value()) {
+    policy->requireReason = *requireReason;
+  }
+  if (const auto allowBuiltIns = ExtractPayloadBool(policyJson, "allowBuiltInAdminTools"); allowBuiltIns.has_value()) {
+    policy->allowBuiltInAdminTools = *allowBuiltIns;
+  }
+  if (const auto allowApplications = ExtractPayloadBool(policyJson, "allowArbitraryApplications");
+      allowApplications.has_value()) {
+    policy->allowArbitraryApplications = *allowApplications;
+  }
+  if (const auto maxRuntimeSeconds = ExtractPayloadUInt32(policyJson, "maxTimedRuntimeSeconds");
+      maxRuntimeSeconds.has_value()) {
+    policy->maxTimedRuntimeSeconds = std::clamp<std::uint32_t>(*maxRuntimeSeconds, 15, 900);
+  }
+
+  if (const auto actions = ExtractPayloadStringArray(policyJson, "allowedActions"); !actions.empty()) {
+    policy->allowedActions = actions;
+  }
+  if (const auto requesters = ExtractPayloadStringArray(policyJson, "allowedRequesters"); !requesters.empty()) {
+    policy->allowedRequesters = requesters;
+  }
+  if (const auto blockedPrefixes = ExtractPayloadStringArray(policyJson, "blockedPathPrefixes"); !blockedPrefixes.empty()) {
+    policy->blockedPathPrefixes = blockedPrefixes;
+  }
+  if (const auto allowedPrefixes = ExtractPayloadStringArray(policyJson, "allowedPathPrefixes"); !allowedPrefixes.empty()) {
+    policy->allowedPathPrefixes = allowedPrefixes;
+  }
+
+  return true;
+}
+
+bool EvaluatePamRequestPolicy(const PamPolicySnapshot& policy, const PamRequestPayload& request,
+                              PamLaunchPlan* launchPlan, std::wstring* errorMessage) {
+  if (launchPlan == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy evaluation did not receive a launch plan target.";
+    }
+    return false;
+  }
+
+  if (!policy.enabled) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy is currently disabled for elevation requests.";
+    }
+    return false;
+  }
+
+  if (policy.requireReason && TrimWhitespace(request.reason).size() < 8) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy requires a non-trivial justification before elevation is approved.";
+    }
+    return false;
+  }
+
+  if (!IsPamRequesterAllowed(policy, request.requester)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy denied this requester for elevation.";
+    }
+    return false;
+  }
+
+  const auto actionLower = ToLowerCopy(request.action);
+  if (!IsPamActionAllowed(policy, actionLower)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy denied this action type for elevation.";
+    }
+    return false;
+  }
+
+  const auto builtInAction =
+      actionLower == L"run_powershell" || actionLower == L"run_cmd" || actionLower == L"run_disk_cleanup" ||
+      actionLower == L"run_windows_update" || actionLower == L"run_network_reset";
+  const auto customAction =
+      actionLower == L"run_application" || actionLower == L"run_application_timed" || actionLower == L"elevate_2m";
+
+  if (builtInAction && !policy.allowBuiltInAdminTools) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy denied built-in administrative tool elevation for this request.";
+    }
+    return false;
+  }
+
+  if (customAction && !policy.allowArbitraryApplications) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM policy denied arbitrary application elevation for this request.";
+    }
+    return false;
+  }
+
+  const auto targetPath = launchPlan->targetPath.empty() ? request.targetPath : launchPlan->targetPath;
+  if (!targetPath.empty()) {
+    const auto blockedByPrefix = std::any_of(policy.blockedPathPrefixes.begin(), policy.blockedPathPrefixes.end(),
+                                             [&targetPath](const auto& blockedPrefix) {
+                                               return !blockedPrefix.empty() && PathStartsWith(targetPath, blockedPrefix);
+                                             });
+    if (blockedByPrefix) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir PAM policy denied this target path because it matches a protected system prefix.";
+      }
+      return false;
+    }
+
+    if (customAction && !policy.allowedPathPrefixes.empty()) {
+      const auto allowedByPrefix = std::any_of(policy.allowedPathPrefixes.begin(), policy.allowedPathPrefixes.end(),
+                                               [&targetPath](const auto& allowedPrefix) {
+                                                 return !allowedPrefix.empty() && PathStartsWith(targetPath, allowedPrefix);
+                                               });
+      if (!allowedByPrefix) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Fenrir PAM policy denied this target path because it is outside approved application roots.";
+        }
+        return false;
+      }
+    }
+  }
+
+  const auto timedAction = actionLower == L"run_application_timed" || actionLower == L"elevate_2m";
+  if (timedAction) {
+    if (policy.maxTimedRuntimeSeconds == 0) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir PAM policy denied timed elevation because timed windows are disabled.";
+      }
+      return false;
+    }
+
+    const auto requestedWindow = launchPlan->maxRuntimeSeconds.value_or(policy.maxTimedRuntimeSeconds);
+    launchPlan->maxRuntimeSeconds = std::min<std::uint32_t>(requestedWindow, policy.maxTimedRuntimeSeconds);
+  }
+
+  return true;
+}
+
 bool ParsePamRequestPayload(const std::wstring& payload, PamRequestPayload* request, std::wstring* errorMessage) {
   if (request == nullptr) {
     if (errorMessage != nullptr) {
@@ -623,6 +886,20 @@ bool BuildPamLaunchPlan(const PamRequestPayload& request, PamLaunchPlan* launchP
 
   if (action == L"run_disk_cleanup") {
     launchPlan->executablePath = GetSystemBinaryPath(L"cleanmgr.exe");
+    launchPlan->targetPath = launchPlan->executablePath;
+    return !launchPlan->executablePath.empty();
+  }
+
+  if (action == L"run_windows_update") {
+    launchPlan->executablePath = GetSystemBinaryPath(L"control.exe");
+    launchPlan->arguments = L"/name Microsoft.WindowsUpdate";
+    launchPlan->targetPath = launchPlan->executablePath;
+    return !launchPlan->executablePath.empty();
+  }
+
+  if (action == L"run_network_reset") {
+    launchPlan->executablePath = GetSystemBinaryPath(L"cmd.exe");
+    launchPlan->arguments = L"/c netsh winsock reset & netsh int ip reset";
     launchPlan->targetPath = launchPlan->executablePath;
     return !launchPlan->executablePath.empty();
   }
@@ -692,6 +969,65 @@ bool BuildPamLaunchPlan(const PamRequestPayload& request, PamLaunchPlan* launchP
   return false;
 }
 
+std::wstring BuildPamRequestPayloadJson(const PamRequestPayload& request) {
+  return L"{\"requestedAt\":\"" + EscapePamJsonValue(request.requestedAt) +
+         L"\",\"requester\":\"" + EscapePamJsonValue(request.requester) +
+         L"\",\"action\":\"" + EscapePamJsonValue(request.action) +
+         L"\",\"targetPath\":\"" + EscapePamJsonValue(request.targetPath) +
+         L"\",\"arguments\":\"" + EscapePamJsonValue(request.arguments) +
+         L"\",\"reason\":\"" + EscapePamJsonValue(request.reason) + L"\"}";
+}
+
+bool QueuePamRequestPayload(const std::filesystem::path& requestPath, const PamRequestPayload& request,
+                            std::wstring* errorMessage) {
+  if (requestPath.empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir PAM request path was empty.";
+    }
+    return false;
+  }
+
+  std::error_code directoryError;
+  std::filesystem::create_directories(requestPath.parent_path(), directoryError);
+  if (directoryError) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not create the PAM runtime directory at " +
+                      requestPath.parent_path().wstring() + L".";
+    }
+    return false;
+  }
+
+  const auto tempPath = requestPath.wstring() + L".new";
+  std::ofstream stream(std::filesystem::path(tempPath), std::ios::binary | std::ios::trunc);
+  if (!stream.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not open a temporary PAM request payload file.";
+    }
+    return false;
+  }
+
+  const auto payloadUtf8 = WideToUtf8(BuildPamRequestPayloadJson(request));
+  stream.write(payloadUtf8.data(), static_cast<std::streamsize>(payloadUtf8.size()));
+  stream.flush();
+  if (!stream.good()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not flush the PAM request payload.";
+    }
+    return false;
+  }
+  stream.close();
+
+  if (MoveFileExW(tempPath.c_str(), requestPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
+    DeleteFileW(tempPath.c_str());
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not finalize the PAM request payload.";
+    }
+    return false;
+  }
+
+  return true;
+}
+
 bool TryReadPamRequestPayload(const std::filesystem::path& requestPath, std::wstring* payload, std::wstring* errorMessage) {
   std::ifstream input(requestPath, std::ios::binary);
   if (!input.is_open()) {
@@ -724,7 +1060,8 @@ bool TryReadPamRequestPayload(const std::filesystem::path& requestPath, std::wst
 
 bool AppendPamAuditEntry(const std::filesystem::path& journalPath, const PamRequestPayload& request,
                          const PamLaunchPlan& launchPlan, const std::wstring& decision,
-                         const std::wstring& detailMessage) {
+                         const std::wstring& detailMessage, const std::wstring& approvalSource = L"policy",
+                         const std::wstring& terminationOutcome = L"n/a") {
   std::error_code createError;
   std::filesystem::create_directories(journalPath.parent_path(), createError);
   if (createError) {
@@ -736,13 +1073,17 @@ bool AppendPamAuditEntry(const std::filesystem::path& journalPath, const PamRequ
     return false;
   }
 
+  const auto durationSeconds = launchPlan.maxRuntimeSeconds.value_or(0);
   const std::wstring line = L"{\"timestamp\":\"" + EscapePamJsonValue(CurrentUtcTimestamp()) + L"\",\"requestedAt\":\"" +
                             EscapePamJsonValue(request.requestedAt) + L"\",\"requester\":\"" +
                             EscapePamJsonValue(request.requester) + L"\",\"action\":\"" +
                             EscapePamJsonValue(request.action) + L"\",\"target\":\"" +
                             EscapePamJsonValue(launchPlan.targetPath.empty() ? request.targetPath : launchPlan.targetPath) +
                             L"\",\"reason\":\"" + EscapePamJsonValue(request.reason) + L"\",\"decision\":\"" +
-                            EscapePamJsonValue(decision) + L"\",\"detail\":\"" + EscapePamJsonValue(detailMessage) + L"\"}\n";
+                            EscapePamJsonValue(decision) + L"\",\"detail\":\"" + EscapePamJsonValue(detailMessage) +
+                            L"\",\"approvalSource\":\"" + EscapePamJsonValue(approvalSource) +
+                            L"\",\"durationSeconds\":" + std::to_wstring(durationSeconds) +
+                            L",\"terminationOutcome\":\"" + EscapePamJsonValue(terminationOutcome) + L"\"}\n";
   const auto utf8Line = WideToUtf8(line);
   output.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
   output.flush();
@@ -941,7 +1282,8 @@ void StartPamTimedProcessGuard(const std::filesystem::path& journalPath, const P
     if (processHandle == nullptr) {
       AppendPamAuditEntry(journalPath, request, launchPlan, L"timed-guard-failed",
                           L"Fenrir could not monitor the timed elevation process: " +
-                              FormatWindowsError(GetLastError()));
+                              FormatWindowsError(GetLastError()),
+                          L"runtime-guard", L"guard-start-failed");
       return;
     }
 
@@ -951,19 +1293,23 @@ void StartPamTimedProcessGuard(const std::filesystem::path& journalPath, const P
         AppendPamAuditEntry(journalPath, request, launchPlan, L"expired-termination-failed",
                             L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
                                 L" seconds, but process termination failed: " +
-                                FormatWindowsError(GetLastError()));
+                                FormatWindowsError(GetLastError()),
+                            L"runtime-guard", L"termination-failed");
       } else {
         AppendPamAuditEntry(journalPath, request, launchPlan, L"expired",
                             L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
-                                L" seconds and the process was terminated.");
+                                L" seconds and the process was terminated.",
+                            L"runtime-guard", L"terminated");
       }
     } else if (waitResult == WAIT_OBJECT_0) {
       AppendPamAuditEntry(journalPath, request, launchPlan, L"completed",
-                          L"Timed elevation process exited before the 2 minute cutoff.");
+                          L"Timed elevation process exited before the 2 minute cutoff.",
+                          L"runtime-guard", L"completed");
     } else {
       AppendPamAuditEntry(journalPath, request, launchPlan, L"timed-guard-failed",
                           L"Fenrir timed elevation guard encountered a wait error: " +
-                              FormatWindowsError(GetLastError()));
+                              FormatWindowsError(GetLastError()),
+                          L"runtime-guard", L"wait-failed");
     }
 
     CloseHandle(processHandle);
@@ -1173,6 +1519,16 @@ std::filesystem::path AgentService::GetPamAuditJournalPath() const {
 
 void AgentService::ProcessPamRequests() {
   const auto journalPath = GetPamAuditJournalPath();
+  PamPolicySnapshot pamPolicy{};
+  std::wstring pamPolicyError;
+  const auto pamPolicyLoaded = TryLoadPamPolicy(config_, &pamPolicy, &pamPolicyError);
+  if (!pamPolicyLoaded) {
+    QueueTelemetryEvent(
+        L"privilege.elevation.policy.load.failed", L"pam-broker",
+        L"Fenrir could not load PAM policy cleanly and is fail-closing elevation approvals.",
+        std::wstring(L"{\"reason\":\"") + Utf8ToWide(EscapeJsonString(
+            pamPolicyError.empty() ? L"Unknown PAM policy parsing failure" : pamPolicyError)) + L"\"}");
+  }
 
   while (!ShouldStop()) {
     bool processedAnyRequests = false;
@@ -1196,7 +1552,8 @@ void AgentService::ProcessPamRequests() {
       if (!ParsePamRequestPayload(payload, &request, &parseError)) {
         PamLaunchPlan rejectedLaunch{
             .targetPath = request.targetPath.empty() ? L"<invalid-payload>" : request.targetPath};
-        AppendPamAuditEntry(journalPath, request, rejectedLaunch, L"denied", parseError);
+        AppendPamAuditEntry(journalPath, request, rejectedLaunch, L"denied", parseError,
+                  L"payload-validation", L"not-launched");
         QueueTelemetryEvent(
             L"privilege.elevation.request.rejected", L"pam-broker",
             L"Fenrir rejected a malformed local PAM request payload.",
@@ -1209,7 +1566,8 @@ void AgentService::ProcessPamRequests() {
       PamLaunchPlan launchPlan{};
       std::wstring validationError;
       if (!BuildPamLaunchPlan(request, &launchPlan, &validationError)) {
-        AppendPamAuditEntry(journalPath, request, launchPlan, L"denied", validationError);
+        AppendPamAuditEntry(journalPath, request, launchPlan, L"denied", validationError,
+                            L"action-validation", L"not-launched");
         QueueTelemetryEvent(
             L"privilege.elevation.request.denied", L"pam-broker",
             L"Fenrir denied a local PAM request during policy validation.",
@@ -1220,12 +1578,28 @@ void AgentService::ProcessPamRequests() {
         continue;
       }
 
+      std::wstring policyError;
+      if (!EvaluatePamRequestPolicy(pamPolicy, request, &launchPlan, &policyError)) {
+        AppendPamAuditEntry(journalPath, request, launchPlan, L"denied", policyError,
+                            L"policy", L"not-launched");
+        QueueTelemetryEvent(
+            L"privilege.elevation.request.denied", L"pam-broker",
+            L"Fenrir denied a local PAM request due to PAM policy controls.",
+            std::wstring(L"{\"requester\":\"") + Utf8ToWide(EscapeJsonString(request.requester)) +
+                L"\",\"reason\":\"" + Utf8ToWide(EscapeJsonString(policyError)) +
+                L"\",\"action\":\"" + Utf8ToWide(EscapeJsonString(request.action)) + L"\"}");
+        std::error_code removeError;
+        std::filesystem::remove(requestPath, removeError);
+        continue;
+      }
+
       std::wstring launchError;
       DWORD launchedProcessId = 0;
       const auto launched = LaunchPamProcessAsSystem(launchPlan, &launchedProcessId, &launchError);
       const auto decision = launched ? L"approved" : L"denied";
       const auto detail = launched ? (L"Launched process id " + std::to_wstring(launchedProcessId)) : launchError;
-      AppendPamAuditEntry(journalPath, request, launchPlan, decision, detail);
+      AppendPamAuditEntry(journalPath, request, launchPlan, decision, detail,
+                          launched ? L"policy-auto" : L"launch", launched ? L"pending" : L"not-launched");
 
       if (launched) {
         StartPamTimedProcessGuard(journalPath, request, launchPlan, launchedProcessId);
@@ -1753,6 +2127,44 @@ std::wstring AgentService::ExecuteUpdateCommand(const RemoteCommand& command, co
 
 std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, const bool installWindows,
                                                const bool installSoftware, const bool runCycle) {
+  const auto routeThroughPam = installWindows && ExtractPayloadBool(command.payloadJson, "routeThroughPam").value_or(false);
+  if (routeThroughPam) {
+    PamRequestPayload pamRequest{};
+    pamRequest.requestedAt = CurrentUtcTimestamp();
+    pamRequest.requester = command.issuedBy.empty() ? L"remote-control-plane" : command.issuedBy;
+    pamRequest.action = L"run_windows_update";
+    pamRequest.targetPath = GetSystemBinaryPath(L"control.exe");
+    pamRequest.arguments.clear();
+    pamRequest.reason = TrimWhitespace(ExtractPayloadString(command.payloadJson, "reason").value_or(L""));
+    if (pamRequest.reason.empty()) {
+      pamRequest.reason = L"Remote patch.windows.install command routed through PAM policy controls.";
+    }
+
+    if (pamRequest.targetPath.empty()) {
+      throw std::runtime_error("Unable to resolve Windows Update control path for PAM routing");
+    }
+
+    std::wstring queueError;
+    if (!QueuePamRequestPayload(GetPamRequestPath(), pamRequest, &queueError)) {
+      throw std::runtime_error(
+          WideToUtf8(queueError.empty() ? L"Unable to stage PAM request for patch.windows.install" : queueError));
+    }
+
+    if (pamRequestEvent_ != nullptr) {
+      SetEvent(pamRequestEvent_);
+    }
+
+    QueueTelemetryEvent(
+        L"patch.windows.install.pam.routed", L"patch-orchestrator",
+        L"Fenrir routed a Windows patch install command through PAM policy controls.",
+        std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"action\":\"run_windows_update\",\"requester\":\"" +
+            Utf8ToWide(EscapeJsonString(pamRequest.requester)) + L"\",\"reason\":\"" +
+            Utf8ToWide(EscapeJsonString(pamRequest.reason)) + L"\",\"queued\":true}");
+
+    return std::wstring(L"{\"commandId\":\"") + command.commandId +
+           L"\",\"action\":\"run_windows_update\",\"status\":\"queued_for_pam\",\"queued\":true}";
+  }
+
   PatchOrchestrator orchestrator(config_);
   PatchExecutionResult result{};
 

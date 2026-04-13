@@ -28,6 +28,10 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Phase 2 self-test gates that validate ransomware-style destructive write-burst containment while preserving allow-only behavior for benign backup/sync bulk-I/O workloads
 - Phase 5 self-test gates and endpoint posture fields for PAM request visibility, PAM approval/denial audit visibility, and local Administrators membership exposure auditing
 - Phase 6 self-test gates for unified local posture projection that combines AV findings, patch debt, reboot state, PAM workflow state, and local-admin exposure in one endpoint snapshot
+- A local `pam-policy.json` model that constrains PAM by requester/action allowlists, reason requirements, path guards, and timed elevation window caps
+- Tray PAM workflows now include built-in `run_windows_update` and `run_network_reset` actions so patch/remediation admin tasks route through the PAM broker instead of direct admin sessions
+- `patch.windows.install` remote commands can opt into PAM routing with payload flag `routeThroughPam=true` (plus optional `reason`), which queues `run_windows_update` for policy-governed execution
+- Richer PAM audit journaling that records approval source, duration, and completion/termination outcome metadata for each elevation decision
 - A shared on-demand scan engine used by `antivirus-scannercli`
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
 - Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories
@@ -124,6 +128,12 @@ The purpose of this folder is to establish the internal contracts we will build 
 - `ANTIVIRUS_SCAN_EXCLUDE_PATHS`
 
 The default sync interval is now 60 seconds when the agent is run in multi-iteration mode.
+
+## PAM Policy Template
+
+- The service reads `pam-policy.json` from the runtime root (the same root directory that contains the runtime database path).
+- A baseline template is included at `agent/windows/service/pam-policy.example.json`.
+- Copy the template to your runtime root as `pam-policy.json` and then tune requester/action/path controls for your environment.
 
 ## Packaging
 
