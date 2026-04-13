@@ -2,6 +2,7 @@ param(
     [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev\build'),
     [string]$DevOutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
+    [string]$WebView2RuntimeInstallerPath = '',
     [switch]$Clean
 )
 
@@ -41,6 +42,14 @@ $serviceSourceRoot = Join-Path $windowsRoot 'service'
 $buildRootFull = [System.IO.Path]::GetFullPath($BuildRoot)
 $devOutputRootFull = [System.IO.Path]::GetFullPath($DevOutputRoot)
 $outputRootFull = [System.IO.Path]::GetFullPath($OutputRoot)
+$webView2RuntimeInstallerFullPath = ''
+
+if ($WebView2RuntimeInstallerPath) {
+    $webView2RuntimeInstallerFullPath = [System.IO.Path]::GetFullPath($WebView2RuntimeInstallerPath)
+    if (-not (Test-Path -LiteralPath $webView2RuntimeInstallerFullPath)) {
+        throw "Configured WebView2 runtime installer was not found: $webView2RuntimeInstallerFullPath"
+    }
+}
 
 if ($Clean -and (Test-Path -LiteralPath $outputRootFull)) {
     Remove-Item -LiteralPath $outputRootFull -Recurse -Force
@@ -49,11 +58,23 @@ if ($Clean -and (Test-Path -LiteralPath $outputRootFull)) {
 Ensure-Directory -Path $buildRootFull
 Ensure-Directory -Path $outputRootFull
 
-cmake -S $serviceSourceRoot -B $buildRootFull `
-    -DANTIVIRUS_DEV_OUTPUT_ROOT="$devOutputRootFull" `
-    -DANTIVIRUS_INSTALL_OUTPUT_ROOT="$outputRootFull" | Out-Host
+$cmakeConfigureArgs = @(
+    '-S', $serviceSourceRoot,
+    '-B', $buildRootFull,
+    "-DANTIVIRUS_DEV_OUTPUT_ROOT=$devOutputRootFull",
+    "-DANTIVIRUS_INSTALL_OUTPUT_ROOT=$outputRootFull",
+    "-DANTIVIRUS_WEBVIEW2_BOOTSTRAPPER:FILEPATH=$webView2RuntimeInstallerFullPath"
+)
+
+cmake @cmakeConfigureArgs | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed with exit code $LASTEXITCODE"
+}
 
 cmake --build $buildRootFull --target antivirus-setup | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed with exit code $LASTEXITCODE"
+}
 
 $setupTarget = Join-Path $outputRootFull 'FenrirSetup.exe'
 if (-not (Test-Path -LiteralPath $setupTarget)) {

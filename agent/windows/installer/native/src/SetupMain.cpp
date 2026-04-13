@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -42,6 +43,7 @@ constexpr wchar_t kEtwTestCliName[] = L"fenrir-etwtestcli.exe";
 constexpr wchar_t kWfpTestCliName[] = L"fenrir-wfptestcli.exe";
 constexpr wchar_t kWinpthreadDllName[] = L"libwinpthread-1.dll";
 constexpr wchar_t kWebView2LoaderDllName[] = L"WebView2Loader.dll";
+constexpr wchar_t kWebView2RuntimeInstallerName[] = L"MicrosoftEdgeWebView2Setup.exe";
 constexpr wchar_t kSetupExeName[] = L"FenrirSetup.exe";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
 constexpr wchar_t kDriverInfRelativePath[] = L"driver\\AntivirusMinifilter.inf";
@@ -161,6 +163,69 @@ std::wstring TrimCopy(const std::wstring& value) {
 
   const auto last = value.find_last_not_of(L" \t\r\n");
   return value.substr(first, last - first + 1);
+}
+
+std::wstring HresultToHexString(const HRESULT value) {
+  std::wstringstream stream;
+  stream << L"0x" << std::hex << std::uppercase << std::setw(8) << std::setfill(L'0')
+         << static_cast<unsigned long>(value);
+  return stream.str();
+}
+
+bool HasEmbeddedPayloadResource(HINSTANCE instance, const int resourceId) {
+  return FindResourceW(instance, MAKEINTRESOURCEW(resourceId), RT_RCDATA) != nullptr;
+}
+
+bool IsWebView2RuntimeAvailable(const std::filesystem::path& installRoot, std::wstring* browserVersion,
+                                std::wstring* errorMessage) {
+  const auto loaderPath = installRoot / kWebView2LoaderDllName;
+  if (!std::filesystem::exists(loaderPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"WebView2Loader.dll was not found in the install directory.";
+    }
+    return false;
+  }
+
+  const auto loaderModule = LoadLibraryW(loaderPath.c_str());
+  if (loaderModule == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"WebView2Loader.dll could not be loaded.";
+    }
+    return false;
+  }
+
+  using GetAvailableVersionFn = HRESULT(WINAPI*)(PCWSTR, LPWSTR*);
+  const auto getAvailableVersion = reinterpret_cast<GetAvailableVersionFn>(
+      GetProcAddress(loaderModule, "GetAvailableCoreWebView2BrowserVersionString"));
+  if (getAvailableVersion == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"WebView2 loader export GetAvailableCoreWebView2BrowserVersionString is unavailable.";
+    }
+    FreeLibrary(loaderModule);
+    return false;
+  }
+
+  LPWSTR versionRaw = nullptr;
+  const auto result = getAvailableVersion(nullptr, &versionRaw);
+  if (FAILED(result) || versionRaw == nullptr || wcslen(versionRaw) == 0) {
+    if (errorMessage != nullptr) {
+      *errorMessage =
+          L"Microsoft Edge WebView2 Runtime is not installed or not available (" + HresultToHexString(result) + L").";
+    }
+    if (versionRaw != nullptr) {
+      CoTaskMemFree(versionRaw);
+    }
+    FreeLibrary(loaderModule);
+    return false;
+  }
+
+  if (browserVersion != nullptr) {
+    *browserVersion = versionRaw;
+  }
+
+  CoTaskMemFree(versionRaw);
+  FreeLibrary(loaderModule);
+  return true;
 }
 
 std::wstring ReadRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* valueName);
@@ -955,6 +1020,48 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
     return;
   }
 
+  std::wstring webViewVersion;
+  std::wstring webViewRuntimeError;
+  auto webViewRuntimeReady = IsWebView2RuntimeAvailable(context->installRoot, &webViewVersion, &webViewRuntimeError);
+  if (webViewRuntimeReady) {
+    PostLog(hwnd, L"Detected WebView2 Runtime version " + webViewVersion + L".");
+  } else {
+    PostLog(hwnd, L"Warning: modern endpoint UI is unavailable on this host. " + webViewRuntimeError);
+  }
+
+  const auto hasEmbeddedWebViewInstaller =
+      HasEmbeddedPayloadResource(context->instance, IDR_PAYLOAD_WEBVIEW2_BOOTSTRAPPER);
+  if (!webViewRuntimeReady && hasEmbeddedWebViewInstaller) {
+    PostStatus(hwnd, L"Installing WebView2 runtime dependency...", 78);
+    PostLog(hwnd, L"Installing embedded WebView2 runtime dependency");
+
+    const auto webViewInstallerPath = context->installRoot / kWebView2RuntimeInstallerName;
+    std::wstring webViewDependencyError;
+    if (!ExtractResourceToFile(context->instance, IDR_PAYLOAD_WEBVIEW2_BOOTSTRAPPER, webViewInstallerPath,
+                               &webViewDependencyError)) {
+      PostLog(hwnd, L"Warning: could not extract embedded WebView2 runtime installer. " + webViewDependencyError);
+    } else {
+      DWORD webViewInstallerExitCode = 0;
+      if (!RunProcessHidden(webViewInstallerPath, L"/silent /install", context->installRoot, &webViewInstallerExitCode,
+                            &webViewDependencyError)) {
+        PostLog(hwnd, L"Warning: embedded WebView2 runtime installer failed. " + webViewDependencyError);
+      } else {
+        PostLog(hwnd, L"Embedded WebView2 runtime installer exited with code " +
+                      std::to_wstring(webViewInstallerExitCode) + L".");
+      }
+    }
+
+    webViewVersion.clear();
+    webViewRuntimeError.clear();
+    webViewRuntimeReady = IsWebView2RuntimeAvailable(context->installRoot, &webViewVersion, &webViewRuntimeError);
+    if (webViewRuntimeReady) {
+      PostLog(hwnd, L"WebView2 runtime dependency is now available (" + webViewVersion + L").");
+    } else {
+      PostLog(hwnd, L"Warning: WebView2 runtime is still unavailable after dependency install attempt. " +
+                    webViewRuntimeError);
+    }
+  }
+
   PostLog(hwnd, L"Saving control plane URL: " + context->controlPlaneBaseUrl);
   if (!PersistControlPlaneUrl(context->controlPlaneBaseUrl, &errorMessage)) {
     PostComplete(hwnd, false, false, false, errorMessage);
@@ -1000,8 +1107,14 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
   PostStatus(hwnd, L"Launching background companion...", 100);
   PostLog(hwnd, L"Starting the installed endpoint client in silent tray mode");
   LaunchInstalledEndpointClient(context->installRoot, true);
-  PostComplete(hwnd, true, true, false, repair ? L"Fenrir Endpoint was repaired successfully."
-                                               : L"Fenrir Endpoint was installed successfully.");
+  auto completionMessage = repair ? std::wstring(L"Fenrir Endpoint was repaired successfully.")
+                                  : std::wstring(L"Fenrir Endpoint was installed successfully.");
+  if (!webViewRuntimeReady) {
+    completionMessage += hasEmbeddedWebViewInstaller
+                             ? L" Fenrir attempted to install the bundled WebView2 runtime dependency, but modern dashboard rendering is still unavailable on this host. The endpoint client will stay on the legacy native view until Microsoft Edge WebView2 Runtime is available."
+                             : L" Modern dashboard rendering requires Microsoft Edge WebView2 Runtime; this host will use the legacy native view until WebView2 Runtime is installed.";
+  }
+  PostComplete(hwnd, true, true, false, completionMessage);
 }
 
 std::filesystem::path GetTemporaryHelperPath() {

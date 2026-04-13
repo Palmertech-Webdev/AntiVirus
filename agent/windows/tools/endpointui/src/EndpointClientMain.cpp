@@ -227,6 +227,8 @@ struct UiContext {
   ClientPage currentPage{ClientPage::Dashboard};
   bool webViewReady{false};
   bool webViewEnabled{false};
+  bool webViewFallbackActive{false};
+  std::wstring webViewFailureReason;
   std::wstring webViewLogoDataUri;
   HMODULE webViewLoaderModule{};
   ComPtr<ICoreWebView2Environment> webViewEnvironment;
@@ -369,6 +371,7 @@ void HideNativeShellControls(UiContext& context, bool visible);
 bool InitializeWebViewHost(UiContext& context);
 void DestroyWebViewHost(UiContext& context);
 void HandleWebViewMessage(UiContext& context, const std::wstring& message);
+std::wstring BuildWebViewFallbackStatus(const UiContext& context);
 
 std::wstring NullableText(const std::wstring& value, const wchar_t* fallback = L"(not available)") {
   return value.empty() ? std::wstring(fallback) : value;
@@ -3230,6 +3233,21 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
   return html;
 }
 
+std::wstring HresultToHex(const HRESULT value) {
+  std::wstringstream stream;
+  stream << L"0x" << std::hex << std::uppercase << std::setw(8) << std::setfill(L'0')
+         << static_cast<unsigned long>(value);
+  return stream.str();
+}
+
+std::wstring BuildWebViewFallbackStatus(const UiContext& context) {
+  if (!context.webViewFailureReason.empty()) {
+    return context.webViewFailureReason;
+  }
+
+  return L"Modern Fenrir UI is unavailable because Microsoft Edge WebView2 Runtime is missing. Install WebView2 Runtime and restart Fenrir Protection Centre.";
+}
+
 void HideNativeShellControls(UiContext& context, const bool visible) {
   const auto showCommand = visible ? SW_SHOW : SW_HIDE;
   const std::array<HWND, 34> controls{
@@ -3289,18 +3307,28 @@ bool InitializeWebViewHost(UiContext& context) {
     return true;
   }
 
+  context.webViewFallbackActive = false;
+  context.webViewFailureReason.clear();
+
   const auto currentExecutable = GetCurrentExecutablePath();
   if (currentExecutable.empty()) {
+    context.webViewFallbackActive = true;
+    context.webViewFailureReason = L"Modern Fenrir UI is unavailable because the client executable path could not be resolved.";
     return false;
   }
 
   const auto loaderPath = std::filesystem::path(currentExecutable).parent_path() / L"WebView2Loader.dll";
   if (!std::filesystem::exists(loaderPath)) {
+    context.webViewFallbackActive = true;
+    context.webViewFailureReason =
+        L"Modern Fenrir UI is unavailable because WebView2Loader.dll is missing from the install directory.";
     return false;
   }
 
   context.webViewLoaderModule = LoadLibraryW(loaderPath.c_str());
   if (context.webViewLoaderModule == nullptr) {
+    context.webViewFallbackActive = true;
+    context.webViewFailureReason = L"Modern Fenrir UI is unavailable because WebView2Loader.dll could not be loaded.";
     return false;
   }
 
@@ -3309,6 +3337,9 @@ bool InitializeWebViewHost(UiContext& context) {
   const auto createEnvironment = reinterpret_cast<CreateEnvironmentFn>(
       GetProcAddress(context.webViewLoaderModule, "CreateCoreWebView2EnvironmentWithOptions"));
   if (createEnvironment == nullptr) {
+    context.webViewFallbackActive = true;
+    context.webViewFailureReason =
+        L"Modern Fenrir UI is unavailable because the WebView2 loader export could not be resolved.";
     DestroyWebViewHost(context);
     return false;
   }
@@ -3317,6 +3348,9 @@ bool InitializeWebViewHost(UiContext& context) {
   context.webViewEnabled = true;
   const auto userDataFolder = GetWebViewUserDataFolder();
   if (userDataFolder.empty()) {
+    context.webViewFallbackActive = true;
+    context.webViewFailureReason =
+        L"Modern Fenrir UI is unavailable because the WebView2 user-data location could not be prepared.";
     DestroyWebViewHost(context);
     return false;
   }
@@ -3332,6 +3366,11 @@ bool InitializeWebViewHost(UiContext& context) {
         }
 
         if (FAILED(errorCode) || environment == nullptr) {
+          callbackContext->webViewFallbackActive = true;
+          callbackContext->webViewFailureReason =
+              L"Modern Fenrir UI is unavailable because WebView2 runtime initialization failed (" +
+              HresultToHex(errorCode) +
+              L"). Install Microsoft Edge WebView2 Runtime and restart Fenrir Protection Centre.";
           callbackContext->webViewEnabled = false;
           DestroyWebViewHost(*callbackContext);
           return S_OK;
@@ -3346,6 +3385,11 @@ bool InitializeWebViewHost(UiContext& context) {
               }
 
               if (FAILED(controllerError) || controller == nullptr) {
+                controllerContext->webViewFallbackActive = true;
+                controllerContext->webViewFailureReason =
+                    L"Modern Fenrir UI is unavailable because WebView2 controller creation failed (" +
+                    HresultToHex(controllerError) +
+                    L"). Install Microsoft Edge WebView2 Runtime and restart Fenrir Protection Centre.";
                 controllerContext->webViewEnabled = false;
                 DestroyWebViewHost(*controllerContext);
                 return S_OK;
@@ -3355,6 +3399,9 @@ bool InitializeWebViewHost(UiContext& context) {
               controllerContext->webViewController->put_IsVisible(TRUE);
               controllerContext->webViewController->get_CoreWebView2(&controllerContext->webView);
               if (controllerContext->webView == nullptr) {
+                controllerContext->webViewFallbackActive = true;
+                controllerContext->webViewFailureReason =
+                    L"Modern Fenrir UI is unavailable because the WebView2 runtime host did not return a browser instance.";
                 controllerContext->webViewEnabled = false;
                 DestroyWebViewHost(*controllerContext);
                 return S_OK;
@@ -3397,6 +3444,8 @@ bool InitializeWebViewHost(UiContext& context) {
               controllerContext->webView->add_WebMessageReceived(messageHandler.Get(),
                                                                   &controllerContext->webMessageReceivedToken);
 
+              controllerContext->webViewFallbackActive = false;
+              controllerContext->webViewFailureReason.clear();
               controllerContext->webViewReady = true;
               HideNativeShellControls(*controllerContext, false);
               ResizeWebView(*controllerContext);
@@ -3412,6 +3461,11 @@ bool InitializeWebViewHost(UiContext& context) {
   const auto userDataFolderPath = userDataFolder.wstring();
   const auto result = createEnvironment(nullptr, userDataFolderPath.c_str(), nullptr, environmentHandler.Get());
   if (FAILED(result)) {
+    context.webViewFallbackActive = true;
+    context.webViewFailureReason =
+        L"Modern Fenrir UI is unavailable because WebView2 runtime startup failed (" +
+        HresultToHex(result) +
+        L"). Install Microsoft Edge WebView2 Runtime and restart Fenrir Protection Centre.";
     DestroyWebViewHost(context);
     return false;
   }
@@ -3992,7 +4046,12 @@ void RefreshSnapshot(UiContext& context) {
 
     UpdatePageChrome(context);
     SetWindowTextSafe(context.summaryCard, BuildSummaryCardText(context.snapshot));
-    SetWindowTextSafe(context.detailsCard, BuildDetailsCardText(context.snapshot));
+    auto detailsText = BuildDetailsCardText(context.snapshot);
+    if (context.webViewFallbackActive && !context.manageExclusionsMode) {
+      detailsText += L"\r\n\r\nModern UI notice\r\n";
+      detailsText += BuildWebViewFallbackStatus(context);
+    }
+    SetWindowTextSafe(context.detailsCard, detailsText);
     SetWindowTextSafe(context.metricThreats,
                       BuildMetricCardText(L"Open threats", std::to_wstring(context.snapshot.openThreatCount),
                                           context.snapshot.openThreatCount == 1 ? L"1 unresolved detection"
@@ -4020,6 +4079,10 @@ void RefreshSnapshot(UiContext& context) {
       SetWindowTextSafe(context.detailEdit, BuildExclusionsEditorText());
       SetWindowTextSafe(context.scanStatusLabel, BuildExclusionEditorSummary());
       SetWindowTextW(context.openQuarantineButton, L"Save exclusions");
+    } else if (context.webViewFallbackActive && !context.scanRunning.load()) {
+      const auto fallbackStatus = BuildWebViewFallbackStatus(context);
+      SetWindowTextSafe(context.scanStatusLabel, fallbackStatus);
+      context.scanStatusText = fallbackStatus;
     }
     UpdateTrayIcon(context);
     EvaluateNotifications(context, refreshedSnapshot);
@@ -4043,6 +4106,9 @@ void RefreshSnapshot(UiContext& context) {
 
 void UpdateScanProgress(UiContext& context, const std::wstring& statusText, const std::uint32_t completedTargets,
                         const std::uint32_t totalTargets) {
+  context.scanStatusText = statusText;
+  context.scanProgressCompleted = completedTargets;
+  context.scanProgressTotal = totalTargets;
   SetWindowTextSafe(context.scanStatusLabel, statusText);
   ShowWindow(context.progressBar, SW_SHOW);
 
@@ -4053,6 +4119,10 @@ void UpdateScanProgress(UiContext& context, const std::wstring& statusText, cons
 }
 
 void SetScanRunning(UiContext& context, const bool running, const std::wstring& statusText) {
+  context.scanRunning.store(running);
+  context.scanStatusText = statusText;
+  context.scanProgressCompleted = 0;
+  context.scanProgressTotal = running ? 100 : 0;
   SetWindowTextSafe(context.scanStatusLabel, statusText);
   ShowWindow(context.progressBar, running ? SW_SHOW : SW_HIDE);
   if (running) {
@@ -5013,6 +5083,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         SetWindowTextSafe(context->secondarySectionTitle, L"Exclusions editor");
         SetWindowTextSafe(context->scanStatusLabel, BuildExclusionEditorSummary());
         SetWindowTextSafe(context->detailEdit, BuildExclusionsEditorText());
+      } else if (!webViewStarted) {
+        const auto fallbackStatus = BuildWebViewFallbackStatus(*context);
+        SetWindowTextSafe(context->scanStatusLabel, fallbackStatus);
+        context->scanStatusText = fallbackStatus;
       }
       ShowWindow(context->navServiceButton, SW_HIDE);
       LayoutControls(*context);

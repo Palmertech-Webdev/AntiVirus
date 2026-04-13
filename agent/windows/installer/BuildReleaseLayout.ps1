@@ -3,6 +3,7 @@ param(
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
     [string]$InstallerOutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
     [string]$DriverArtifactRoot = '',
+    [string]$WebView2RuntimeInstallerPath = '',
     [switch]$Clean
 )
 
@@ -138,6 +139,14 @@ $serviceSourceRoot = Join-Path $windowsRoot 'service'
 $buildRoot = [System.IO.Path]::GetFullPath($BuildRoot)
 $outputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 $installerOutputRoot = [System.IO.Path]::GetFullPath($InstallerOutputRoot)
+$webView2RuntimeInstallerFullPath = ''
+
+if ($WebView2RuntimeInstallerPath) {
+    $webView2RuntimeInstallerFullPath = [System.IO.Path]::GetFullPath($WebView2RuntimeInstallerPath)
+    if (-not (Test-Path -LiteralPath $webView2RuntimeInstallerFullPath)) {
+        throw "Configured WebView2 runtime installer was not found: $webView2RuntimeInstallerFullPath"
+    }
+}
 
 if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
     Remove-Item -LiteralPath $outputRoot -Recurse -Force
@@ -145,11 +154,23 @@ if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
 
 Ensure-Directory -Path $buildRoot
 
-cmake -S $serviceSourceRoot -B $buildRoot `
-    -DANTIVIRUS_DEV_OUTPUT_ROOT="$outputRoot" `
-    -DANTIVIRUS_INSTALL_OUTPUT_ROOT="$installerOutputRoot" | Out-Host
+$cmakeConfigureArgs = @(
+    '-S', $serviceSourceRoot,
+    '-B', $buildRoot,
+    "-DANTIVIRUS_DEV_OUTPUT_ROOT=$outputRoot",
+    "-DANTIVIRUS_INSTALL_OUTPUT_ROOT=$installerOutputRoot",
+    "-DANTIVIRUS_WEBVIEW2_BOOTSTRAPPER:FILEPATH=$webView2RuntimeInstallerFullPath"
+)
+
+cmake @cmakeConfigureArgs | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed with exit code $LASTEXITCODE"
+}
 
 cmake --build $buildRoot --target antivirus-agent-service antivirus-endpoint-client antivirus-pam-client antivirus-amsi-provider antivirus-scannercli antivirus-amsitestcli antivirus-etwtestcli antivirus-wfptestcli | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed with exit code $LASTEXITCODE"
+}
 
 Ensure-Directory -Path $outputRoot
 Ensure-Directory -Path (Join-Path $outputRoot 'tools')

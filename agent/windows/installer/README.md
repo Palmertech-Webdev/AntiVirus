@@ -11,6 +11,10 @@ What is included:
 
 The staged installer and raw release layout also carry the MinGW thread runtime (`libwinpthread-1.dll`) when the build toolchain requires it, so clean Windows machines do not need a preinstalled GCC runtime to launch the setup EXE or the installed endpoint binaries.
 
+`FenrirSetup.exe` also deploys `WebView2Loader.dll` and now checks whether Microsoft Edge WebView2 Runtime is available on the target host. If the runtime is missing, setup still completes but logs and completion text explicitly warn that the endpoint client will run in native fallback mode until WebView2 Runtime is installed.
+
+If you provide `-WebView2RuntimeInstallerPath` to `BuildInstallerBundle.ps1` or `BuildReleaseLayout.ps1`, that run embeds the specified installer as a setup payload dependency and attempts a silent WebView2 runtime install on hosts where runtime detection fails. If you omit the parameter, no WebView2 runtime installer payload is embedded.
+
 Canonical output layout:
 
 - `agent/windows/out/dev` for the unpacked development and release-stage payload tree
@@ -31,16 +35,22 @@ If setup fails while registering the Windows service with `OpenSCManagerW failed
 Example:
 
 ```powershell
+# Download official x64 Evergreen Standalone Runtime installer (offline-capable)
+New-Item -ItemType Directory -Path ..\out\install\deps -Force | Out-Null
+Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/p/?LinkId=2124701 -OutFile ..\out\install\deps\MicrosoftEdgeWebView2RuntimeInstallerX64.exe
+
 pwsh -ExecutionPolicy Bypass -File .\BuildReleaseLayout.ps1 `
   -BuildRoot ..\out\dev\build `
   -OutputRoot ..\out\dev `
   -InstallerOutputRoot ..\out\install `
+  -WebView2RuntimeInstallerPath C:\Dependencies\MicrosoftEdgeWebView2Setup.exe `
   -DriverArtifactRoot C:\DriverDrop
 
 pwsh -ExecutionPolicy Bypass -File .\BuildInstallerBundle.ps1 `
   -BuildRoot ..\out\dev\build `
   -DevOutputRoot ..\out\dev `
-  -OutputRoot ..\out\install
+  -OutputRoot ..\out\install `
+  -WebView2RuntimeInstallerPath C:\Dependencies\MicrosoftEdgeWebView2Setup.exe
 
 pwsh -ExecutionPolicy Bypass -File .\GenerateUpdateManifest.ps1 `
   -ReleaseRoot ..\out\dev `
