@@ -10,6 +10,7 @@
 #include "AgentService.h"
 #include "AgentConfig.h"
 #include "HardeningManager.h"
+#include "RuntimeTrustValidator.h"
 #include "SelfTestRunner.h"
 #include "StringUtils.h"
 #include "UpdaterService.h"
@@ -286,6 +287,17 @@ bool InstallOrRepairService(const bool repair, const std::wstring& uninstallToke
              << (wscSnapshot.available ? wscSnapshot.providerHealth : wscSnapshot.errorMessage) << std::endl;
 
   const auto hardeningStatus = hardeningManager.QueryStatus(kServiceName);
+  const auto runtimeTrust = antivirus::agent::ValidateRuntimeTrust(
+      config, config.installRootPath.empty() ? GetInstallRoot() : config.installRootPath);
+  if (!runtimeTrust.trusted) {
+    std::wcerr << L"Runtime trust validation failed: "
+               << (runtimeTrust.message.empty() ? L"Unknown runtime trust validation failure." : runtimeTrust.message)
+               << std::endl;
+    CloseServiceHandle(service);
+    CloseServiceHandle(scManager);
+    return false;
+  }
+
   CloseServiceHandle(service);
   CloseServiceHandle(scManager);
   std::wcout << (repair ? L"Repaired " : L"Installed ") << kServiceDisplayName
@@ -504,7 +516,7 @@ void PrintUsage() {
   std::wcout << L"Usage: fenrir-agent-service.exe [--console|--install [--elam-driver <path>]|--repair [--elam-driver <path>]|--upgrade <manifest>|--rollback-update <transaction>|--uninstall [--token <token>]|--wsc-status|--self-test|--register-amsi-provider|--unregister-amsi-provider|--help]" << std::endl;
   std::wcout << L"  --console   Run the agent loop interactively instead of under the SCM." << std::endl;
   std::wcout << L"  --install   Register the agent as an auto-start Windows service and apply hardening." << std::endl;
-  std::wcout << L"  --repair    Reapply service hardening, AMSI registration, and protected runtime settings." << std::endl;
+  std::wcout << L"  --repair    Reapply service hardening, AMSI registration, protected runtime settings, and runtime trust markers." << std::endl;
   std::wcout << L"  --upgrade   Stop the service, apply a verified update manifest, and restart the service." << std::endl;
   std::wcout << L"  --rollback-update  Roll back a recorded update transaction from the local update journal." << std::endl;
   std::wcout << L"  --uninstall Remove the Windows service registration. Use --token when uninstall protection is enabled." << std::endl;

@@ -18,6 +18,7 @@
 #include "HardeningManager.h"
 #include "RealtimeProtectionBroker.h"
 #include "RuntimeDatabase.h"
+#include "RuntimeTrustValidator.h"
 #include "ScanEngine.h"
 #include "StringUtils.h"
 #include "WscCoexistenceManager.h"
@@ -36,6 +37,14 @@ constexpr char kExecutionBlockingSample[] =
   "# Fenrir self-test execution marker\n"
   "$marker = 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE'\n"
   "Write-Output $marker\n";
+constexpr char kCleanwareDiskSample[] =
+  "Fenrir cleanware validation sample\n"
+  "This file models benign business content and should not trigger malware blocking.\n"
+  "Quarterly planning notes: agenda, staffing, and finance follow-up items.\n";
+constexpr char kCleanwareExecutionSample[] =
+  "# Fenrir cleanware self-test marker\n"
+  "$status = 'fenrir-cleanware-selftest'\n"
+  "Write-Output $status\n";
 
 std::wstring JsonEscape(const std::wstring& value) { return Utf8ToWide(EscapeJsonString(value)); }
 
@@ -232,6 +241,47 @@ bool WriteSelfTestSample(const std::filesystem::path& path, const char* content)
   return output.good();
 }
 
+bool ProbeDirectoryWriteAccess(const std::filesystem::path& directoryPath, const std::wstring& label,
+                               std::wstring* failureDetails) {
+  if (directoryPath.empty()) {
+    if (failureDetails != nullptr) {
+      *failureDetails = label + L" path is empty.";
+    }
+    return false;
+  }
+
+  std::error_code error;
+  std::filesystem::create_directories(directoryPath, error);
+  if (error) {
+    if (failureDetails != nullptr) {
+      *failureDetails = label + L" path could not be created at " + directoryPath.wstring() + L".";
+    }
+    return false;
+  }
+
+  const auto probePath = directoryPath / (L"fenrir-selftest-writecheck-" + GenerateGuidString() + L".tmp");
+  std::ofstream probeFile(probePath, std::ios::binary | std::ios::trunc);
+  if (!probeFile.is_open()) {
+    if (failureDetails != nullptr) {
+      *failureDetails = label + L" path denied write access at " + directoryPath.wstring() + L".";
+    }
+    return false;
+  }
+
+  probeFile << "fenrir-self-test";
+  probeFile.close();
+
+  std::filesystem::remove(probePath, error);
+  if (error) {
+    if (failureDetails != nullptr) {
+      *failureDetails = label + L" path wrote the probe file but cleanup failed at " + probePath.wstring() + L".";
+    }
+    return false;
+  }
+
+  return true;
+}
+
 template <std::size_t Capacity>
 void CopyWideField(wchar_t (&target)[Capacity], const std::wstring& value) {
   static_assert(Capacity > 0);
@@ -251,6 +301,11 @@ std::wstring FirstReasonCode(const ScanFinding& finding) {
     return L"none";
   }
   return finding.verdict.reasons.front().code;
+}
+
+bool FindingHasReasonCode(const ScanFinding& finding, const std::wstring& code) {
+  return std::any_of(finding.verdict.reasons.begin(), finding.verdict.reasons.end(),
+                     [&code](const auto& reason) { return reason.code == code; });
 }
 
 std::wstring StatusToString(const SelfTestStatus status) {
@@ -328,6 +383,56 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                       ? L"Runtime boundaries are not trusted."
                       : runtimeValidation.message),
            L"Re-run install or repair so runtime database, state, telemetry, update, quarantine, evidence, and journal paths stay within one trusted runtime root.");
+
+  const auto runtimeTrust = ValidateRuntimeTrust(config, installRoot);
+  AddCheck(report, L"runtime_trust_validator", L"Runtime trust validator",
+           runtimeTrust.trusted ? (runtimeTrust.signatureWarning ? SelfTestStatus::Warning : SelfTestStatus::Pass)
+                               : SelfTestStatus::Fail,
+           runtimeTrust.message.empty()
+               ? L"Runtime trust validation completed without details."
+               : runtimeTrust.message,
+           runtimeTrust.trusted
+               ? (runtimeTrust.signatureWarning
+                      ? L"Sign release binaries or set ANTIVIRUS_REQUIRE_SIGNED_RUNTIME=true to enforce signature posture."
+                      : L"")
+               : L"Run --repair from an elevated context to refresh runtime trust markers and critical service binaries.");
+
+  std::vector<std::wstring> runtimePathWriteFailures;
+  const auto appendWriteFailure = [&runtimePathWriteFailures](const std::filesystem::path& path,
+                                                              const std::wstring& label) {
+    std::wstring failure;
+    if (!ProbeDirectoryWriteAccess(path, label, &failure)) {
+      runtimePathWriteFailures.push_back(failure);
+    }
+  };
+
+  const auto runtimeRootPath = runtimeValidation.runtimeRootPath.empty()
+                                   ? config.runtimeDatabasePath.parent_path()
+                                   : runtimeValidation.runtimeRootPath;
+  appendWriteFailure(runtimeRootPath, L"Runtime root");
+  appendWriteFailure(config.runtimeDatabasePath.parent_path(), L"Runtime database root");
+  appendWriteFailure(config.stateFilePath.parent_path(), L"State root");
+  appendWriteFailure(config.telemetryQueuePath.parent_path(), L"Telemetry queue root");
+  appendWriteFailure(config.updateRootPath, L"Update root");
+  appendWriteFailure(config.journalRootPath, L"Journal root");
+  appendWriteFailure(config.quarantineRootPath, L"Quarantine root");
+  appendWriteFailure(config.evidenceRootPath, L"Evidence root");
+
+  if (runtimePathWriteFailures.empty()) {
+    AddCheck(report, L"runtime_path_write_access", L"Runtime path write access", SelfTestStatus::Pass,
+             L"Runtime, state, telemetry, update, journal, quarantine, and evidence paths are writable.");
+  } else {
+    std::wstring details;
+    for (const auto& failure : runtimePathWriteFailures) {
+      if (!details.empty()) {
+        details += L" | ";
+      }
+      details += failure;
+    }
+
+    AddCheck(report, L"runtime_path_write_access", L"Runtime path write access", SelfTestStatus::Fail, details,
+             L"Re-run install or repair from an elevated context so runtime directories are writable by the service account.");
+  }
 
   const auto phaseValidationRoot = BuildSelfTestValidationRoot(config);
   std::error_code phaseValidationRootError;
@@ -451,6 +556,165 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
         AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Fail,
                  L"Realtime execute validation failed: " + Utf8ToWide(error.what()),
                  L"Validate local runtime database/evidence paths and rerun self-test in the endpoint service context.");
+      }
+    }
+
+    const auto cleanwareSamplePath = phaseValidationRoot / L"phase1-cleanware-business-note.txt";
+    if (!WriteSelfTestSample(cleanwareSamplePath, kCleanwareDiskSample)) {
+      AddCheck(report, L"phase1_false_positive_cleanware_scan", L"Phase 1 cleanware scan allowance",
+               SelfTestStatus::Fail,
+               L"Self-test could not write the staged cleanware scan sample at " + cleanwareSamplePath.wstring() + L".",
+               L"Verify local runtime/temp ACLs and rerun self-test from the target endpoint context.");
+    } else {
+      auto cleanwarePolicy = CreateDefaultPolicySnapshot();
+      cleanwarePolicy.cloudLookupEnabled = false;
+      cleanwarePolicy.quarantineOnMalicious = false;
+
+      const auto cleanwareFinding = ScanFile(cleanwareSamplePath, cleanwarePolicy);
+      if (!cleanwareFinding.has_value()) {
+        AddCheck(report, L"phase1_false_positive_cleanware_scan", L"Phase 1 cleanware scan allowance",
+                 SelfTestStatus::Pass,
+                 L"ScanFile produced no finding for staged cleanware content in " + cleanwareSamplePath.wstring() + L".");
+      } else {
+        AddCheck(report, L"phase1_false_positive_cleanware_scan", L"Phase 1 cleanware scan allowance",
+                 SelfTestStatus::Fail,
+                 L"ScanFile returned disposition " + VerdictDispositionToString(cleanwareFinding->verdict.disposition) +
+                     L" for staged cleanware content (reason " + FirstReasonCode(*cleanwareFinding) + L").",
+                 L"Tune heuristic signatures/scores so clean business content is not surfaced as a malware finding.");
+      }
+    }
+
+    const auto cleanwareExecutionPath = phaseValidationRoot / L"phase1-cleanware-execution.ps1";
+    if (!WriteSelfTestSample(cleanwareExecutionPath, kCleanwareExecutionSample)) {
+      AddCheck(report, L"phase1_false_positive_cleanware_execution", L"Phase 1 cleanware execution allowance",
+               SelfTestStatus::Fail,
+               L"Self-test could not write the staged cleanware execution sample at " +
+                   cleanwareExecutionPath.wstring() + L".",
+               L"Verify local runtime/temp ACLs and rerun self-test from the target endpoint context.");
+    } else {
+      try {
+        auto realtimeConfig = config;
+        realtimeConfig.runtimeDatabasePath = phaseValidationRoot / L"phase1-cleanware-runtime.db";
+        realtimeConfig.quarantineRootPath = phaseValidationRoot / L"phase1-cleanware-quarantine";
+        realtimeConfig.evidenceRootPath = phaseValidationRoot / L"phase1-cleanware-evidence";
+        realtimeConfig.scanExcludedPaths.clear();
+
+        std::error_code runtimePathError;
+        std::filesystem::create_directories(realtimeConfig.runtimeDatabasePath.parent_path(), runtimePathError);
+        std::filesystem::create_directories(realtimeConfig.quarantineRootPath, runtimePathError);
+        std::filesystem::create_directories(realtimeConfig.evidenceRootPath, runtimePathError);
+        if (runtimePathError) {
+          AddCheck(report, L"phase1_false_positive_cleanware_execution", L"Phase 1 cleanware execution allowance",
+                   SelfTestStatus::Fail,
+                   L"Self-test could not prepare isolated realtime cleanware paths under " +
+                       phaseValidationRoot.wstring() + L".",
+                   L"Ensure runtime, quarantine, and evidence roots are writable before validating cleanware execution allowance.");
+        } else {
+          auto realtimePolicy = CreateDefaultPolicySnapshot();
+          realtimePolicy.cloudLookupEnabled = false;
+          realtimePolicy.quarantineOnMalicious = false;
+
+          RealtimeProtectionBroker broker(realtimeConfig);
+          broker.SetPolicy(realtimePolicy);
+          broker.SetDeviceId(L"self-test-device");
+
+          RealtimeFileScanRequest request{};
+          request.protocolVersion = ANTIVIRUS_REALTIME_PROTOCOL_VERSION;
+          request.requestSize = sizeof(request);
+          request.requestId = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                               std::chrono::system_clock::now().time_since_epoch())
+                                                               .count());
+          request.operation = ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE;
+          request.processId = GetCurrentProcessId();
+          request.threadId = GetCurrentThreadId();
+
+          std::error_code absolutePathError;
+          auto resolvedExecutionSamplePath = std::filesystem::absolute(cleanwareExecutionPath, absolutePathError);
+          if (absolutePathError) {
+            resolvedExecutionSamplePath = cleanwareExecutionPath;
+          }
+
+          std::error_code sampleSizeError;
+          request.fileSizeBytes = std::filesystem::file_size(resolvedExecutionSamplePath, sampleSizeError);
+          if (sampleSizeError) {
+            request.fileSizeBytes = 0;
+          }
+
+          const auto processImage = PathExists(servicePath) ? servicePath.wstring() : L"fenrir-agent-service.exe";
+          CopyWideField(request.correlationId, L"self-test-phase1-cleanware-execution");
+          CopyWideField(request.path, resolvedExecutionSamplePath.wstring());
+          CopyWideField(request.processImage, processImage);
+          CopyWideField(request.parentImage, processImage);
+          CopyWideField(request.commandLine, L"fenrir-agent-service.exe --self-test");
+          CopyWideField(request.userSid, L"S-1-5-18");
+
+          const auto outcome = broker.InspectFile(request);
+          if (outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_ALLOW &&
+              outcome.finding.verdict.disposition == VerdictDisposition::Allow && !outcome.detection) {
+            AddCheck(report, L"phase1_false_positive_cleanware_execution", L"Phase 1 cleanware execution allowance",
+                     SelfTestStatus::Pass,
+                     L"Realtime execute inspection allowed staged cleanware content with disposition allow.");
+          } else {
+            AddCheck(report, L"phase1_false_positive_cleanware_execution", L"Phase 1 cleanware execution allowance",
+                     SelfTestStatus::Fail,
+                     L"Realtime execute inspection returned action " +
+                         std::wstring(outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK ? L"block" : L"allow") +
+                         L" with disposition " + VerdictDispositionToString(outcome.finding.verdict.disposition) +
+                         L" for staged cleanware content (reason " + FirstReasonCode(outcome.finding) + L").",
+                     L"Tune realtime correlation and scan thresholds so benign script execution is not blocked.");
+          }
+        }
+      } catch (const std::exception& error) {
+        AddCheck(report, L"phase1_false_positive_cleanware_execution", L"Phase 1 cleanware execution allowance",
+                 SelfTestStatus::Fail,
+                 L"Realtime cleanware validation failed: " + Utf8ToWide(error.what()),
+                 L"Validate local runtime database/evidence paths and rerun self-test in the endpoint service context.");
+      }
+    }
+
+    const auto suppressionRoot = phaseValidationRoot / L"phase1-suppression-root";
+    const auto suppressionSamplePath = suppressionRoot / L"phase1-suppressed-eicar.txt";
+    if (!WriteSelfTestSample(suppressionSamplePath, kDiskBlockingSample)) {
+      AddCheck(report, L"phase1_suppression_workflow", L"Phase 1 suppression workflow", SelfTestStatus::Fail,
+               L"Self-test could not write the staged suppression sample at " + suppressionSamplePath.wstring() + L".",
+               L"Verify local runtime/temp ACLs and rerun self-test from the target endpoint context.");
+    } else {
+      auto suppressionPolicy = CreateDefaultPolicySnapshot();
+      suppressionPolicy.cloudLookupEnabled = false;
+      suppressionPolicy.quarantineOnMalicious = false;
+      suppressionPolicy.suppressionPathRoots.push_back(suppressionRoot.wstring());
+
+      const auto allowOverride = BuildAllowOverrideFinding(suppressionSamplePath, suppressionPolicy);
+      const auto scanFinding = ScanFile(suppressionSamplePath, suppressionPolicy);
+      const auto overrideMatched = allowOverride.has_value() &&
+                                   allowOverride->verdict.disposition == VerdictDisposition::Allow &&
+                                   FindingHasReasonCode(*allowOverride, L"POLICY_SUPPRESSION_PATH_ROOT");
+      if (overrideMatched && !scanFinding.has_value()) {
+        AddCheck(report, L"phase1_suppression_workflow", L"Phase 1 suppression workflow", SelfTestStatus::Pass,
+                 L"Suppression path-root policy produced an allow override and bypassed malicious-file scoring for staged sample.");
+      } else {
+        std::wstring details = L"Suppression path-root validation did not complete expected allow/bypass behavior.";
+        if (allowOverride.has_value()) {
+          details += L" Override disposition: ";
+          details += VerdictDispositionToString(allowOverride->verdict.disposition);
+          details += L" (reason ";
+          details += FirstReasonCode(*allowOverride);
+          details += L").";
+        } else {
+          details += L" No allow-override finding was produced.";
+        }
+
+        if (scanFinding.has_value()) {
+          details += L" ScanFile still returned disposition ";
+          details += VerdictDispositionToString(scanFinding->verdict.disposition);
+          details += L" (reason ";
+          details += FirstReasonCode(*scanFinding);
+          details += L").";
+        }
+
+        AddCheck(report, L"phase1_suppression_workflow", L"Phase 1 suppression workflow", SelfTestStatus::Fail,
+                 details,
+                 L"Review suppression policy matching and allow-override handling so approved cleanware exceptions remain enforceable.");
       }
     }
 

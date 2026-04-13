@@ -20,6 +20,7 @@ import {
   PolicyNotFoundError,
   PolicyExclusionChangeRequestNotFoundError,
   PolicyExclusionChangeRequestStateError,
+  PolicyExclusionReviewerConflictError,
   PolicyExclusionWorkflowRequiredError,
   ScriptNotFoundError,
   type ControlPlaneStore
@@ -1419,6 +1420,13 @@ export function buildServer(options: BuildServerOptions = {}) {
       if (error instanceof PolicyExclusionChangeRequestStateError) {
         return reply.code(409).send({
           error: "policy_exclusion_request_state",
+          details: error.message
+        });
+      }
+
+      if (error instanceof PolicyExclusionReviewerConflictError) {
+        return reply.code(409).send({
+          error: "policy_exclusion_request_reviewer_conflict",
           details: error.message
         });
       }

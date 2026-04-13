@@ -14,6 +14,16 @@
 # EXTERNAL cache entries
 ########################
 
+//Fenrir development-stage output root.
+ANTIVIRUS_DEV_OUTPUT_ROOT:PATH=C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../out/dev
+
+//Fenrir installer output root.
+ANTIVIRUS_INSTALL_OUTPUT_ROOT:PATH=C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../out/install
+
+//Optional path to a Microsoft Edge WebView2 runtime installer
+// to embed in FenrirSetup.
+ANTIVIRUS_WEBVIEW2_BOOTSTRAPPER:FILEPATH=
+
 //Value Computed by CMake
 AntiVirusAgentService_BINARY_DIR:STATIC=C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet
 

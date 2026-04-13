@@ -242,6 +242,13 @@ export class PolicyExclusionChangeRequestStateError extends Error {
   }
 }
 
+export class PolicyExclusionReviewerConflictError extends Error {
+  constructor(requestId: string) {
+    super(`Policy exclusion request ${requestId} must be reviewed by a different admin principal.`);
+    this.name = "PolicyExclusionReviewerConflictError";
+  }
+}
+
 export class PolicyExclusionWorkflowRequiredError extends Error {
   constructor(
     message =
@@ -4311,6 +4318,24 @@ export function createFileBackedControlPlaneStore(
         }
 
         const timestamp = now();
+        if (exclusionRequest.requestedById && exclusionRequest.requestedById === principal.id) {
+          recordAdminAuditEvent(state, {
+            occurredAt: timestamp,
+            actorId: principal.id,
+            actorName: principal.displayName,
+            actorType: actor.actorType,
+            action: "policy.exclusion.review.denied",
+            resourceType: "policy_exclusion_request",
+            resourceId: exclusionRequest.id,
+            outcome: "failure",
+            severity: "high",
+            details: `Denied self-review attempt for policy exclusion request ${exclusionRequest.id}.`,
+            source: "control-plane",
+            sessionId: actor.sessionId
+          });
+          throw new PolicyExclusionReviewerConflictError(exclusionRequest.id);
+        }
+
         const normalizedReviewComment = request.reviewComment?.trim();
         let affectedPolicy: PolicyProfile | null = null;
 

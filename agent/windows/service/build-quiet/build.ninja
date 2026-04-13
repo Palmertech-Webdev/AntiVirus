@@ -250,6 +250,13 @@ build CMakeFiles/antivirus-agent-core.dir/src/RemediationEngine.cpp.obj: CXX_COM
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
 
+build CMakeFiles/antivirus-agent-core.dir/src/RuntimeTrustValidator.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/RuntimeTrustValidator.cpp || cmake_object_order_depends_target_antivirus-agent-core
+  DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\RuntimeTrustValidator.cpp.obj.d
+  FLAGS = -std=gnu++20
+  INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../shared/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/etw/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../sensor/wfp/include -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../../../third_party/sqlite/sqlite-amalgamation-3510300
+  OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
+  OBJECT_FILE_DIR = CMakeFiles\antivirus-agent-core.dir\src
+
 build CMakeFiles/antivirus-agent-core.dir/src/RuntimeDatabase.cpp.obj: CXX_COMPILER__antivirus-agent-core_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/RuntimeDatabase.cpp || cmake_object_order_depends_target_antivirus-agent-core
   DEP_FILE = CMakeFiles\antivirus-agent-core.dir\src\RuntimeDatabase.cpp.obj.d
   FLAGS = -std=gnu++20
@@ -321,7 +328,7 @@ build CMakeFiles/antivirus-agent-core.dir/src/WscCoexistenceManager.cpp.obj: CXX
 #############################################
 # Link the static library libantivirus-agent-core.a
 
-build libantivirus-agent-core.a: CXX_STATIC_LIBRARY_LINKER__antivirus-agent-core_ CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/sensor/etw/src/ProcessEtwSensor.cpp.obj CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/sensor/wfp/src/NetworkIsolationManager.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AmsiEvidenceRecorder.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AmsiScanEngine.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AgentConfig.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AgentService.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/CommandJournalStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ControlPlaneClient.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/CryptoUtils.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/DeviceInventoryCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/EndpointClient.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/EvidenceRecorder.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/FileDeltaTracker.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/FileInventory.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/FileSnapshotCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/HardeningManager.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/LocalScanRunner.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/LocalStateStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ProcessDeltaTracker.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ProcessInventory.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ProcessSnapshotCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ReputationLookup.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/QuarantineStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RealtimeProtectionBroker.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RemediationEngine.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RuntimeDatabase.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ScanEngine.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/SelfTestRunner.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/StringUtils.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ServiceInventory.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ServiceSnapshotCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/TelemetryQueueStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/UpdaterService.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/WscCoexistenceManager.cpp.obj || libantivirus-sqlite3.a
+build libantivirus-agent-core.a: CXX_STATIC_LIBRARY_LINKER__antivirus-agent-core_ CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/sensor/etw/src/ProcessEtwSensor.cpp.obj CMakeFiles/antivirus-agent-core.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/sensor/wfp/src/NetworkIsolationManager.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AmsiEvidenceRecorder.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AmsiScanEngine.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AgentConfig.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/AgentService.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/CommandJournalStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ControlPlaneClient.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/CryptoUtils.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/DeviceInventoryCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/EndpointClient.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/EvidenceRecorder.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/FileDeltaTracker.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/FileInventory.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/FileSnapshotCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/HardeningManager.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/LocalScanRunner.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/LocalStateStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ProcessDeltaTracker.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ProcessInventory.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ProcessSnapshotCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ReputationLookup.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/QuarantineStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RealtimeProtectionBroker.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RemediationEngine.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RuntimeTrustValidator.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/RuntimeDatabase.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ScanEngine.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/SelfTestRunner.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/StringUtils.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ServiceInventory.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/ServiceSnapshotCollector.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/TelemetryQueueStore.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/UpdaterService.cpp.obj CMakeFiles/antivirus-agent-core.dir/src/WscCoexistenceManager.cpp.obj || libantivirus-sqlite3.a
   OBJECT_DIR = CMakeFiles\antivirus-agent-core.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
@@ -382,16 +389,16 @@ build CMakeFiles/antivirus-amsi-provider.dir/C_/Users/matt_admin/Documents/GitHu
 
 
 #############################################
-# Link the shared library fenrir-amsi-provider.dll
+# Link the shared library C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-amsi-provider.dll
 
-build fenrir-amsi-provider.dll libfenrir-amsi-provider.dll.a: CXX_SHARED_LIBRARY_LINKER__antivirus-amsi-provider_ CMakeFiles/antivirus-amsi-provider.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/provider/amsi/src/AntiVirusAmsiProviderDll.cpp.obj | libantivirus-amsi-provider-core.a libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-amsi-provider-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-amsi-provider.dll libfenrir-amsi-provider.dll.a: CXX_SHARED_LIBRARY_LINKER__antivirus-amsi-provider_ CMakeFiles/antivirus-amsi-provider.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/provider/amsi/src/AntiVirusAmsiProviderDll.cpp.obj | libantivirus-amsi-provider-core.a libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-amsi-provider-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-amsi-provider-core.a  libantivirus-agent-core.a  -lole32  -ladvapi32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lole32  -ladvapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-amsi-provider-core.a  libantivirus-agent-core.a  -lole32  -ladvapi32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lole32  -ladvapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-amsi-provider.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
   RESTAT = 1
-  TARGET_FILE = fenrir-amsi-provider.dll
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-amsi-provider.dll
   TARGET_IMPLIB = libfenrir-amsi-provider.dll.a
   TARGET_PDB = fenrir-amsi-provider.dll.dbg
 
@@ -417,15 +424,15 @@ build CMakeFiles/antivirus-agent-service.dir/src/ServiceMain.cpp.obj: CXX_COMPIL
 
 
 #############################################
-# Link the executable fenrir-agent-service.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-agent-service.exe
 
-build fenrir-agent-service.exe: CXX_EXECUTABLE_LINKER__antivirus-agent-service_ CMakeFiles/antivirus-agent-service.dir/src/ServiceMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe: CXX_EXECUTABLE_LINKER__antivirus-agent-service_ CMakeFiles/antivirus-agent-service.dir/src/ServiceMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -municode -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-agent-core.a  -ladvapi32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-agent-core.a  -ladvapi32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-agent-service.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_FILE = fenrir-agent-service.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-agent-service.exe
   TARGET_IMPLIB = libfenrir-agent-service.dll.a
   TARGET_PDB = fenrir-agent-service.exe.dbg
 
@@ -459,17 +466,59 @@ build CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/Git
 
 
 #############################################
-# Link the executable fenrir-endpoint-client.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-endpoint-client.exe
 
-build fenrir-endpoint-client.exe: CXX_EXECUTABLE_LINKER__antivirus-endpoint-client_ CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/endpointui.rc.obj CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/EndpointClientMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe: CXX_EXECUTABLE_LINKER__antivirus-endpoint-client_ CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/endpointui.rc.obj CMakeFiles/antivirus-endpoint-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/endpointui/src/EndpointClientMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -mwindows  -municode -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-agent-core.a  -lcomctl32  -lole32  -luxtheme  -ldwmapi  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lole32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-agent-core.a  -lcomctl32  -lole32  -luxtheme  -ldwmapi  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lole32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-endpoint-client.dir
-  POST_BUILD = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\service\build-quiet && C:\Strawberry\c\bin\cmake.exe -E copy_if_different C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../third_party/webview2/runtime/x64/WebView2Loader.dll C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/WebView2Loader.dll"
+  POST_BUILD = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\service\build-quiet && C:\Strawberry\c\bin\cmake.exe -E copy_if_different C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../third_party/webview2/runtime/x64/WebView2Loader.dll C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/WebView2Loader.dll"
   PRE_LINK = cd .
-  TARGET_FILE = fenrir-endpoint-client.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-endpoint-client.exe
   TARGET_IMPLIB = libfenrir-endpoint-client.dll.a
   TARGET_PDB = fenrir-endpoint-client.exe.dbg
+
+# =============================================================================
+# Object build statements for EXECUTABLE target antivirus-pam-client
+
+
+#############################################
+# Order-only phony target for antivirus-pam-client
+
+build cmake_object_order_depends_target_antivirus-pam-client: phony || .
+
+build CMakeFiles/antivirus-pam-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/pamui/src/pamui.rc.obj: RC_COMPILER__antivirus-pam-client_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/pamui/src/pamui.rc || cmake_object_order_depends_target_antivirus-pam-client
+  DEFINES = -DUNICODE -D_UNICODE
+  DEP_FILE = CMakeFiles\antivirus-pam-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\pamui\src\pamui.rc.obj.d
+  INCLUDES = -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include
+  OBJECT_DIR = CMakeFiles\antivirus-pam-client.dir
+  OBJECT_FILE_DIR = CMakeFiles\antivirus-pam-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\pamui\src
+
+build CMakeFiles/antivirus-pam-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/pamui/src/PamClientMain.cpp.obj: CXX_COMPILER__antivirus-pam-client_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/pamui/src/PamClientMain.cpp || cmake_object_order_depends_target_antivirus-pam-client
+  DEFINES = -DUNICODE -D_UNICODE
+  DEP_FILE = CMakeFiles\antivirus-pam-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\pamui\src\PamClientMain.cpp.obj.d
+  FLAGS = -std=gnu++20
+  INCLUDES = -IC:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/include
+  OBJECT_DIR = CMakeFiles\antivirus-pam-client.dir
+  OBJECT_FILE_DIR = CMakeFiles\antivirus-pam-client.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\tools\pamui\src
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target antivirus-pam-client
+
+
+#############################################
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-pam.exe
+
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe: CXX_EXECUTABLE_LINKER__antivirus-pam-client_ CMakeFiles/antivirus-pam-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/pamui/src/pamui.rc.obj CMakeFiles/antivirus-pam-client.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/pamui/src/PamClientMain.cpp.obj
+  LINK_FLAGS = -mwindows  -municode -static-libgcc -static-libstdc++
+  LINK_LIBRARIES = -lcomdlg32  -lcomctl32  -lshell32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  OBJECT_DIR = CMakeFiles\antivirus-pam-client.dir
+  POST_BUILD = cd .
+  PRE_LINK = cd .
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\fenrir-pam.exe
+  TARGET_IMPLIB = libfenrir-pam.dll.a
+  TARGET_PDB = fenrir-pam.exe.dbg
 
 # =============================================================================
 # Object build statements for EXECUTABLE target antivirus-scannercli
@@ -493,15 +542,15 @@ build CMakeFiles/antivirus-scannercli.dir/C_/Users/matt_admin/Documents/GitHub/A
 
 
 #############################################
-# Link the executable fenrir-scannercli.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-scannercli.exe
 
-build fenrir-scannercli.exe: CXX_EXECUTABLE_LINKER__antivirus-scannercli_ CMakeFiles/antivirus-scannercli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/src/ScannerCliMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe: CXX_EXECUTABLE_LINKER__antivirus-scannercli_ CMakeFiles/antivirus-scannercli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/src/ScannerCliMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -municode -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-agent-core.a  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-agent-core.a  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-scannercli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_FILE = fenrir-scannercli.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-scannercli.exe
   TARGET_IMPLIB = libfenrir-scannercli.dll.a
   TARGET_PDB = fenrir-scannercli.exe.dbg
 
@@ -527,15 +576,15 @@ build CMakeFiles/antivirus-amsitestcli.dir/C_/Users/matt_admin/Documents/GitHub/
 
 
 #############################################
-# Link the executable fenrir-amsitestcli.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-amsitestcli.exe
 
-build fenrir-amsitestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-amsitestcli_ CMakeFiles/antivirus-amsitestcli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/amsitestcli/src/AmsiTestCliMain.cpp.obj | libantivirus-amsi-provider-core.a libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-amsi-provider-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-amsitestcli_ CMakeFiles/antivirus-amsitestcli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/amsitestcli/src/AmsiTestCliMain.cpp.obj | libantivirus-amsi-provider-core.a libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-amsi-provider-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -municode -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-amsi-provider-core.a  libantivirus-agent-core.a  -lole32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lole32  -ladvapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-amsi-provider-core.a  libantivirus-agent-core.a  -lole32  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -loleaut32  -lbcrypt  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lole32  -ladvapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-amsitestcli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_FILE = fenrir-amsitestcli.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-amsitestcli.exe
   TARGET_IMPLIB = libfenrir-amsitestcli.dll.a
   TARGET_PDB = fenrir-amsitestcli.exe.dbg
 
@@ -561,15 +610,15 @@ build CMakeFiles/antivirus-etwtestcli.dir/C_/Users/matt_admin/Documents/GitHub/A
 
 
 #############################################
-# Link the executable fenrir-etwtestcli.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-etwtestcli.exe
 
-build fenrir-etwtestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-etwtestcli_ CMakeFiles/antivirus-etwtestcli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/etwtestcli/src/EtwTestCliMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-etwtestcli_ CMakeFiles/antivirus-etwtestcli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/etwtestcli/src/EtwTestCliMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -municode -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-agent-core.a  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-agent-core.a  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-etwtestcli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_FILE = fenrir-etwtestcli.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-etwtestcli.exe
   TARGET_IMPLIB = libfenrir-etwtestcli.dll.a
   TARGET_PDB = fenrir-etwtestcli.exe.dbg
 
@@ -595,15 +644,15 @@ build CMakeFiles/antivirus-wfptestcli.dir/C_/Users/matt_admin/Documents/GitHub/A
 
 
 #############################################
-# Link the executable fenrir-wfptestcli.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-wfptestcli.exe
 
-build fenrir-wfptestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-wfptestcli_ CMakeFiles/antivirus-wfptestcli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/wfptestcli/src/WfpTestCliMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-wfptestcli_ CMakeFiles/antivirus-wfptestcli.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/wfptestcli/src/WfpTestCliMain.cpp.obj | libantivirus-agent-core.a libantivirus-sqlite3.a || libantivirus-agent-core.a libantivirus-sqlite3.a
   LINK_FLAGS = -municode -static-libgcc -static-libstdc++
-  LINK_LIBRARIES = libantivirus-agent-core.a  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = libantivirus-agent-core.a  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  libantivirus-sqlite3.a  -lwinhttp  -lole32  -loleaut32  -lbcrypt  -ladvapi32  -ltdh  -lcrypt32  -lwintrust  -lfwpuclnt  -liphlpapi  -lshell32  -lws2_32  -lwtsapi32  -luserenv  -lwinpthread  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-wfptestcli.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_FILE = fenrir-wfptestcli.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\dev\tools\fenrir-wfptestcli.exe
   TARGET_IMPLIB = libfenrir-wfptestcli.dll.a
   TARGET_PDB = fenrir-wfptestcli.exe.dbg
 
@@ -614,7 +663,7 @@ build fenrir-wfptestcli.exe: CXX_EXECUTABLE_LINKER__antivirus-wfptestcli_ CMakeF
 #############################################
 # Order-only phony target for antivirus-setup
 
-build cmake_object_order_depends_target_antivirus-setup: phony || cmake_object_order_depends_target_antivirus-amsi-provider fenrir-agent-service.exe fenrir-amsitestcli.exe fenrir-endpoint-client.exe fenrir-etwtestcli.exe fenrir-scannercli.exe fenrir-wfptestcli.exe
+build cmake_object_order_depends_target_antivirus-setup: phony || C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe cmake_object_order_depends_target_antivirus-amsi-provider
 
 build CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/setup.rc.obj: RC_COMPILER__antivirus-setup_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/setup.rc || cmake_object_order_depends_target_antivirus-setup
   DEFINES = -DUNICODE -D_UNICODE
@@ -631,7 +680,7 @@ build CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVi
   OBJECT_DIR = CMakeFiles\antivirus-setup.dir
   OBJECT_FILE_DIR = CMakeFiles\antivirus-setup.dir\C_\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\installer\native\src
 
-build CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj: RC_COMPILER__antivirus-setup_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/installer-generated/SetupPayload.rc || cmake_object_order_depends_target_antivirus-setup
+build CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj: RC_COMPILER__antivirus-setup_unscanned_ C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/installer-generated/SetupPayload.rc | C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/WebView2Loader.dll C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-amsi-provider.dll C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/signatures/default-signatures.tsv C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/driver/minifilter/AntivirusMinifilter.inf C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/driver/minifilter/README.md C$:/Strawberry/c/bin/libwinpthread-1.dll || cmake_object_order_depends_target_antivirus-setup
   DEFINES = -DUNICODE -D_UNICODE
   DEP_FILE = CMakeFiles\antivirus-setup.dir\installer-generated\SetupPayload.rc.obj.d
   INCLUDES = -I C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/../installer/native/include
@@ -644,15 +693,15 @@ build CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj: RC
 
 
 #############################################
-# Link the executable FenrirSetup.exe
+# Link the executable C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\install\FenrirSetup.exe
 
-build FenrirSetup.exe: CXX_EXECUTABLE_LINKER__antivirus-setup_ CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/setup.rc.obj CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/SetupMain.cpp.obj CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj || fenrir-agent-service.exe fenrir-amsi-provider.dll fenrir-amsitestcli.exe fenrir-endpoint-client.exe fenrir-etwtestcli.exe fenrir-scannercli.exe fenrir-wfptestcli.exe
+build C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/install/FenrirSetup.exe: CXX_EXECUTABLE_LINKER__antivirus-setup_ CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/setup.rc.obj CMakeFiles/antivirus-setup.dir/C_/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/native/src/SetupMain.cpp.obj CMakeFiles/antivirus-setup.dir/installer-generated/SetupPayload.rc.obj || C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-amsi-provider.dll C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe
   LINK_FLAGS = -mwindows  -municode -static -static-libgcc -static-libstdc++
   LINK_LIBRARIES = -lcomctl32  -lole32  -lshell32  -ladvapi32  -Wl,-Bstatic  -lstdc++  -Wl,-Bdynamic  -Wl,-Bstatic  -lwinpthread  -Wl,-Bdynamic  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\antivirus-setup.dir
   POST_BUILD = cd .
   PRE_LINK = cd .
-  TARGET_FILE = FenrirSetup.exe
+  TARGET_FILE = C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\out\install\FenrirSetup.exe
   TARGET_IMPLIB = libFenrirSetup.dll.a
   TARGET_PDB = FenrirSetup.exe.dbg
 
@@ -682,27 +731,47 @@ build rebuild_cache: phony CMakeFiles/rebuild_cache.util
 # =============================================================================
 # Target aliases.
 
+build FenrirSetup.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/install/FenrirSetup.exe
+
 build antivirus-agent-core: phony libantivirus-agent-core.a
 
-build antivirus-agent-service: phony fenrir-agent-service.exe
+build antivirus-agent-service: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe
 
-build antivirus-amsi-provider: phony fenrir-amsi-provider.dll
+build antivirus-amsi-provider: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-amsi-provider.dll
 
 build antivirus-amsi-provider-core: phony libantivirus-amsi-provider-core.a
 
-build antivirus-amsitestcli: phony fenrir-amsitestcli.exe
+build antivirus-amsitestcli: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe
 
-build antivirus-endpoint-client: phony fenrir-endpoint-client.exe
+build antivirus-endpoint-client: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe
 
-build antivirus-etwtestcli: phony fenrir-etwtestcli.exe
+build antivirus-etwtestcli: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe
 
-build antivirus-scannercli: phony fenrir-scannercli.exe
+build antivirus-pam-client: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe
 
-build antivirus-setup: phony FenrirSetup.exe
+build antivirus-scannercli: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe
+
+build antivirus-setup: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/install/FenrirSetup.exe
 
 build antivirus-sqlite3: phony libantivirus-sqlite3.a
 
-build antivirus-wfptestcli: phony fenrir-wfptestcli.exe
+build antivirus-wfptestcli: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe
+
+build fenrir-agent-service.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe
+
+build fenrir-amsi-provider.dll: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-amsi-provider.dll
+
+build fenrir-amsitestcli.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe
+
+build fenrir-endpoint-client.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe
+
+build fenrir-etwtestcli.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe
+
+build fenrir-pam.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe
+
+build fenrir-scannercli.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe
+
+build fenrir-wfptestcli.exe: phony C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe
 
 # =============================================================================
 # Folder targets.
@@ -712,7 +781,7 @@ build antivirus-wfptestcli: phony fenrir-wfptestcli.exe
 #############################################
 # Folder: C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet
 
-build all: phony libantivirus-sqlite3.a libantivirus-agent-core.a libantivirus-amsi-provider-core.a fenrir-amsi-provider.dll fenrir-agent-service.exe fenrir-endpoint-client.exe fenrir-scannercli.exe fenrir-amsitestcli.exe fenrir-etwtestcli.exe fenrir-wfptestcli.exe FenrirSetup.exe
+build all: phony libantivirus-sqlite3.a libantivirus-agent-core.a libantivirus-amsi-provider-core.a C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-amsi-provider.dll C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-agent-service.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-endpoint-client.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/fenrir-pam.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-scannercli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-amsitestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-etwtestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/dev/tools/fenrir-wfptestcli.exe C$:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/out/install/FenrirSetup.exe
 
 # =============================================================================
 # Built-in targets

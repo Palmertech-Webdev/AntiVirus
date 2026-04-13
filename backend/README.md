@@ -57,7 +57,7 @@ The repository now includes a runnable `control-plane` scaffold for:
 - `POST /api/v1/policies/:policyId/exclusion-requests`
 - `POST /api/v1/policies/exclusion-requests/:requestId/review`
 
-Direct suppression list edits in policy create/update are blocked server-side; use the exclusion-request workflow endpoints above for audited, approval-gated changes.
+Direct suppression list edits in policy create/update are blocked server-side; use the exclusion-request workflow endpoints above for audited, approval-gated changes. Exclusion requests must be reviewed by a different admin principal than the requester.
 
 State is persisted to a JSON file in `backend/control-plane/data/state.json` by default. Set `CONTROL_PLANE_STATE_FILE` to override that path for local experiments or tests.
 

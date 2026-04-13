@@ -5,7 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { buildServer } from "./app.ts";
-import { DEFAULT_ADMIN_MFA_SECRET, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, generateTotpCode } from "./adminAuth.ts";
+import {
+  createPasswordSalt,
+  DEFAULT_ADMIN_MFA_SECRET,
+  DEFAULT_ADMIN_PASSWORD,
+  DEFAULT_ADMIN_USERNAME,
+  generateTotpCode,
+  hashPassword
+} from "./adminAuth.ts";
 import { createFileBackedControlPlaneStore } from "./controlPlaneStore.ts";
 import { scoreDeviceRisk } from "./deviceRiskScoring.ts";
 import { createFileBackedMailStore } from "./mailStore.ts";
@@ -127,20 +134,31 @@ async function createTestAppWithRawState(rawStateText: string) {
   };
 }
 
-async function loginBootstrapAdmin(app: { inject: (options: { method: string; url: string; payload?: unknown }) => Promise<{ statusCode: number; json(): unknown }> }) {
+async function loginAdmin(
+  app: { inject: (options: { method: string; url: string; payload?: unknown }) => Promise<{ statusCode: number; json(): unknown }> },
+  options: { username: string; password: string; mfaSecret?: string }
+) {
   const response = await app.inject({
     method: "POST",
     url: "/api/v1/admin/auth/login",
     payload: {
-      username: DEFAULT_ADMIN_USERNAME,
-      password: DEFAULT_ADMIN_PASSWORD,
-      mfaCode: generateTotpCode(DEFAULT_ADMIN_MFA_SECRET)
+      username: options.username,
+      password: options.password,
+      mfaCode: generateTotpCode(options.mfaSecret ?? DEFAULT_ADMIN_MFA_SECRET)
     }
   });
 
   assert.equal(response.statusCode, 201);
   const payload = response.json() as { accessToken: string };
   return { "x-admin-session-token": payload.accessToken };
+}
+
+async function loginBootstrapAdmin(app: { inject: (options: { method: string; url: string; payload?: unknown }) => Promise<{ statusCode: number; json(): unknown }> }) {
+  return loginAdmin(app, {
+    username: DEFAULT_ADMIN_USERNAME,
+    password: DEFAULT_ADMIN_PASSWORD,
+    mfaSecret: DEFAULT_ADMIN_MFA_SECRET
+  });
 }
 
 function deviceAuthHeaders(enrollment: { deviceApiKey?: string }) {
@@ -1679,7 +1697,33 @@ test("ransomware-oriented scan findings generate critical recovery and encryptio
 });
 
 test("policy exclusion requests require review and apply approved changes with audit visibility", async (t) => {
-  const harness = await createTestApp();
+  const reviewerPassword = "Fenrir!Reviewer123";
+  const reviewerSalt = createPasswordSalt();
+  const reviewerPrincipal = {
+    id: "admin-reviewer-1",
+    username: "reviewer@fenrir.local",
+    displayName: "Fenrir Reviewer",
+    passwordSalt: reviewerSalt,
+    passwordHash: hashPassword(reviewerPassword, reviewerSalt),
+    mfaSecret: DEFAULT_ADMIN_MFA_SECRET,
+    roles: ["admin"],
+    enabled: true,
+    createdAt: "2026-04-08T08:59:00.000Z",
+    updatedAt: "2026-04-08T08:59:00.000Z"
+  };
+
+  const seededState = createSeedState("2026-04-08T09:00:00.000Z") as {
+    adminPrincipals: Array<typeof reviewerPrincipal>;
+  };
+  seededState.adminPrincipals.push(reviewerPrincipal);
+
+  const harness = await createTestAppWithState(seededState);
+  const reviewerHeaders = await loginAdmin(harness.app, {
+    username: reviewerPrincipal.username,
+    password: reviewerPassword,
+    mfaSecret: reviewerPrincipal.mfaSecret
+  });
+
   t.after(async () => {
     await harness.cleanup();
   });
@@ -1758,10 +1802,23 @@ test("policy exclusion requests require review and apply approved changes with a
   assert.equal(pendingItems.length, 1);
   assert.equal(pendingItems[0].id, exclusionRequest.id);
 
-  const approveResponse = await harness.app.inject({
+  const selfApproveResponse = await harness.app.inject({
     method: "POST",
     url: `/api/v1/policies/exclusion-requests/${exclusionRequest.id}/review`,
     headers: harness.adminHeaders,
+    payload: {
+      outcome: "approved",
+      reviewComment: "Validated through staged endpoint regression checks."
+    }
+  });
+
+  assert.equal(selfApproveResponse.statusCode, 409);
+  assert.equal(selfApproveResponse.json().error, "policy_exclusion_request_reviewer_conflict");
+
+  const approveResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/policies/exclusion-requests/${exclusionRequest.id}/review`,
+    headers: reviewerHeaders,
     payload: {
       outcome: "approved",
       reviewComment: "Validated through staged endpoint regression checks."
@@ -1775,7 +1832,7 @@ test("policy exclusion requests require review and apply approved changes with a
     reviewComment?: string;
   };
   assert.equal(reviewed.status, "approved");
-  assert.match(reviewed.reviewedBy ?? "", /Fenrir Platform Admin/i);
+  assert.match(reviewed.reviewedBy ?? "", /Fenrir Reviewer/i);
   assert.match(reviewed.reviewComment ?? "", /staged endpoint/i);
 
   const policiesResponse = await harness.app.inject({

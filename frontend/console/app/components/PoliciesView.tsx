@@ -8,6 +8,7 @@ import {
   createPolicy,
   createPolicyExclusionChangeRequest,
   listPolicyExclusionChangeRequests,
+  loadAdminSession,
   reviewPolicyExclusionChangeRequest,
   updatePolicy
 } from "../../lib/api";
@@ -107,6 +108,7 @@ export default function PoliciesView() {
   const [policyExclusionRequests, setPolicyExclusionRequests] = useState<PolicyExclusionChangeRequestSummary[]>([]);
   const [policyExclusionReason, setPolicyExclusionReason] = useState("");
   const [policyExclusionReviewComment, setPolicyExclusionReviewComment] = useState("");
+  const [currentAdminPrincipalId, setCurrentAdminPrincipalId] = useState<string | null>(null);
 
   async function refreshPolicyExclusionRequests(policyId: string) {
     const items = await listPolicyExclusionChangeRequests({ policyId, limit: 50 });
@@ -118,6 +120,26 @@ export default function PoliciesView() {
       setSelectedPolicyId(policies[0].id);
     }
   }, [policies, selectedPolicyId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void loadAdminSession()
+      .then((session) => {
+        if (!cancelled) {
+          setCurrentAdminPrincipalId(session.principal.id);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCurrentAdminPrincipalId(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!currentPolicy) {
@@ -561,59 +583,69 @@ export default function PoliciesView() {
               {policyExclusionRequests.length === 0 ? (
                 <p className="muted-copy">No exclusion requests are recorded for this policy yet.</p>
               ) : (
-                policyExclusionRequests.map((request) => (
-                  <article key={request.id} className="mini-card">
-                    <div className="row-between">
-                      <strong>{request.id.slice(0, 8)}</strong>
-                      <span className="mini-meta">{request.status}</span>
-                    </div>
-                    <p>{request.reason}</p>
-                    <span className="mini-meta">
-                      {request.requestedBy} · {new Date(request.requestedAt).toLocaleString()}
-                    </span>
-                    <span className="mini-meta">
-                      {request.entries
-                        .map((entry) => `${entry.operation} ${formatExclusionListType(entry.listType)}: ${entry.value}`)
-                        .join("; ")}
-                    </span>
-                    {request.status === "pending" ? (
-                      <div className="form-actions">
-                        <button
-                          type="button"
-                          className="primary-link"
-                          disabled={Boolean(actionBusy)}
-                          onClick={() => {
-                            void runPolicyAction("Approve exclusion request", async () => {
-                              await reviewPolicyExclusionChangeRequest(request.id, {
-                                outcome: "approved",
-                                reviewComment: policyExclusionReviewComment.trim() || undefined
-                              });
-                              await refreshPolicyExclusionRequests(currentPolicy.id);
-                            });
-                          }}
-                        >
-                          Approve
-                        </button>
-                        <button
-                          type="button"
-                          className="primary-link"
-                          disabled={Boolean(actionBusy)}
-                          onClick={() => {
-                            void runPolicyAction("Reject exclusion request", async () => {
-                              await reviewPolicyExclusionChangeRequest(request.id, {
-                                outcome: "rejected",
-                                reviewComment: policyExclusionReviewComment.trim() || undefined
-                              });
-                              await refreshPolicyExclusionRequests(currentPolicy.id);
-                            });
-                          }}
-                        >
-                          Reject
-                        </button>
+                policyExclusionRequests.map((request) => {
+                  const isSelfReviewBlocked =
+                    request.status === "pending" &&
+                    Boolean(currentAdminPrincipalId) &&
+                    request.requestedById === currentAdminPrincipalId;
+
+                  return (
+                    <article key={request.id} className="mini-card">
+                      <div className="row-between">
+                        <strong>{request.id.slice(0, 8)}</strong>
+                        <span className="mini-meta">{request.status}</span>
                       </div>
-                    ) : null}
-                  </article>
-                ))
+                      <p>{request.reason}</p>
+                      <span className="mini-meta">
+                        {request.requestedBy} · {new Date(request.requestedAt).toLocaleString()}
+                      </span>
+                      <span className="mini-meta">
+                        {request.entries
+                          .map((entry) => `${entry.operation} ${formatExclusionListType(entry.listType)}: ${entry.value}`)
+                          .join("; ")}
+                      </span>
+                      {isSelfReviewBlocked ? (
+                        <p className="muted-copy">A different admin account must review this request.</p>
+                      ) : null}
+                      {request.status === "pending" ? (
+                        <div className="form-actions">
+                          <button
+                            type="button"
+                            className="primary-link"
+                            disabled={Boolean(actionBusy) || isSelfReviewBlocked}
+                            onClick={() => {
+                              void runPolicyAction("Approve exclusion request", async () => {
+                                await reviewPolicyExclusionChangeRequest(request.id, {
+                                  outcome: "approved",
+                                  reviewComment: policyExclusionReviewComment.trim() || undefined
+                                });
+                                await refreshPolicyExclusionRequests(currentPolicy.id);
+                              });
+                            }}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            className="primary-link"
+                            disabled={Boolean(actionBusy) || isSelfReviewBlocked}
+                            onClick={() => {
+                              void runPolicyAction("Reject exclusion request", async () => {
+                                await reviewPolicyExclusionChangeRequest(request.id, {
+                                  outcome: "rejected",
+                                  reviewComment: policyExclusionReviewComment.trim() || undefined
+                                });
+                                await refreshPolicyExclusionRequests(currentPolicy.id);
+                              });
+                            }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      ) : null}
+                    </article>
+                  );
+                })
               )}
             </div>
           </article>

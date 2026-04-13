@@ -29,6 +29,7 @@
 #include "QuarantineStore.h"
 #include "RemediationEngine.h"
 #include "RuntimeDatabase.h"
+#include "RuntimeTrustValidator.h"
 #include "ScanEngine.h"
 #include "StringUtils.h"
 #include "UpdaterService.h"
@@ -217,6 +218,13 @@ std::filesystem::path ResolveInstallRootForConfig(const AgentConfig& config) {
 
   const auto runtimeRoot = ResolveRuntimeRoot(config);
   return runtimeRoot.has_parent_path() ? runtimeRoot.parent_path() : std::filesystem::current_path();
+}
+
+bool IsHardeningReady(const HardeningStatus& status, const AgentConfig& config) {
+  const auto protectedServiceExpected = status.elamDriverPresent || !config.elamDriverPath.empty();
+  return status.registryConfigured && status.runtimePathsTrusted && status.runtimePathsProtected &&
+         status.serviceControlProtected &&
+         (!protectedServiceExpected || status.launchProtectedConfigured);
 }
 
 void EnsureDirectoryExists(const std::filesystem::path& path, const wchar_t* label) {
@@ -1000,13 +1008,11 @@ int AgentService::Run(const AgentRunMode mode) {
     }
 
     EnsureRuntimeLayoutReady(config_, runtimeValidation);
+    const auto installRoot = ResolveInstallRootForConfig(config_);
     if (mode == AgentRunMode::Service) {
-      HardeningManager startupHardeningManager(config_, ResolveInstallRootForConfig(config_));
+      HardeningManager startupHardeningManager(config_, installRoot);
       const auto startupStatus = startupHardeningManager.QueryStatus(L"FenrirAgent");
-      const auto protectedServiceExpected = startupStatus.elamDriverPresent || !config_.elamDriverPath.empty();
-      const auto hardeningReady = startupStatus.registryConfigured && startupStatus.runtimePathsTrusted &&
-                                  startupStatus.runtimePathsProtected && startupStatus.serviceControlProtected &&
-                                  (!protectedServiceExpected || startupStatus.launchProtectedConfigured);
+      const auto hardeningReady = IsHardeningReady(startupStatus, config_);
       if (!hardeningReady) {
         std::wstring hardeningError;
         const auto hardeningApplied = startupHardeningManager.ApplyPostInstallHardening(
@@ -1014,10 +1020,23 @@ int AgentService::Run(const AgentRunMode mode) {
         std::wstring serviceControlError;
         const auto serviceControlApplied =
             startupHardeningManager.ApplyServiceControlProtection(L"FenrirAgent", nullptr, &serviceControlError);
-        if (!hardeningApplied || !serviceControlApplied) {
-          std::wcerr << L"Startup hardening repair is incomplete: "
-                     << (hardeningError.empty() ? serviceControlError : hardeningError) << std::endl;
+        const auto repairedStatus = startupHardeningManager.QueryStatus(L"FenrirAgent");
+        if (!hardeningApplied || !serviceControlApplied || !IsHardeningReady(repairedStatus, config_)) {
+          const auto reportedError = !hardeningError.empty()
+                                         ? hardeningError
+                                         : (!serviceControlError.empty() ? serviceControlError : repairedStatus.statusMessage);
+          throw std::runtime_error(
+              "Startup hardening repair is incomplete: " +
+              WideToUtf8(reportedError.empty() ? L"Required hardening controls remain disabled." : reportedError));
         }
+      }
+
+      const auto runtimeTrust = ValidateRuntimeTrust(config_, installRoot);
+      if (!runtimeTrust.trusted) {
+        throw std::runtime_error(
+            "Runtime trust validation failed: " +
+            WideToUtf8(runtimeTrust.message.empty() ? L"Unknown runtime trust validation failure."
+                                                    : runtimeTrust.message));
       }
     }
 
@@ -1719,25 +1738,47 @@ std::wstring AgentService::ExecuteUpdateCommand(const RemoteCommand& command, co
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {
   const auto installRoot = ResolveInstallRootForConfig(config_);
   HardeningManager hardeningManager(config_, installRoot);
-  std::wstring errorMessage;
-  const auto applied = hardeningManager.ApplyPostInstallHardening(ReadEnvironmentVariable(L"ANTIVIRUS_UNINSTALL_TOKEN"),
-                                                                  &errorMessage);
-  lastHardeningCheckFailed_ = !applied;
+  std::wstring hardeningError;
+  const auto hardeningApplied =
+      hardeningManager.ApplyPostInstallHardening(ReadEnvironmentVariable(L"ANTIVIRUS_UNINSTALL_TOKEN"),
+                                                 &hardeningError);
+  std::wstring serviceControlError;
+  const auto serviceControlApplied =
+      hardeningManager.ApplyServiceControlProtection(L"FenrirAgent", nullptr, &serviceControlError);
+  const auto repairedStatus = hardeningManager.QueryStatus(L"FenrirAgent");
+  const auto runtimeTrust = ValidateRuntimeTrust(config_, installRoot);
+  const auto repairSucceeded = hardeningApplied && serviceControlApplied && IsHardeningReady(repairedStatus, config_) &&
+                               runtimeTrust.trusted;
+  lastHardeningCheckFailed_ = !repairSucceeded;
 
   const WscCoexistenceManager wscManager;
   const auto wscSnapshot = wscManager.CaptureSnapshot();
-  QueueTelemetryEvent(applied ? L"agent.repaired" : L"agent.repair.failed", L"command-executor",
-                      applied ? L"The endpoint reapplied service hardening and coexistence checks."
-                              : L"The endpoint could not fully reapply service hardening.",
-                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"hardeningApplied\":" +
-                          (applied ? std::wstring(L"true") : std::wstring(L"false")) + L",\"wscAvailable\":" +
+  QueueTelemetryEvent(repairSucceeded ? L"agent.repaired" : L"agent.repair.failed", L"command-executor",
+                      repairSucceeded ? L"The endpoint reapplied hardening and runtime trust controls."
+                                      : L"The endpoint could not fully reapply hardening or runtime trust controls.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId +
+                          L"\",\"hardeningApplied\":" +
+                          (hardeningApplied ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"serviceControlApplied\":" +
+                          (serviceControlApplied ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustValidated\":" +
+                          (runtimeTrust.trusted ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"wscAvailable\":" +
                           (wscSnapshot.available ? std::wstring(L"true") : std::wstring(L"false")) + L"}");
 
-  if (!applied) {
-    throw std::runtime_error(WideToUtf8(errorMessage.empty() ? L"Endpoint repair failed" : errorMessage));
+  if (!repairSucceeded) {
+    const auto reportedError = !hardeningError.empty()
+                                   ? hardeningError
+                                   : (!serviceControlError.empty() ? serviceControlError
+                                                                   : (!runtimeTrust.message.empty()
+                                                                          ? runtimeTrust.message
+                                                                          : repairedStatus.statusMessage));
+    throw std::runtime_error(
+        WideToUtf8(reportedError.empty() ? L"Endpoint repair failed" : reportedError));
   }
 
-  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"hardeningApplied\":true,\"wscAvailable\":" +
+  return std::wstring(L"{\"commandId\":\"") + command.commandId +
+         L"\",\"hardeningApplied\":true,\"serviceControlApplied\":true,\"runtimeTrustValidated\":true,\"wscAvailable\":" +
          (wscSnapshot.available ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
 }
 
@@ -2049,12 +2090,8 @@ void AgentService::QueueEndpointStatusTelemetry() {
   const auto installRoot = ResolveInstallRootForConfig(config_);
   HardeningManager hardeningManager(config_, installRoot);
   const auto hardeningStatus = hardeningManager.QueryStatus();
-  const auto protectedServiceExpected = hardeningStatus.elamDriverPresent || !config_.elamDriverPath.empty();
-  lastHardeningCheckFailed_ =
-      !(hardeningStatus.registryConfigured && hardeningStatus.runtimePathsTrusted &&
-        hardeningStatus.runtimePathsProtected &&
-        hardeningStatus.serviceControlProtected &&
-        (!protectedServiceExpected || hardeningStatus.launchProtectedConfigured));
+  const auto runtimeTrust = ValidateRuntimeTrust(config_, installRoot);
+  lastHardeningCheckFailed_ = !(IsHardeningReady(hardeningStatus, config_) && runtimeTrust.trusted);
   QueueTelemetryEvent(lastHardeningCheckFailed_ ? L"tamper.protection.degraded" : L"tamper.protection.ready",
                       L"hardening-manager", hardeningStatus.statusMessage,
                       std::wstring(L"{\"registryConfigured\":") +
@@ -2077,6 +2114,21 @@ void AgentService::QueueEndpointStatusTelemetry() {
                           L",\"launchProtectedConfigured\":" +
                           (hardeningStatus.launchProtectedConfigured ? std::wstring(L"true")
                                                                      : std::wstring(L"false")) +
+                          L",\"runtimeTrustValidated\":" +
+                          (runtimeTrust.trusted ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustMarkerPresent\":" +
+                          (runtimeTrust.registryRuntimeMarkerPresent ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustMarkerMatch\":" +
+                          (runtimeTrust.registryRuntimeMatches ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustInstallMatch\":" +
+                          (runtimeTrust.registryInstallMatches ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustRequireSigned\":" +
+                          (runtimeTrust.requireSignedBinaries ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustSignatureWarning\":" +
+                          (runtimeTrust.signatureWarning ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"runtimeTrustMessage\":\"" +
+                          Utf8ToWide(EscapeJsonString(runtimeTrust.message)) +
+                          L"\"" +
                           L"}");
 
   const WscCoexistenceManager wscManager;

@@ -82,6 +82,7 @@ add_library(antivirus-agent-core STATIC
   src/QuarantineStore.cpp
   src/RealtimeProtectionBroker.cpp
   src/RemediationEngine.cpp
+  src/RuntimeTrustValidator.cpp
   src/RuntimeDatabase.cpp
   src/ScanEngine.cpp
   src/SelfTestRunner.cpp

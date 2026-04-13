@@ -4,6 +4,7 @@ C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-amsi-provider.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-agent-service.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-endpoint-client.dir
+C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-pam-client.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-scannercli.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-amsitestcli.dir
 C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/build-quiet/CMakeFiles/antivirus-etwtestcli.dir
