@@ -45,6 +45,7 @@ import type {
   CommandStatus,
   CompleteCommandRequest,
   ControlPlaneState,
+  CreatePolicyExclusionChangeRequest,
   CreatePolicyRequest,
   CreateScriptRequest,
   DashboardSnapshot,
@@ -64,6 +65,10 @@ import type {
   IsolationState,
   PolicyCheckInRequest,
   PolicyCheckInResponse,
+  PolicyExclusionChangeEntry,
+  PolicyExclusionChangeRequestSummary,
+  PolicyExclusionListType,
+  PolicyExclusionRequestStatus,
   PolicyProfile,
   PolicyAssignmentRequest,
   PolicySummary,
@@ -83,6 +88,7 @@ import type {
   TelemetryBatchResponse,
   TelemetryRecord,
   UpsertDeviceRiskTelemetryRequest,
+  ReviewPolicyExclusionChangeRequest,
   UpdatePolicyRequest,
   UpdateScriptRequest
 } from "./types.ts";
@@ -101,6 +107,7 @@ const MAX_PRIVILEGE_EVENTS = 5_000;
 const MAX_ADMIN_SESSIONS = 1_000;
 const MAX_ADMIN_API_KEYS = 500;
 const MAX_ADMIN_AUDIT_EVENTS = 5_000;
+const MAX_POLICY_EXCLUSION_CHANGE_REQUESTS = 2_000;
 
 type ParsedPayload = Record<string, unknown>;
 
@@ -141,6 +148,21 @@ export interface ControlPlaneStore {
   listQuarantineItems(deviceId?: string, status?: QuarantineStatus, limit?: number): Promise<QuarantineItemSummary[]>;
   getDefaultPolicy(): Promise<PolicySummary>;
   listPolicies(): Promise<PolicyProfile[]>;
+  listPolicyExclusionChangeRequests(
+    policyId?: string,
+    status?: PolicyExclusionRequestStatus,
+    limit?: number
+  ): Promise<PolicyExclusionChangeRequestSummary[]>;
+  createPolicyExclusionChangeRequest(
+    policyId: string,
+    request: CreatePolicyExclusionChangeRequest,
+    actor?: AdminActorContext
+  ): Promise<PolicyExclusionChangeRequestSummary>;
+  reviewPolicyExclusionChangeRequest(
+    requestId: string,
+    request: ReviewPolicyExclusionChangeRequest,
+    actor?: AdminActorContext
+  ): Promise<PolicyExclusionChangeRequestSummary>;
   createPolicy(request: CreatePolicyRequest, actor?: AdminActorContext): Promise<PolicyProfile>;
   updatePolicy(policyId: string, request: UpdatePolicyRequest, actor?: AdminActorContext): Promise<PolicyProfile>;
   assignPolicy(policyId: string, request: PolicyAssignmentRequest, actor?: AdminActorContext): Promise<PolicyProfile>;
@@ -203,6 +225,30 @@ export class PolicyNotFoundError extends Error {
   constructor(policyId: string) {
     super(`Policy not found: ${policyId}`);
     this.name = "PolicyNotFoundError";
+  }
+}
+
+export class PolicyExclusionChangeRequestNotFoundError extends Error {
+  constructor(requestId: string) {
+    super(`Policy exclusion request not found: ${requestId}`);
+    this.name = "PolicyExclusionChangeRequestNotFoundError";
+  }
+}
+
+export class PolicyExclusionChangeRequestStateError extends Error {
+  constructor(requestId: string, status: PolicyExclusionRequestStatus) {
+    super(`Policy exclusion request ${requestId} is already ${status}`);
+    this.name = "PolicyExclusionChangeRequestStateError";
+  }
+}
+
+export class PolicyExclusionWorkflowRequiredError extends Error {
+  constructor(
+    message =
+      "Suppression list changes must be submitted and approved through the policy exclusion request workflow."
+  ) {
+    super(message);
+    this.name = "PolicyExclusionWorkflowRequiredError";
   }
 }
 
@@ -710,6 +756,81 @@ function sortPolicies(items: PolicyProfile[]) {
 
 function sortScripts(items: ScriptSummary[]) {
   return sortByIsoDescending(items, (item) => item.updatedAt);
+}
+
+function sortPolicyExclusionChangeRequests(items: PolicyExclusionChangeRequestSummary[]) {
+  return sortByIsoDescending(items, (item) => item.requestedAt);
+}
+
+function normalizePolicyExclusionValue(listType: PolicyExclusionListType, value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (listType === "sha256") {
+    return trimmed.toLowerCase();
+  }
+
+  return trimmed;
+}
+
+function normalizePolicyExclusionEntry(raw: unknown): PolicyExclusionChangeEntry | null {
+  const entry = (raw ?? {}) as Partial<PolicyExclusionChangeEntry>;
+  const listType =
+    entry.listType === "path_root" || entry.listType === "sha256" || entry.listType === "signer_name"
+      ? entry.listType
+      : null;
+  const operation = entry.operation === "add" || entry.operation === "remove" ? entry.operation : null;
+  const value = typeof entry.value === "string" && listType ? normalizePolicyExclusionValue(listType, entry.value) : "";
+  if (!listType || !operation || !value) {
+    return null;
+  }
+
+  return { listType, operation, value };
+}
+
+function normalizePolicyExclusionEntries(rawEntries: unknown) {
+  const normalized: PolicyExclusionChangeEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const rawEntry of Array.isArray(rawEntries) ? rawEntries : []) {
+    const entry = normalizePolicyExclusionEntry(rawEntry);
+    if (!entry) {
+      continue;
+    }
+
+    const dedupeKey = `${entry.listType}|${entry.operation}|${entry.value.toLowerCase()}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    normalized.push(entry);
+  }
+
+  return normalized;
+}
+
+function normalizePolicyExclusionChangeRequestSummary(raw: unknown, nowIso: string): PolicyExclusionChangeRequestSummary {
+  const request = (raw ?? {}) as Partial<PolicyExclusionChangeRequestSummary>;
+  const status: PolicyExclusionRequestStatus =
+    request.status === "approved" || request.status === "rejected" ? request.status : "pending";
+  return {
+    id: readOptionalString(request.id, randomUUID()),
+    policyId: readOptionalString(request.policyId),
+    policyName: readOptionalString(request.policyName, "Unknown policy"),
+    status,
+    reason: readOptionalString(request.reason, "No reason provided."),
+    entries: normalizePolicyExclusionEntries(request.entries),
+    requestedAt: readOptionalString(request.requestedAt, nowIso),
+    requestedBy: readOptionalString(request.requestedBy, "Unknown operator"),
+    requestedById: typeof request.requestedById === "string" ? request.requestedById : undefined,
+    reviewedAt: typeof request.reviewedAt === "string" ? request.reviewedAt : undefined,
+    reviewedBy: typeof request.reviewedBy === "string" ? request.reviewedBy : undefined,
+    reviewedById: typeof request.reviewedById === "string" ? request.reviewedById : undefined,
+    reviewComment: typeof request.reviewComment === "string" ? request.reviewComment : undefined
+  };
 }
 
 function normalizeAdminRoles(rawRoles: unknown) {
@@ -1781,6 +1902,9 @@ function normalizeState(rawState: unknown, nowIso: string): ControlPlaneState {
   const state: ControlPlaneState = {
     defaultPolicy: toPolicySummary(defaultPolicyProfile),
     policies,
+    policyExclusionChangeRequests: Array.isArray(raw.policyExclusionChangeRequests)
+      ? raw.policyExclusionChangeRequests.map((item) => normalizePolicyExclusionChangeRequestSummary(item, nowIso))
+      : [],
     scripts,
     adminPrincipals:
       Array.isArray(raw.adminPrincipals) && raw.adminPrincipals.length > 0
@@ -1936,6 +2060,10 @@ function trimState(state: ControlPlaneState) {
     ...policy,
     assignedDeviceIds: [...policy.assignedDeviceIds].sort((left, right) => left.localeCompare(right))
   }));
+  state.policyExclusionChangeRequests = sortPolicyExclusionChangeRequests(state.policyExclusionChangeRequests).slice(
+    0,
+    MAX_POLICY_EXCLUSION_CHANGE_REQUESTS
+  );
   state.scripts = sortScripts(state.scripts);
   state.adminPrincipals = sortAdminPrincipals(state.adminPrincipals);
   state.adminSessions = sortAdminSessions(state.adminSessions).slice(0, MAX_ADMIN_SESSIONS);
@@ -2649,6 +2777,49 @@ function findPolicyOrThrow(state: ControlPlaneState, policyId: string) {
   }
 
   return policy;
+}
+
+function findPolicyExclusionChangeRequestOrThrow(state: ControlPlaneState, requestId: string) {
+  const request = state.policyExclusionChangeRequests.find((item) => item.id === requestId);
+  if (!request) {
+    throw new PolicyExclusionChangeRequestNotFoundError(requestId);
+  }
+
+  return request;
+}
+
+function applyPolicyExclusionChanges(policy: PolicyProfile, entries: PolicyExclusionChangeEntry[]) {
+  const pathRoots = [...policy.suppressionPathRoots];
+  const sha256 = [...policy.suppressionSha256];
+  const signerNames = [...policy.suppressionSignerNames];
+  const listsByType: Record<PolicyExclusionListType, string[]> = {
+    path_root: pathRoots,
+    sha256,
+    signer_name: signerNames
+  };
+
+  for (const entry of entries) {
+    const value = normalizePolicyExclusionValue(entry.listType, entry.value);
+    if (!value) {
+      continue;
+    }
+
+    const targetList = listsByType[entry.listType];
+    const valueLower = value.toLowerCase();
+
+    if (entry.operation === "add") {
+      if (!targetList.some((item) => item.toLowerCase() === valueLower)) {
+        targetList.push(value);
+      }
+      continue;
+    }
+
+    listsByType[entry.listType] = targetList.filter((item) => item.toLowerCase() !== valueLower);
+  }
+
+  policy.suppressionPathRoots = normalizePolicyStringArray(listsByType.path_root);
+  policy.suppressionSha256 = normalizePolicyStringArray(listsByType.sha256, (item) => item.toLowerCase());
+  policy.suppressionSignerNames = normalizePolicyStringArray(listsByType.signer_name);
 }
 
 function findScriptOrThrow(state: ControlPlaneState, scriptId: string) {
@@ -4056,6 +4227,157 @@ export function createFileBackedControlPlaneStore(
       return sortPolicies(state.policies);
     },
 
+    async listPolicyExclusionChangeRequests(policyId, status, limit = 50) {
+      const state = await loadState();
+      const filtered = state.policyExclusionChangeRequests.filter((item) => {
+        if (policyId && item.policyId !== policyId) {
+          return false;
+        }
+
+        if (status && item.status !== status) {
+          return false;
+        }
+
+        return true;
+      });
+
+      return sortPolicyExclusionChangeRequests(filtered).slice(0, limit);
+    },
+
+    async createPolicyExclusionChangeRequest(policyId, request, actor) {
+      return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin", "operator"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
+        const policy = findPolicyOrThrow(state, policyId);
+        const entries = normalizePolicyExclusionEntries(request.entries);
+        if (entries.length === 0) {
+          throw new AdminAuthorizationError("At least one valid exclusion change entry is required.");
+        }
+
+        const timestamp = now();
+        const created: PolicyExclusionChangeRequestSummary = {
+          id: randomUUID(),
+          policyId: policy.id,
+          policyName: policy.name,
+          status: "pending",
+          reason: request.reason.trim(),
+          entries,
+          requestedAt: timestamp,
+          requestedBy: principal.displayName,
+          requestedById: principal.id
+        };
+
+        state.policyExclusionChangeRequests.push(created);
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: "policy.exclusion.request",
+          resourceType: "policy_exclusion_request",
+          resourceId: created.id,
+          outcome: "success",
+          severity: "medium",
+          details: `Submitted exclusion request for policy ${policy.name} with ${entries.length} change(s).`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
+
+        return created;
+      });
+    },
+
+    async reviewPolicyExclusionChangeRequest(requestId, request, actor) {
+      return mutateState(async (state) => {
+        if (!actor || !hasAdminRole(actor, ["admin"])) {
+          throw new AdminAuthorizationError();
+        }
+
+        const principal = findAdminPrincipalById(state, actor.actorId);
+        if (!principal || !principal.enabled) {
+          throw new AdminAuthorizationError();
+        }
+
+        const exclusionRequest = findPolicyExclusionChangeRequestOrThrow(state, requestId);
+        if (exclusionRequest.status !== "pending") {
+          throw new PolicyExclusionChangeRequestStateError(exclusionRequest.id, exclusionRequest.status);
+        }
+
+        const timestamp = now();
+        const normalizedReviewComment = request.reviewComment?.trim();
+        let affectedPolicy: PolicyProfile | null = null;
+
+        if (request.outcome === "approved") {
+          const policy = findPolicyOrThrow(state, exclusionRequest.policyId);
+          applyPolicyExclusionChanges(policy, exclusionRequest.entries);
+          policy.revision = buildPolicyRevision(timestamp);
+          policy.updatedAt = timestamp;
+          affectedPolicy = policy;
+
+          if (policy.isDefault) {
+            state.defaultPolicy = toPolicySummary(policy);
+          }
+
+          for (const device of state.devices) {
+            if (device.policyId === policy.id) {
+              recalculateDeviceScoreSnapshot(state, device, timestamp);
+            }
+          }
+        }
+
+        exclusionRequest.status = request.outcome;
+        exclusionRequest.reviewedAt = timestamp;
+        exclusionRequest.reviewedBy = principal.displayName;
+        exclusionRequest.reviewedById = principal.id;
+        exclusionRequest.reviewComment =
+          normalizedReviewComment && normalizedReviewComment.length > 0 ? normalizedReviewComment : undefined;
+
+        recordAdminAuditEvent(state, {
+          occurredAt: timestamp,
+          actorId: principal.id,
+          actorName: principal.displayName,
+          actorType: actor.actorType,
+          action: request.outcome === "approved" ? "policy.exclusion.approve" : "policy.exclusion.reject",
+          resourceType: "policy_exclusion_request",
+          resourceId: exclusionRequest.id,
+          outcome: "success",
+          severity: request.outcome === "approved" ? "high" : "medium",
+          details:
+            request.outcome === "approved"
+              ? `Approved exclusion request ${exclusionRequest.id} and applied ${exclusionRequest.entries.length} change(s) to ${exclusionRequest.policyName}.`
+              : `Rejected exclusion request ${exclusionRequest.id} for ${exclusionRequest.policyName}.`,
+          source: "control-plane",
+          sessionId: actor.sessionId
+        });
+
+        if (affectedPolicy) {
+          recordAdminAuditEvent(state, {
+            occurredAt: timestamp,
+            actorId: principal.id,
+            actorName: principal.displayName,
+            actorType: actor.actorType,
+            action: "policy.update",
+            resourceType: "policy",
+            resourceId: affectedPolicy.id,
+            outcome: "success",
+            severity: "medium",
+            details: `Applied approved exclusion changes to policy ${affectedPolicy.name}.`,
+            source: "control-plane",
+            sessionId: actor.sessionId
+          });
+        }
+
+        return exclusionRequest;
+      });
+    },
+
     async createPolicy(request, actor) {
       return mutateState(async (state) => {
         if (!actor || !hasAdminRole(actor, ["admin"])) {
@@ -4065,6 +4387,17 @@ export function createFileBackedControlPlaneStore(
         const principal = findAdminPrincipalById(state, actor.actorId);
         if (!principal || !principal.enabled) {
           throw new AdminAuthorizationError();
+        }
+
+        const requestedSuppressionPathRoots = normalizePolicyStringArray(request.suppressionPathRoots);
+        const requestedSuppressionSha256 = normalizePolicyStringArray(request.suppressionSha256, (item) => item.toLowerCase());
+        const requestedSuppressionSignerNames = normalizePolicyStringArray(request.suppressionSignerNames);
+        if (
+          requestedSuppressionPathRoots.length > 0 ||
+          requestedSuppressionSha256.length > 0 ||
+          requestedSuppressionSignerNames.length > 0
+        ) {
+          throw new PolicyExclusionWorkflowRequiredError();
         }
 
         const timestamp = now();
@@ -4086,9 +4419,9 @@ export function createFileBackedControlPlaneStore(
           denyHighRiskElevation: request.denyHighRiskElevation ?? request.privilegeHardeningEnabled ?? false,
           denyUnsignedElevation: request.denyUnsignedElevation ?? request.privilegeHardeningEnabled ?? false,
           requireBreakGlassEscrow: request.requireBreakGlassEscrow ?? request.privilegeHardeningEnabled ?? false,
-          suppressionPathRoots: normalizePolicyStringArray(request.suppressionPathRoots),
-          suppressionSha256: normalizePolicyStringArray(request.suppressionSha256, (item) => item.toLowerCase()),
-          suppressionSignerNames: normalizePolicyStringArray(request.suppressionSignerNames),
+          suppressionPathRoots: [],
+          suppressionSha256: [],
+          suppressionSignerNames: [],
           isDefault: false,
           assignedDeviceIds: [],
           createdAt: timestamp,
@@ -4124,6 +4457,14 @@ export function createFileBackedControlPlaneStore(
           throw new AdminAuthorizationError();
         }
 
+        if (
+          request.suppressionPathRoots !== undefined ||
+          request.suppressionSha256 !== undefined ||
+          request.suppressionSignerNames !== undefined
+        ) {
+          throw new PolicyExclusionWorkflowRequiredError();
+        }
+
         const policy = findPolicyOrThrow(state, policyId);
         const timestamp = now();
         Object.assign(policy, {
@@ -4142,18 +4483,9 @@ export function createFileBackedControlPlaneStore(
           denyHighRiskElevation: request.denyHighRiskElevation ?? policy.denyHighRiskElevation,
           denyUnsignedElevation: request.denyUnsignedElevation ?? policy.denyUnsignedElevation,
           requireBreakGlassEscrow: request.requireBreakGlassEscrow ?? policy.requireBreakGlassEscrow,
-          suppressionPathRoots:
-            request.suppressionPathRoots !== undefined
-              ? normalizePolicyStringArray(request.suppressionPathRoots)
-              : policy.suppressionPathRoots,
-          suppressionSha256:
-            request.suppressionSha256 !== undefined
-              ? normalizePolicyStringArray(request.suppressionSha256, (item) => item.toLowerCase())
-              : policy.suppressionSha256,
-          suppressionSignerNames:
-            request.suppressionSignerNames !== undefined
-              ? normalizePolicyStringArray(request.suppressionSignerNames)
-              : policy.suppressionSignerNames,
+          suppressionPathRoots: policy.suppressionPathRoots,
+          suppressionSha256: policy.suppressionSha256,
+          suppressionSignerNames: policy.suppressionSignerNames,
           revision: buildPolicyRevision(timestamp),
           updatedAt: timestamp
         });

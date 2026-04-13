@@ -3,9 +3,21 @@
 import { useEffect, useMemo, useState } from "react";
 
 import ConsoleShell from "./ConsoleShell";
-import { assignPolicy, createPolicy, updatePolicy } from "../../lib/api";
+import {
+  assignPolicy,
+  createPolicy,
+  createPolicyExclusionChangeRequest,
+  listPolicyExclusionChangeRequests,
+  reviewPolicyExclusionChangeRequest,
+  updatePolicy
+} from "../../lib/api";
 import { useConsoleData } from "./useConsoleData";
 import { filterDevices } from "../../lib/console-model";
+import type {
+  PolicyExclusionChangeEntry,
+  PolicyExclusionChangeRequestSummary,
+  PolicyExclusionListType
+} from "../../lib/types";
 
 function formatBoolean(value: boolean) {
   return value ? "Enabled" : "Disabled";
@@ -20,6 +32,43 @@ function parsePolicyList(value: string) {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function buildExclusionChangeEntries(
+  listType: PolicyExclusionListType,
+  currentValues: string[],
+  proposedValues: string[]
+): PolicyExclusionChangeEntry[] {
+  const normalize = (value: string) => (listType === "sha256" ? value.trim().toLowerCase() : value.trim());
+  const currentSet = new Set(currentValues.map((item) => normalize(item)).filter((item) => item.length > 0));
+  const proposedSet = new Set(proposedValues.map((item) => normalize(item)).filter((item) => item.length > 0));
+  const entries: PolicyExclusionChangeEntry[] = [];
+
+  for (const value of proposedSet) {
+    if (!currentSet.has(value)) {
+      entries.push({ listType, operation: "add", value });
+    }
+  }
+
+  for (const value of currentSet) {
+    if (!proposedSet.has(value)) {
+      entries.push({ listType, operation: "remove", value });
+    }
+  }
+
+  return entries;
+}
+
+function formatExclusionListType(listType: PolicyExclusionListType) {
+  if (listType === "path_root") {
+    return "Path root";
+  }
+
+  if (listType === "sha256") {
+    return "SHA-256";
+  }
+
+  return "Signer name";
 }
 
 export default function PoliciesView() {
@@ -55,6 +104,14 @@ export default function PoliciesView() {
   const [policySuppressionPathRoots, setPolicySuppressionPathRoots] = useState("");
   const [policySuppressionSha256, setPolicySuppressionSha256] = useState("");
   const [policySuppressionSignerNames, setPolicySuppressionSignerNames] = useState("");
+  const [policyExclusionRequests, setPolicyExclusionRequests] = useState<PolicyExclusionChangeRequestSummary[]>([]);
+  const [policyExclusionReason, setPolicyExclusionReason] = useState("");
+  const [policyExclusionReviewComment, setPolicyExclusionReviewComment] = useState("");
+
+  async function refreshPolicyExclusionRequests(policyId: string) {
+    const items = await listPolicyExclusionChangeRequests({ policyId, limit: 50 });
+    setPolicyExclusionRequests(items);
+  }
 
   useEffect(() => {
     if (!selectedPolicyId && policies[0]) {
@@ -79,6 +136,30 @@ export default function PoliciesView() {
     setPolicySuppressionSignerNames(formatPolicyList(currentPolicy.suppressionSignerNames));
     setSelectedDeviceIds(currentPolicy.assignedDeviceIds);
   }, [currentPolicy]);
+
+  useEffect(() => {
+    if (!currentPolicy) {
+      setPolicyExclusionRequests([]);
+      return;
+    }
+
+    let cancelled = false;
+    void listPolicyExclusionChangeRequests({ policyId: currentPolicy.id, limit: 50 })
+      .then((items) => {
+        if (!cancelled) {
+          setPolicyExclusionRequests(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPolicyExclusionRequests([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPolicy?.id]);
 
   const protectedDevices = useMemo(
     () => assignedDevices.filter((device) => device.policyName === snapshot.defaultPolicy.name).length,
@@ -230,18 +311,28 @@ export default function PoliciesView() {
               disabled={Boolean(actionBusy) || !newPolicyName.trim()}
               onClick={() => {
                 void runPolicyAction("Create policy", async () => {
-                  await createPolicy({
+                  const createdPolicy = await createPolicy({
                     name: newPolicyName.trim(),
                     description: newPolicyDescription.trim() || undefined,
                     realtimeProtection: newRealtimeProtection,
                     cloudLookup: newCloudLookup,
                     scriptInspection: newScriptInspection,
                     networkContainment: newNetworkContainment,
-                    quarantineOnMalicious: newQuarantineOnMalicious,
-                    suppressionPathRoots: parsePolicyList(newSuppressionPathRoots),
-                    suppressionSha256: parsePolicyList(newSuppressionSha256),
-                    suppressionSignerNames: parsePolicyList(newSuppressionSignerNames)
+                    quarantineOnMalicious: newQuarantineOnMalicious
                   });
+
+                  const initialExclusionEntries = [
+                    ...buildExclusionChangeEntries("path_root", [], parsePolicyList(newSuppressionPathRoots)),
+                    ...buildExclusionChangeEntries("sha256", [], parsePolicyList(newSuppressionSha256)),
+                    ...buildExclusionChangeEntries("signer_name", [], parsePolicyList(newSuppressionSignerNames))
+                  ];
+                  if (initialExclusionEntries.length > 0) {
+                    await createPolicyExclusionChangeRequest(createdPolicy.id, {
+                      reason: "Initial suppression entries requested during policy creation.",
+                      entries: initialExclusionEntries
+                    });
+                  }
+
                   setNewPolicyName("");
                   setNewPolicyDescription("");
                   setNewSuppressionPathRoots("");
@@ -346,17 +437,64 @@ export default function PoliciesView() {
                       cloudLookup: policyCloudLookup,
                       scriptInspection: policyScriptInspection,
                       networkContainment: policyNetworkContainment,
-                      quarantineOnMalicious: policyQuarantineOnMalicious,
-                      suppressionPathRoots: parsePolicyList(policySuppressionPathRoots),
-                      suppressionSha256: parsePolicyList(policySuppressionSha256),
-                      suppressionSignerNames: parsePolicyList(policySuppressionSignerNames)
+                      quarantineOnMalicious: policyQuarantineOnMalicious
                     });
                   });
                 }}
               >
                 Save policy
               </button>
+              <button
+                type="button"
+                className="primary-link"
+                disabled={Boolean(actionBusy) || !policyExclusionReason.trim()}
+                onClick={() => {
+                  void runPolicyAction("Submit exclusion request", async () => {
+                    const exclusionEntries = [
+                      ...buildExclusionChangeEntries(
+                        "path_root",
+                        currentPolicy.suppressionPathRoots,
+                        parsePolicyList(policySuppressionPathRoots)
+                      ),
+                      ...buildExclusionChangeEntries(
+                        "sha256",
+                        currentPolicy.suppressionSha256,
+                        parsePolicyList(policySuppressionSha256)
+                      ),
+                      ...buildExclusionChangeEntries(
+                        "signer_name",
+                        currentPolicy.suppressionSignerNames,
+                        parsePolicyList(policySuppressionSignerNames)
+                      )
+                    ];
+
+                    if (exclusionEntries.length === 0) {
+                      setActionMessage("Submit exclusion request skipped: no suppression changes were detected.");
+                      return;
+                    }
+
+                    await createPolicyExclusionChangeRequest(currentPolicy.id, {
+                      reason: policyExclusionReason.trim(),
+                      entries: exclusionEntries
+                    });
+
+                    setPolicyExclusionReason("");
+                    await refreshPolicyExclusionRequests(currentPolicy.id);
+                  });
+                }}
+              >
+                Submit exclusion request
+              </button>
             </div>
+            <label className="field-group field-span-2">
+              <span>Exclusion request reason</span>
+              <input
+                className="admin-input"
+                value={policyExclusionReason}
+                onChange={(event) => setPolicyExclusionReason(event.target.value)}
+                placeholder="Describe why this exclusion is required and what validation was performed."
+              />
+            </label>
           </article>
 
           <article className="surface-card">
@@ -403,6 +541,80 @@ export default function PoliciesView() {
               >
                 Assign to selected devices
               </button>
+            </div>
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Exclusion workflow</p>
+                <h3>Request and review suppression changes</h3>
+              </div>
+            </div>
+            <label className="field-group">
+              <span>Review comment</span>
+              <input
+                className="admin-input"
+                value={policyExclusionReviewComment}
+                onChange={(event) => setPolicyExclusionReviewComment(event.target.value)}
+                placeholder="Optional approval or rejection notes for the audit trail."
+              />
+            </label>
+            <div className="list-stack">
+              {policyExclusionRequests.length === 0 ? (
+                <p className="muted-copy">No exclusion requests are recorded for this policy yet.</p>
+              ) : (
+                policyExclusionRequests.map((request) => (
+                  <article key={request.id} className="mini-card">
+                    <div className="row-between">
+                      <strong>{request.id.slice(0, 8)}</strong>
+                      <span className="mini-meta">{request.status}</span>
+                    </div>
+                    <p>{request.reason}</p>
+                    <span className="mini-meta">
+                      {request.requestedBy} · {new Date(request.requestedAt).toLocaleString()}
+                    </span>
+                    <span className="mini-meta">
+                      {request.entries
+                        .map((entry) => `${entry.operation} ${formatExclusionListType(entry.listType)}: ${entry.value}`)
+                        .join("; ")}
+                    </span>
+                    {request.status === "pending" ? (
+                      <div className="form-actions">
+                        <button
+                          type="button"
+                          className="primary-link"
+                          disabled={Boolean(actionBusy)}
+                          onClick={() => {
+                            void runPolicyAction("Approve exclusion request", async () => {
+                              await reviewPolicyExclusionChangeRequest(request.id, {
+                                outcome: "approved",
+                                reviewComment: policyExclusionReviewComment.trim() || undefined
+                              });
+                              await refreshPolicyExclusionRequests(currentPolicy.id);
+                            });
+                          }}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          className="primary-link"
+                          disabled={Boolean(actionBusy)}
+                          onClick={() => {
+                            void runPolicyAction("Reject exclusion request", async () => {
+                              await reviewPolicyExclusionChangeRequest(request.id, {
+                                outcome: "rejected",
+                                reviewComment: policyExclusionReviewComment.trim() || undefined
+                              });
+                              await refreshPolicyExclusionRequests(currentPolicy.id);
+                            });
+                          }}
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    ) : null}
+                  </article>
+                ))
+              )}
             </div>
           </article>
         </section>

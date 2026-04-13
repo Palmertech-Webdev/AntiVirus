@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <thread>
@@ -14,7 +16,9 @@
 #include "AgentConfig.h"
 #include "CryptoUtils.h"
 #include "HardeningManager.h"
+#include "RealtimeProtectionBroker.h"
 #include "RuntimeDatabase.h"
+#include "ScanEngine.h"
 #include "StringUtils.h"
 #include "WscCoexistenceManager.h"
 
@@ -26,6 +30,12 @@ constexpr wchar_t kMinifilterServiceName[] = L"AntivirusMinifilter";
 constexpr wchar_t kServiceExecutableName[] = L"fenrir-agent-service.exe";
 constexpr wchar_t kAmsiProviderDllName[] = L"fenrir-amsi-provider.dll";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
+constexpr char kDiskBlockingSample[] =
+  "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+constexpr char kExecutionBlockingSample[] =
+  "# Fenrir self-test execution marker\n"
+  "$marker = 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE'\n"
+  "Write-Output $marker\n";
 
 std::wstring JsonEscape(const std::wstring& value) { return Utf8ToWide(EscapeJsonString(value)); }
 
@@ -194,6 +204,55 @@ std::filesystem::path ResolveSignatureBundlePath(const std::filesystem::path& in
   return repoCandidate;
 }
 
+std::filesystem::path BuildSelfTestValidationRoot(const AgentConfig& config) {
+  std::error_code error;
+  auto root = std::filesystem::temp_directory_path(error);
+  if (error || root.empty()) {
+    root = config.runtimeDatabasePath.parent_path();
+  }
+  if (root.empty()) {
+    root = std::filesystem::current_path();
+  }
+  return root / (L"fenrir-phase1-selftest-" + GenerateGuidString());
+}
+
+bool WriteSelfTestSample(const std::filesystem::path& path, const char* content) {
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  if (error) {
+    return false;
+  }
+
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    return false;
+  }
+
+  output.write(content, static_cast<std::streamsize>(std::char_traits<char>::length(content)));
+  return output.good();
+}
+
+template <std::size_t Capacity>
+void CopyWideField(wchar_t (&target)[Capacity], const std::wstring& value) {
+  static_assert(Capacity > 0);
+  const auto length = std::min<std::size_t>(value.size(), Capacity - 1);
+  if (length > 0) {
+    std::wmemcpy(target, value.data(), length);
+  }
+  target[length] = L'\0';
+}
+
+bool IsBlockingDisposition(const VerdictDisposition disposition) {
+  return disposition == VerdictDisposition::Block || disposition == VerdictDisposition::Quarantine;
+}
+
+std::wstring FirstReasonCode(const ScanFinding& finding) {
+  if (finding.verdict.reasons.empty()) {
+    return L"none";
+  }
+  return finding.verdict.reasons.front().code;
+}
+
 std::wstring StatusToString(const SelfTestStatus status) {
   switch (status) {
     case SelfTestStatus::Pass:
@@ -269,6 +328,135 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                       ? L"Runtime boundaries are not trusted."
                       : runtimeValidation.message),
            L"Re-run install or repair so runtime database, state, telemetry, update, quarantine, evidence, and journal paths stay within one trusted runtime root.");
+
+  const auto phaseValidationRoot = BuildSelfTestValidationRoot(config);
+  std::error_code phaseValidationRootError;
+  std::filesystem::create_directories(phaseValidationRoot, phaseValidationRootError);
+  if (phaseValidationRootError) {
+    AddCheck(report, L"phase1_disk_blocking", L"Phase 1 disk-time blocking", SelfTestStatus::Fail,
+             L"Self-test could not create staged disk-validation artifacts under " + phaseValidationRoot.wstring() + L".",
+             L"Ensure the service can write to the local temp/runtime root before running --self-test.");
+    AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Fail,
+             L"Self-test could not prepare the execution-interception validation workspace at " +
+                 phaseValidationRoot.wstring() + L".",
+             L"Ensure the service can write to local runtime, evidence, and quarantine roots before running --self-test.");
+  } else {
+    const auto diskSamplePath = phaseValidationRoot / L"phase1-disk-eicar.txt";
+    if (!WriteSelfTestSample(diskSamplePath, kDiskBlockingSample)) {
+      AddCheck(report, L"phase1_disk_blocking", L"Phase 1 disk-time blocking", SelfTestStatus::Fail,
+               L"Self-test could not write the staged disk-scan sample at " + diskSamplePath.wstring() + L".",
+               L"Verify local runtime/temp ACLs and retry self-test from the target endpoint context.");
+    } else {
+      auto diskPolicy = CreateDefaultPolicySnapshot();
+      diskPolicy.cloudLookupEnabled = false;
+      diskPolicy.quarantineOnMalicious = false;
+
+      const auto diskFinding = ScanFile(diskSamplePath, diskPolicy);
+      if (diskFinding.has_value() && IsBlockingDisposition(diskFinding->verdict.disposition)) {
+        AddCheck(report, L"phase1_disk_blocking", L"Phase 1 disk-time blocking", SelfTestStatus::Pass,
+                 L"ScanFile blocked the staged disk artifact with disposition " +
+                     VerdictDispositionToString(diskFinding->verdict.disposition) + L" at confidence " +
+                     std::to_wstring(diskFinding->verdict.confidence) + L" (reason " +
+                     FirstReasonCode(*diskFinding) + L").");
+      } else if (diskFinding.has_value()) {
+        AddCheck(report, L"phase1_disk_blocking", L"Phase 1 disk-time blocking", SelfTestStatus::Fail,
+                 L"ScanFile returned disposition " + VerdictDispositionToString(diskFinding->verdict.disposition) +
+                     L" for the staged artifact (confidence " + std::to_wstring(diskFinding->verdict.confidence) + L").",
+                 L"Review scan signatures/heuristics so known-malicious artifacts are blocked on disk.");
+      } else {
+        AddCheck(report, L"phase1_disk_blocking", L"Phase 1 disk-time blocking", SelfTestStatus::Fail,
+                 L"ScanFile produced no finding for the staged disk-validation artifact at " + diskSamplePath.wstring() + L".",
+                 L"Review scan signatures/heuristics and exclusions so known-malicious artifacts are detected on disk.");
+      }
+    }
+
+    const auto executionSamplePath = phaseValidationRoot / L"phase1-execution-eicar.ps1";
+    if (!WriteSelfTestSample(executionSamplePath, kExecutionBlockingSample)) {
+      AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Fail,
+               L"Self-test could not write the staged execute-time sample at " + executionSamplePath.wstring() + L".",
+               L"Verify local runtime/temp ACLs and retry self-test from the target endpoint context.");
+    } else {
+      try {
+        auto realtimeConfig = config;
+        realtimeConfig.runtimeDatabasePath = phaseValidationRoot / L"phase1-runtime.db";
+        realtimeConfig.quarantineRootPath = phaseValidationRoot / L"quarantine";
+        realtimeConfig.evidenceRootPath = phaseValidationRoot / L"evidence";
+        realtimeConfig.scanExcludedPaths.clear();
+
+        std::error_code runtimePathError;
+        std::filesystem::create_directories(realtimeConfig.runtimeDatabasePath.parent_path(), runtimePathError);
+        std::filesystem::create_directories(realtimeConfig.quarantineRootPath, runtimePathError);
+        std::filesystem::create_directories(realtimeConfig.evidenceRootPath, runtimePathError);
+        if (runtimePathError) {
+          AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Fail,
+                   L"Self-test could not prepare isolated realtime evidence/quarantine paths under " +
+                       phaseValidationRoot.wstring() + L".",
+                   L"Ensure runtime, quarantine, and evidence roots are writable before validating execution blocking.");
+        } else {
+          auto realtimePolicy = CreateDefaultPolicySnapshot();
+          realtimePolicy.cloudLookupEnabled = false;
+          realtimePolicy.quarantineOnMalicious = false;
+
+          RealtimeProtectionBroker broker(realtimeConfig);
+          broker.SetPolicy(realtimePolicy);
+          broker.SetDeviceId(L"self-test-device");
+
+          RealtimeFileScanRequest request{};
+          request.protocolVersion = ANTIVIRUS_REALTIME_PROTOCOL_VERSION;
+          request.requestSize = sizeof(request);
+          request.requestId = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                               std::chrono::system_clock::now().time_since_epoch())
+                                                               .count());
+          request.operation = ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE;
+          request.processId = GetCurrentProcessId();
+          request.threadId = GetCurrentThreadId();
+
+          std::error_code absolutePathError;
+          auto resolvedExecutionSamplePath = std::filesystem::absolute(executionSamplePath, absolutePathError);
+          if (absolutePathError) {
+            resolvedExecutionSamplePath = executionSamplePath;
+          }
+
+          std::error_code sampleSizeError;
+          request.fileSizeBytes = std::filesystem::file_size(resolvedExecutionSamplePath, sampleSizeError);
+          if (sampleSizeError) {
+            request.fileSizeBytes = 0;
+          }
+
+          const auto processImage = PathExists(servicePath) ? servicePath.wstring() : L"fenrir-agent-service.exe";
+          CopyWideField(request.correlationId, L"self-test-phase1-execution");
+          CopyWideField(request.path, resolvedExecutionSamplePath.wstring());
+          CopyWideField(request.processImage, processImage);
+          CopyWideField(request.parentImage, processImage);
+          CopyWideField(request.commandLine, L"fenrir-agent-service.exe --self-test");
+          CopyWideField(request.userSid, L"S-1-5-18");
+
+          const auto outcome = broker.InspectFile(request);
+          if (outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK &&
+              IsBlockingDisposition(outcome.finding.verdict.disposition)) {
+            AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Pass,
+                     L"Realtime execute inspection returned action block with disposition " +
+                         VerdictDispositionToString(outcome.finding.verdict.disposition) + L" at confidence " +
+                         std::to_wstring(outcome.finding.verdict.confidence) + L" (reason " +
+                         FirstReasonCode(outcome.finding) + L").");
+          } else {
+            AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Fail,
+                     L"Realtime execute inspection returned action " +
+                         std::wstring(outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK ? L"block" : L"allow") +
+                         L" with disposition " + VerdictDispositionToString(outcome.finding.verdict.disposition) + L".",
+                     L"Review realtime broker policy/scoring so execution-time malicious artifacts are blocked.");
+          }
+        }
+      } catch (const std::exception& error) {
+        AddCheck(report, L"phase1_execution_blocking", L"Phase 1 execution-time blocking", SelfTestStatus::Fail,
+                 L"Realtime execute validation failed: " + Utf8ToWide(error.what()),
+                 L"Validate local runtime database/evidence paths and rerun self-test in the endpoint service context.");
+      }
+    }
+
+    std::error_code cleanupError;
+    std::filesystem::remove_all(phaseValidationRoot, cleanupError);
+  }
 
   const auto hardeningManager = HardeningManager(config, installRoot);
   const auto hardeningStatus = hardeningManager.QueryStatus();

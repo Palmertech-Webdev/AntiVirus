@@ -67,6 +67,7 @@ export function createEmptyState(baseIso: string = new Date().toISOString()): Co
   return {
     defaultPolicy: createDefaultPolicy(),
     policies: [createDefaultPolicyProfile(baseIso)],
+    policyExclusionChangeRequests: [],
     scripts: [],
     ...adminState,
     devices: [],
@@ -221,6 +222,7 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         updatedAt: minusMinutes(baseIso, 12)
       }
     ],
+    policyExclusionChangeRequests: [],
     scripts: [
       {
         id: "script-001",

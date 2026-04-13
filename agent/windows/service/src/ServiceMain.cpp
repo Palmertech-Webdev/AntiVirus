@@ -509,7 +509,7 @@ void PrintUsage() {
   std::wcout << L"  --rollback-update  Roll back a recorded update transaction from the local update journal." << std::endl;
   std::wcout << L"  --uninstall Remove the Windows service registration. Use --token when uninstall protection is enabled." << std::endl;
   std::wcout << L"  --wsc-status Print the local Windows Security Center coexistence snapshot." << std::endl;
-  std::wcout << L"  --self-test Run a local endpoint validation sweep for packaging, hardening, AMSI, ETW, WFP, and the runtime store." << std::endl;
+  std::wcout << L"  --self-test Run a local endpoint validation sweep for packaging, hardening, AMSI, ETW, WFP, runtime store, and Phase 1 disk/execute blocking checks." << std::endl;
   std::wcout << L"  --token     Optional uninstall/installation protection token for hardened endpoints." << std::endl;
   std::wcout << L"  --elam-driver  Optional signed ELAM .sys path used to enable launch-protected antimalware service registration." << std::endl;
   std::wcout << L"  --register-amsi-provider   Register the adjacent AMSI provider DLL." << std::endl;

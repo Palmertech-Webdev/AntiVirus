@@ -1678,6 +1678,165 @@ test("ransomware-oriented scan findings generate critical recovery and encryptio
   assert.match(encryptionAlert.summary, /T1486/i);
 });
 
+test("policy exclusion requests require review and apply approved changes with audit visibility", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const createPolicyResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/policies",
+    headers: harness.adminHeaders,
+    payload: {
+      name: "Exclusion Workflow Baseline",
+      description: "Policy used to validate exclusion approval workflow.",
+      realtimeProtection: true,
+      cloudLookup: true,
+      scriptInspection: true,
+      networkContainment: false,
+      quarantineOnMalicious: true
+    }
+  });
+
+  assert.equal(createPolicyResponse.statusCode, 201);
+  const createdPolicy = createPolicyResponse.json() as { id: string; revision: string };
+
+  const directSuppressionUpdateResponse = await harness.app.inject({
+    method: "PATCH",
+    url: `/api/v1/policies/${createdPolicy.id}`,
+    headers: harness.adminHeaders,
+    payload: {
+      suppressionPathRoots: ["C:\\Program Files\\LOBApp"]
+    }
+  });
+
+  assert.equal(directSuppressionUpdateResponse.statusCode, 409);
+  assert.equal(directSuppressionUpdateResponse.json().error, "policy_exclusion_workflow_required");
+
+  const requestResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/policies/${createdPolicy.id}/exclusion-requests`,
+    headers: harness.adminHeaders,
+    payload: {
+      reason: "Line-of-business installer requires a reviewed exclusion.",
+      entries: [
+        {
+          listType: "path_root",
+          operation: "add",
+          value: "C:\\Program Files\\LOBApp"
+        },
+        {
+          listType: "sha256",
+          operation: "add",
+          value: "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+        }
+      ]
+    }
+  });
+
+  assert.equal(requestResponse.statusCode, 201);
+  const exclusionRequest = requestResponse.json() as {
+    id: string;
+    policyId: string;
+    status: string;
+    entries: Array<{ listType: string; operation: string; value: string }>;
+  };
+  assert.equal(exclusionRequest.policyId, createdPolicy.id);
+  assert.equal(exclusionRequest.status, "pending");
+  assert.equal(exclusionRequest.entries.length, 2);
+  assert.equal(exclusionRequest.entries[1].value, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+
+  const listPendingResponse = await harness.app.inject({
+    method: "GET",
+    url: `/api/v1/policies/exclusion-requests?policyId=${createdPolicy.id}&status=pending`,
+    headers: harness.adminHeaders
+  });
+
+  assert.equal(listPendingResponse.statusCode, 200);
+  const pendingItems = listPendingResponse.json().items as Array<{ id: string; status: string }>;
+  assert.equal(pendingItems.length, 1);
+  assert.equal(pendingItems[0].id, exclusionRequest.id);
+
+  const approveResponse = await harness.app.inject({
+    method: "POST",
+    url: `/api/v1/policies/exclusion-requests/${exclusionRequest.id}/review`,
+    headers: harness.adminHeaders,
+    payload: {
+      outcome: "approved",
+      reviewComment: "Validated through staged endpoint regression checks."
+    }
+  });
+
+  assert.equal(approveResponse.statusCode, 200);
+  const reviewed = approveResponse.json() as {
+    status: string;
+    reviewedBy?: string;
+    reviewComment?: string;
+  };
+  assert.equal(reviewed.status, "approved");
+  assert.match(reviewed.reviewedBy ?? "", /Fenrir Platform Admin/i);
+  assert.match(reviewed.reviewComment ?? "", /staged endpoint/i);
+
+  const policiesResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/policies",
+    headers: harness.adminHeaders
+  });
+
+  assert.equal(policiesResponse.statusCode, 200);
+  const storedPolicy = (policiesResponse.json().items as Array<{
+    id: string;
+    revision: string;
+    suppressionPathRoots: string[];
+    suppressionSha256: string[];
+  }>).find((item) => item.id === createdPolicy.id);
+
+  assert.ok(storedPolicy);
+  assert.notEqual(storedPolicy.revision, createdPolicy.revision);
+  assert.deepEqual(storedPolicy.suppressionPathRoots, ["C:\\Program Files\\LOBApp"]);
+  assert.deepEqual(storedPolicy.suppressionSha256, ["abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"]);
+
+  const auditResponse = await harness.app.inject({
+    method: "GET",
+    url: "/api/v1/admin/audit?limit=25",
+    headers: harness.adminHeaders
+  });
+
+  assert.equal(auditResponse.statusCode, 200);
+  const auditActions = (auditResponse.json().items as Array<{ action: string }>).map((item) => item.action);
+  assert.ok(auditActions.includes("policy.exclusion.request"));
+  assert.ok(auditActions.includes("policy.exclusion.approve"));
+});
+
+test("direct suppression values are rejected during policy creation", async (t) => {
+  const harness = await createTestApp();
+  t.after(async () => {
+    await harness.cleanup();
+  });
+
+  const createPolicyResponse = await harness.app.inject({
+    method: "POST",
+    url: "/api/v1/policies",
+    headers: harness.adminHeaders,
+    payload: {
+      name: "Blocked direct suppression policy",
+      description: "Direct suppression values should be blocked and routed through exclusion requests.",
+      realtimeProtection: true,
+      cloudLookup: true,
+      scriptInspection: true,
+      networkContainment: false,
+      quarantineOnMalicious: true,
+      suppressionPathRoots: ["C:\\Program Files\\LOBApp"]
+    }
+  });
+
+  assert.equal(createPolicyResponse.statusCode, 409);
+  const payload = createPolicyResponse.json() as { error: string; details: string };
+  assert.equal(payload.error, "policy_exclusion_workflow_required");
+  assert.match(payload.details, /suppression list changes/i);
+});
+
 test("policies and stored scripts can be managed and dispatched to endpoints", async (t) => {
   const harness = await createTestApp();
   t.after(async () => {

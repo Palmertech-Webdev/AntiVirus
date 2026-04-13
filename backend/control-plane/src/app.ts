@@ -18,6 +18,9 @@ import {
   AlertNotFoundError,
   DeviceNotFoundError,
   PolicyNotFoundError,
+  PolicyExclusionChangeRequestNotFoundError,
+  PolicyExclusionChangeRequestStateError,
+  PolicyExclusionWorkflowRequiredError,
   ScriptNotFoundError,
   type ControlPlaneStore
 } from "./controlPlaneStore.ts";
@@ -169,6 +172,34 @@ const queueCommandRequestSchema = z.object({
 
 const policyParamsSchema = z.object({
   policyId: z.string().min(1)
+});
+
+const policyExclusionRequestParamsSchema = z.object({
+  requestId: z.string().min(1)
+});
+
+const policyExclusionRequestsQuerySchema = z.object({
+  policyId: z.string().min(1).optional(),
+  status: z.enum(["pending", "approved", "rejected"]).optional(),
+  limit: z.coerce.number().int().positive().max(200).optional()
+});
+
+const createPolicyExclusionRequestSchema = z.object({
+  reason: z.string().trim().min(1).max(512),
+  entries: z
+    .array(
+      z.object({
+        listType: z.enum(["path_root", "sha256", "signer_name"]),
+        operation: z.enum(["add", "remove"]),
+        value: z.string().trim().min(1)
+      })
+    )
+    .min(1)
+});
+
+const reviewPolicyExclusionRequestSchema = z.object({
+  outcome: z.enum(["approved", "rejected"]),
+  reviewComment: z.string().trim().min(1).max(512).optional()
 });
 
 const scriptParamsSchema = z.object({
@@ -414,6 +445,16 @@ function sendPolicyNotFound(reply: { code: (statusCode: number) => { send: (payl
   return reply.code(404).send({
     error: "policy_not_found",
     policyId
+  });
+}
+
+function sendPolicyExclusionRequestNotFound(
+  reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } },
+  requestId: string
+) {
+  return reply.code(404).send({
+    error: "policy_exclusion_request_not_found",
+    requestId
   });
 }
 
@@ -1303,6 +1344,93 @@ export function buildServer(options: BuildServerOptions = {}) {
     items: await store.listPolicies()
   }));
 
+  app.get("/api/v1/policies/exclusion-requests", async (request, reply) => {
+    const actor = await requireAdminActor(request, reply, store, ["admin", "analyst", "operator", "read_only"]);
+    if (!actor) {
+      return;
+    }
+
+    const query = policyExclusionRequestsQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return sendValidationError(reply, query.error.flatten());
+    }
+
+    return {
+      items: await store.listPolicyExclusionChangeRequests(query.data.policyId, query.data.status, query.data.limit)
+    };
+  });
+
+  app.post("/api/v1/policies/:policyId/exclusion-requests", async (request, reply) => {
+    const params = policyParamsSchema.safeParse(request.params);
+    const body = createPolicyExclusionRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    const actor = await requireAdminActor(request, reply, store, ["admin", "operator"]);
+    if (!actor) {
+      return;
+    }
+
+    try {
+      return reply.code(201).send(await store.createPolicyExclusionChangeRequest(params.data.policyId, body.data, actor));
+    } catch (error) {
+      if (error instanceof PolicyNotFoundError) {
+        return sendPolicyNotFound(reply, params.data.policyId);
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply, error.message);
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/api/v1/policies/exclusion-requests/:requestId/review", async (request, reply) => {
+    const params = policyExclusionRequestParamsSchema.safeParse(request.params);
+    const body = reviewPolicyExclusionRequestSchema.safeParse(request.body);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error.flatten());
+    }
+
+    if (!body.success) {
+      return sendValidationError(reply, body.error.flatten());
+    }
+
+    const actor = await requireAdminActor(request, reply, store, ["admin"]);
+    if (!actor) {
+      return;
+    }
+
+    try {
+      return await store.reviewPolicyExclusionChangeRequest(params.data.requestId, body.data, actor);
+    } catch (error) {
+      if (error instanceof PolicyExclusionChangeRequestNotFoundError) {
+        return sendPolicyExclusionRequestNotFound(reply, params.data.requestId);
+      }
+
+      if (error instanceof PolicyExclusionChangeRequestStateError) {
+        return reply.code(409).send({
+          error: "policy_exclusion_request_state",
+          details: error.message
+        });
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
+      }
+
+      throw error;
+    }
+  });
+
   app.post("/api/v1/policies", async (request, reply) => {
     const body = createPolicyRequestSchema.safeParse(request.body);
 
@@ -1315,7 +1443,22 @@ export function buildServer(options: BuildServerOptions = {}) {
       return;
     }
 
-    return reply.code(201).send(await store.createPolicy(body.data, actor));
+    try {
+      return reply.code(201).send(await store.createPolicy(body.data, actor));
+    } catch (error) {
+      if (error instanceof PolicyExclusionWorkflowRequiredError) {
+        return reply.code(409).send({
+          error: "policy_exclusion_workflow_required",
+          details: error.message
+        });
+      }
+
+      if (error instanceof AdminAuthorizationError) {
+        return sendAdminForbidden(reply);
+      }
+
+      throw error;
+    }
   });
 
   app.patch("/api/v1/policies/:policyId", async (request, reply) => {
@@ -1340,6 +1483,13 @@ export function buildServer(options: BuildServerOptions = {}) {
     } catch (error) {
       if (error instanceof PolicyNotFoundError) {
         return sendPolicyNotFound(reply, params.data.policyId);
+      }
+
+      if (error instanceof PolicyExclusionWorkflowRequiredError) {
+        return reply.code(409).send({
+          error: "policy_exclusion_workflow_required",
+          details: error.message
+        });
       }
 
       if (error instanceof AdminAuthorizationError) {

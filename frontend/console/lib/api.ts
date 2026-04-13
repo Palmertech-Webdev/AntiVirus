@@ -23,9 +23,13 @@ import type {
   MailMessageSummary,
   MailQuarantineItemSummary,
   AdminSessionSummary,
+  CreatePolicyExclusionChangeRequest,
   PolicyAssignmentRequest,
+  PolicyExclusionChangeRequestSummary,
+  PolicyExclusionRequestStatus,
   PolicyProfile,
   QuarantineItemSummary,
+  ReviewPolicyExclusionChangeRequest,
   RiskDriverSummary,
   ScriptSummary,
   PrivilegeStateSnapshot,
@@ -324,6 +328,51 @@ export async function purgeMailMessage(mailMessageId: string, requestedBy = "con
 export async function listPolicies(): Promise<PolicyProfile[]> {
   const response = await requestJson<{ items: PolicyProfile[] }>("/policies");
   return response.items;
+}
+
+export async function listPolicyExclusionChangeRequests(options?: {
+  policyId?: string;
+  status?: PolicyExclusionRequestStatus;
+  limit?: number;
+}): Promise<PolicyExclusionChangeRequestSummary[]> {
+  const searchParams = new URLSearchParams();
+  if (options?.policyId) {
+    searchParams.set("policyId", options.policyId);
+  }
+  if (options?.status) {
+    searchParams.set("status", options.status);
+  }
+  if (typeof options?.limit === "number") {
+    searchParams.set("limit", String(options.limit));
+  }
+
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  const response = await requestJson<{ items: PolicyExclusionChangeRequestSummary[] }>(
+    `/policies/exclusion-requests${suffix}`
+  );
+  return response.items;
+}
+
+export async function createPolicyExclusionChangeRequest(
+  policyId: string,
+  request: CreatePolicyExclusionChangeRequest
+): Promise<PolicyExclusionChangeRequestSummary> {
+  return requestJsonWithBody<PolicyExclusionChangeRequestSummary>(
+    `/policies/${policyId}/exclusion-requests`,
+    "POST",
+    request
+  );
+}
+
+export async function reviewPolicyExclusionChangeRequest(
+  requestId: string,
+  request: ReviewPolicyExclusionChangeRequest
+): Promise<PolicyExclusionChangeRequestSummary> {
+  return requestJsonWithBody<PolicyExclusionChangeRequestSummary>(
+    `/policies/exclusion-requests/${requestId}/review`,
+    "POST",
+    request
+  );
 }
 
 export async function createPolicy(request: CreatePolicyRequest): Promise<PolicyProfile> {

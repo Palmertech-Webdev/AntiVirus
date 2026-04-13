@@ -195,6 +195,32 @@ export interface PolicyProfile extends PolicySummary {
   updatedAt: string;
 }
 
+export type PolicyExclusionListType = "path_root" | "sha256" | "signer_name";
+export type PolicyExclusionChangeOperation = "add" | "remove";
+export type PolicyExclusionRequestStatus = "pending" | "approved" | "rejected";
+
+export interface PolicyExclusionChangeEntry {
+  listType: PolicyExclusionListType;
+  operation: PolicyExclusionChangeOperation;
+  value: string;
+}
+
+export interface PolicyExclusionChangeRequestSummary {
+  id: string;
+  policyId: string;
+  policyName: string;
+  status: PolicyExclusionRequestStatus;
+  reason: string;
+  entries: PolicyExclusionChangeEntry[];
+  requestedAt: string;
+  requestedBy: string;
+  requestedById?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewedById?: string;
+  reviewComment?: string;
+}
+
 export interface ScriptSummary {
   id: string;
   name: string;
@@ -684,6 +710,7 @@ export interface PolicyCheckInResponse {
 export interface ControlPlaneState {
   defaultPolicy: PolicySummary;
   policies: PolicyProfile[];
+  policyExclusionChangeRequests: PolicyExclusionChangeRequestSummary[];
   scripts: ScriptSummary[];
   adminPrincipals: AdminPrincipalRecord[];
   adminSessions: AdminSessionRecord[];
@@ -963,6 +990,16 @@ export interface CreatePolicyRequest {
 }
 
 export interface UpdatePolicyRequest extends Partial<CreatePolicyRequest> {}
+
+export interface CreatePolicyExclusionChangeRequest {
+  reason: string;
+  entries: PolicyExclusionChangeEntry[];
+}
+
+export interface ReviewPolicyExclusionChangeRequest {
+  outcome: Extract<PolicyExclusionRequestStatus, "approved" | "rejected">;
+  reviewComment?: string;
+}
 
 export interface PolicyAssignmentRequest {
   deviceIds: string[];
