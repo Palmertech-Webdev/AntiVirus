@@ -129,3 +129,5 @@ The default sync interval is now 60 seconds when the agent is run in multi-itera
 - Use [BuildInstallerBundle.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/BuildInstallerBundle.ps1) to produce a native `FenrirSetup.exe` installer in `agent/windows/out/install`.
 - Use [GenerateUpdateManifest.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/GenerateUpdateManifest.ps1) to produce an updater manifest consumable by the rollback-aware update service.
 - Use `--self-test` against the staged `out/dev` layout before treating a build as promotion-ready.
+- Use [RunPhase2ExitCriteria.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/RunPhase2ExitCriteria.ps1)
+  when you want a standalone Phase 2 ransomware pass/fail report that ignores unrelated self-test warnings.

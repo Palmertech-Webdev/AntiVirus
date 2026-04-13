@@ -13,3 +13,5 @@ agent/windows/service/build-*/
 agent/windows/service/build-buttonfix/
 agent/windows/service/runtime/
 agent/windows/out/
+tmp-phase2-corpora/
+tmp-phase2-exitcriteria/

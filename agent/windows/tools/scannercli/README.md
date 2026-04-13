@@ -55,3 +55,34 @@ Stronger evidence example (minimum corpus size requirements):
 ```
 
 The script writes a JSON report to `tmp-phase1-exitcriteria/phase1-exitcriteria-report.json`.
+
+## Phase 2 Exit-Criteria Harness
+
+Use `RunPhase2ExitCriteria.ps1` to evaluate the Phase 2 ransomware-specific exit criteria from the service self-test
+without treating unrelated packaging or protected-service posture warnings as a Phase 2 failure.
+
+Current required checks:
+
+- ransomware behavior-chain containment for destructive write bursts
+- encrypted-extension burst detection
+- staged script-to-impact lineage correlation
+- false-positive resistance for benign backup/sync bulk-I/O
+- false-positive resistance for benign photo/video export churn
+- false-positive resistance for developer build churn
+
+Example:
+
+```powershell
+.\RunPhase2ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+The script writes a JSON report to `tmp-phase2-exitcriteria/phase2-exitcriteria-report.json`.
+
+Use `GeneratePhase2RansomwareCorpus.ps1` to produce a repeatable synthetic Phase 2 corpus with both malicious and
+benign destructive-churn scenarios:
+
+```powershell
+.\GeneratePhase2RansomwareCorpus.ps1 -WorkspaceRoot ..\..\..\.. -OutputRoot ./tmp-phase2-corpora
+```
+
+That corpus is designed for Phase 2 behavior validation and tuning rather than file-signature detection.

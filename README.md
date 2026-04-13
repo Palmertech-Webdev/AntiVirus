@@ -52,6 +52,7 @@ The current implementation focus is Phase 0 plus the first real-time protection 
 - A native WFP isolation manager plus test CLI for host isolation, connection snapshots, and blocked-traffic telemetry with graceful degraded mode when firewall-management privileges are unavailable
 - A hardened Windows installer/service path with delayed auto-start, recovery actions, protected runtime paths, uninstall-token enforcement, ELAM-backed launch-protected antimalware service registration, staged update apply/rollback, and deeper remediation actions for process kill, persistence cleanup, and artifact cleanup
 - A native self-test and release-packaging path that stages production-like builds, emits update manifests, and validates endpoint readiness across runtime storage, AMSI, ETW, WFP, hardening, signing, and minifilter packaging
+- A Phase 2 anti-ransomware design note and synthetic corpus generator for behavior-chain validation without honeypots: [docs/RANSOMWARE_PHASE2.md](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/docs/RANSOMWARE_PHASE2.md) and [GeneratePhase2RansomwareCorpus.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/GeneratePhase2RansomwareCorpus.ps1)
 
 ## Recommended Build Order
 
