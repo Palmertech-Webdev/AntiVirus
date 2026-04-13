@@ -117,6 +117,41 @@ std::optional<std::uintmax_t> ExtractJsonNumber(const std::string& json, const s
   return std::nullopt;
 }
 
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool ParseBooleanValue(const std::wstring& rawValue, const bool fallback) {
+  if (rawValue.empty()) {
+    return fallback;
+  }
+
+  const auto lower = ToLowerCopy(rawValue);
+  if (lower == L"1" || lower == L"true" || lower == L"yes" || lower == L"on") {
+    return true;
+  }
+  if (lower == L"0" || lower == L"false" || lower == L"no" || lower == L"off") {
+    return false;
+  }
+
+  return fallback;
+}
+
+int ParsePositiveInt(const std::wstring& rawValue, const int fallback) {
+  if (rawValue.empty()) {
+    return fallback;
+  }
+
+  try {
+    const auto parsed = std::stoi(rawValue);
+    return std::max(parsed, 1);
+  } catch (...) {
+    return fallback;
+  }
+}
+
 std::filesystem::path BuildQuarantineFilePath(const std::filesystem::path& rootPath, const std::wstring& recordId,
                                               const std::filesystem::path& originalPath) {
   const auto extension = originalPath.extension().wstring();
@@ -188,6 +223,169 @@ std::filesystem::path ResolveDatabasePath(const std::filesystem::path& rootPath,
   }
 
   return rootPath.parent_path() / L"agent-runtime.db";
+}
+
+bool IsAlternateDataStreamPath(const std::filesystem::path& path) {
+  const auto value = path.wstring();
+  const auto firstColon = value.find(L':');
+  if (firstColon == std::wstring::npos) {
+    return false;
+  }
+
+  if (firstColon != 1) {
+    return true;
+  }
+
+  return value.find(L':', firstColon + 1) != std::wstring::npos;
+}
+
+bool IsPathWithinRoot(const std::filesystem::path& candidate, const std::filesystem::path& root) {
+  std::error_code error;
+  auto normalizedCandidate = std::filesystem::absolute(candidate, error).lexically_normal().wstring();
+  if (error) {
+    return false;
+  }
+  auto normalizedRoot = std::filesystem::absolute(root, error).lexically_normal().wstring();
+  if (error) {
+    return false;
+  }
+
+  normalizedCandidate = ToLowerCopy(normalizedCandidate);
+  normalizedRoot = ToLowerCopy(normalizedRoot);
+  if (!normalizedRoot.empty() && normalizedRoot.back() != L'\\' && normalizedRoot.back() != L'/') {
+    normalizedRoot.push_back(L'\\');
+  }
+
+  return normalizedCandidate == normalizedRoot.substr(0, normalizedRoot.size() - 1) ||
+         normalizedCandidate.starts_with(normalizedRoot);
+}
+
+bool PathContainsReparsePoint(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return false;
+  }
+
+  std::error_code error;
+  auto current = std::filesystem::absolute(path, error).lexically_normal();
+  if (error) {
+    return false;
+  }
+
+  for (;;) {
+    const auto attributes = GetFileAttributesW(current.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      return true;
+    }
+
+    if (!current.has_parent_path() || current == current.root_path()) {
+      break;
+    }
+
+    const auto parent = current.parent_path();
+    if (parent == current) {
+      break;
+    }
+
+    current = parent;
+  }
+
+  return false;
+}
+
+bool IsRestoreEligibleStatus(const std::wstring& status) {
+  const auto lowerStatus = ToLowerCopy(status);
+  return lowerStatus.starts_with(L"quarantined");
+}
+
+std::optional<std::wstring> ValidateRestoreDestination(const std::filesystem::path& originalPath) {
+  if (originalPath.empty()) {
+    return L"Restore target path is missing from quarantine metadata.";
+  }
+
+  if (!originalPath.is_absolute()) {
+    return L"Restore target path must be absolute.";
+  }
+
+  if (IsAlternateDataStreamPath(originalPath)) {
+    return L"Restore target path contains an alternate data stream and is blocked by policy.";
+  }
+
+  if (PathContainsReparsePoint(originalPath.parent_path())) {
+    return L"Restore target path traverses a reparse point and is blocked by policy.";
+  }
+
+  const auto allowSystemRestore =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ALLOW_SYSTEM_RESTORE"), false);
+  if (!allowSystemRestore) {
+    const auto windowsRoot = ReadEnvironmentVariable(L"WINDIR");
+    const auto programFiles = ReadEnvironmentVariable(L"ProgramFiles");
+    const auto programFilesX86 = ReadEnvironmentVariable(L"ProgramFiles(x86)");
+    const auto target = std::filesystem::path(originalPath);
+
+    if ((!windowsRoot.empty() && IsPathWithinRoot(target, windowsRoot)) ||
+        (!programFiles.empty() && IsPathWithinRoot(target, programFiles)) ||
+        (!programFilesX86.empty() && IsPathWithinRoot(target, programFilesX86))) {
+      return L"Restore target path is inside a protected system location and requires explicit override.";
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::filesystem::path BuildAlternateRestoreTarget(const std::filesystem::path& originalPath) {
+  const auto fileName = originalPath.filename().wstring();
+  const auto stem = originalPath.stem().wstring();
+  const auto extension = originalPath.extension().wstring();
+  const auto suffix = stem.empty() ? fileName : stem;
+  return originalPath.parent_path() /
+         (suffix + L".fenrir-restored-" + GenerateGuidString() + (extension.empty() ? L"" : extension));
+}
+
+bool SecureDeleteRegularFile(const std::filesystem::path& path, const int passes) {
+  if (passes <= 0) {
+    return true;
+  }
+
+  std::error_code error;
+  if (!std::filesystem::exists(path, error) || error || !std::filesystem::is_regular_file(path, error)) {
+    return true;
+  }
+
+  const auto fileHandle = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (fileHandle == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  LARGE_INTEGER size{};
+  if (GetFileSizeEx(fileHandle, &size) == FALSE || size.QuadPart < 0) {
+    CloseHandle(fileHandle);
+    return false;
+  }
+
+  std::vector<char> zeroBuffer(64 * 1024, 0);
+  for (int pass = 0; pass < passes; ++pass) {
+    LARGE_INTEGER seek{};
+    if (SetFilePointerEx(fileHandle, seek, nullptr, FILE_BEGIN) == FALSE) {
+      CloseHandle(fileHandle);
+      return false;
+    }
+
+    auto remaining = static_cast<std::uint64_t>(size.QuadPart);
+    while (remaining > 0) {
+      const auto toWrite = static_cast<DWORD>(std::min<std::uint64_t>(remaining, zeroBuffer.size()));
+      DWORD bytesWritten = 0;
+      if (WriteFile(fileHandle, zeroBuffer.data(), toWrite, &bytesWritten, nullptr) == FALSE || bytesWritten != toWrite) {
+        CloseHandle(fileHandle);
+        return false;
+      }
+      remaining -= bytesWritten;
+    }
+    FlushFileBuffers(fileHandle);
+  }
+
+  CloseHandle(fileHandle);
+  return true;
 }
 
 bool ScheduleDeleteOnReboot(const std::filesystem::path& path) {
@@ -474,11 +672,25 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
 
   try {
     auto entry = LoadEntry(recordId);
+
+    if (!IsRestoreEligibleStatus(entry.localStatus)) {
+      throw std::runtime_error("Restore is only allowed for quarantined artifacts that have not already been restored or deleted");
+    }
+
+    if (const auto destinationValidation = ValidateRestoreDestination(entry.originalPath); destinationValidation.has_value()) {
+      throw std::runtime_error(WideToUtf8(*destinationValidation));
+    }
+
+    std::error_code existsError;
+    if (!std::filesystem::exists(entry.quarantinedPath, existsError) || existsError) {
+      throw std::runtime_error("Quarantined artifact content is missing and cannot be restored");
+    }
+
     result.originalPath = entry.originalPath;
     result.quarantinedPath = entry.quarantinedPath;
 
     auto restorePolicy = CreateDefaultPolicySnapshot();
-    restorePolicy.cloudLookupEnabled = false;
+    restorePolicy.cloudLookupEnabled = true;
     const auto finding = ScanFile(entry.quarantinedPath, restorePolicy);
     if (finding.has_value() &&
         (finding->verdict.disposition == VerdictDisposition::Block ||
@@ -486,12 +698,17 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
       throw std::runtime_error("Restore blocked because the quarantined artifact still scores as malicious");
     }
 
-    std::filesystem::create_directories(entry.originalPath.parent_path());
+    auto restoreTargetPath = entry.originalPath;
+    if (std::filesystem::exists(restoreTargetPath, existsError) && !existsError) {
+      restoreTargetPath = BuildAlternateRestoreTarget(restoreTargetPath);
+    }
+
+    std::filesystem::create_directories(restoreTargetPath.parent_path());
     std::error_code error;
-    std::filesystem::rename(entry.quarantinedPath, entry.originalPath, error);
+    std::filesystem::rename(entry.quarantinedPath, restoreTargetPath, error);
     if (error) {
       error.clear();
-      std::filesystem::copy_file(entry.quarantinedPath, entry.originalPath,
+      std::filesystem::copy_file(entry.quarantinedPath, restoreTargetPath,
                                  std::filesystem::copy_options::overwrite_existing, error);
       if (error) {
         throw std::runtime_error("Unable to restore the quarantined file");
@@ -504,7 +721,27 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
       }
     }
 
-    entry.localStatus = L"restored";
+    const auto restoredFinding = ScanFile(restoreTargetPath, restorePolicy);
+    if (restoredFinding.has_value() &&
+        (restoredFinding->verdict.disposition == VerdictDisposition::Block ||
+         restoredFinding->verdict.disposition == VerdictDisposition::Quarantine)) {
+      std::error_code rollbackError;
+      std::filesystem::rename(restoreTargetPath, entry.quarantinedPath, rollbackError);
+      if (rollbackError) {
+        rollbackError.clear();
+        std::filesystem::copy_file(restoreTargetPath, entry.quarantinedPath,
+                                   std::filesystem::copy_options::overwrite_existing, rollbackError);
+        if (!rollbackError) {
+          rollbackError.clear();
+          std::filesystem::remove(restoreTargetPath, rollbackError);
+        }
+      }
+
+      throw std::runtime_error("Restore blocked after mandatory post-restore rescan detected malicious content");
+    }
+
+    entry.originalPath = restoreTargetPath;
+    entry.localStatus = L"restored-verified";
     WriteMetadata(rootPath_, entry);
     RuntimeDatabase(databasePath_).UpsertQuarantineRecord(QuarantineIndexRecord{
         .recordId = entry.recordId,
@@ -516,9 +753,11 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
         .techniqueId = entry.techniqueId,
         .localStatus = entry.localStatus});
     result.success = true;
+    result.originalPath = restoreTargetPath;
     result.quarantinedPath = entry.quarantinedPath;
     AppendQuarantineJournalEntry(rootPath_, L"restore", entry.recordId, entry.originalPath, entry.quarantinedPath,
-                                 entry.localStatus, true, L"Fenrir restored the quarantined artifact.");
+                                 entry.localStatus, true,
+                                 L"Fenrir restored the quarantined artifact after mandatory pre- and post-restore scanning.");
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());
@@ -541,14 +780,29 @@ QuarantineActionResult QuarantineStore::DeleteRecord(const std::wstring& recordI
     result.originalPath = entry.originalPath;
     result.quarantinedPath = entry.quarantinedPath;
 
+    const auto secureDeleteEnabled =
+        ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_SECURE_DELETE_QUARANTINE"), true);
+    const auto secureDeletePasses =
+        ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_SECURE_DELETE_PASSES"), 1);
+
+    if (secureDeleteEnabled && !entry.quarantinedPath.empty() &&
+        !SecureDeleteRegularFile(entry.quarantinedPath, secureDeletePasses)) {
+      throw std::runtime_error("Unable to securely overwrite quarantined content before deletion");
+    }
+
     std::error_code error;
     std::filesystem::remove(entry.quarantinedPath, error);
     if (error) {
-      throw std::runtime_error("Unable to delete the quarantined file");
+      if (!entry.quarantinedPath.empty() && ScheduleDeleteOnReboot(entry.quarantinedPath)) {
+        entry.localStatus = L"deleted-pending-reboot";
+      } else {
+        throw std::runtime_error("Unable to delete the quarantined file");
+      }
+    } else {
+      entry.localStatus = L"deleted";
+      entry.quarantinedPath.clear();
     }
 
-    entry.localStatus = L"deleted";
-    entry.quarantinedPath.clear();
     WriteMetadata(rootPath_, entry);
     RuntimeDatabase(databasePath_).UpsertQuarantineRecord(QuarantineIndexRecord{
         .recordId = entry.recordId,
@@ -560,9 +814,12 @@ QuarantineActionResult QuarantineStore::DeleteRecord(const std::wstring& recordI
         .techniqueId = entry.techniqueId,
         .localStatus = entry.localStatus});
     result.success = true;
-    result.quarantinedPath = std::filesystem::path();
+    result.quarantinedPath = entry.quarantinedPath;
     AppendQuarantineJournalEntry(rootPath_, L"delete", entry.recordId, entry.originalPath, result.quarantinedPath,
-                                 entry.localStatus, true, L"Fenrir deleted the quarantined artifact record.");
+                   entry.localStatus, true,
+                   secureDeleteEnabled
+                     ? L"Fenrir securely deleted the quarantined artifact record."
+                     : L"Fenrir deleted the quarantined artifact record.");
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());

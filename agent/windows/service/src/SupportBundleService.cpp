@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cwctype>
 #include <fstream>
 #include <system_error>
 #include <vector>
@@ -18,6 +19,94 @@ namespace {
 constexpr int kSupportBundleRetentionDays = 30;
 constexpr int kEvidenceRetentionDays = 30;
 constexpr int kUpdateArtifactRetentionDays = 30;
+constexpr int kQuarantineRetentionDays = 60;
+constexpr int kJournalRetentionDays = 30;
+
+struct StorageGovernancePolicy {
+  int supportRetentionDays{kSupportBundleRetentionDays};
+  int evidenceRetentionDays{kEvidenceRetentionDays};
+  int updateRetentionDays{kUpdateArtifactRetentionDays};
+  int quarantineRetentionDays{kQuarantineRetentionDays};
+  int journalRetentionDays{kJournalRetentionDays};
+  std::uintmax_t supportQuotaBytes{1024ull * 1024ull * 1024ull};
+  std::uintmax_t evidenceQuotaBytes{1024ull * 1024ull * 1024ull};
+  std::uintmax_t updateQuotaBytes{1024ull * 1024ull * 2048ull};
+  std::uintmax_t quarantineQuotaBytes{1024ull * 1024ull * 2048ull};
+  std::uintmax_t journalQuotaBytes{1024ull * 1024ull * 512ull};
+  std::uintmax_t lowDiskBytes{1024ull * 1024ull * 2048ull};
+  bool secureDelete{false};
+  int secureDeletePasses{1};
+  bool aggressiveOnLowDisk{true};
+};
+
+int ParsePositiveInt(const std::wstring& rawValue, const int fallback) {
+  if (rawValue.empty()) {
+    return fallback;
+  }
+
+  try {
+    return std::max(std::stoi(rawValue), 1);
+  } catch (...) {
+    return fallback;
+  }
+}
+
+bool ParseBooleanValue(const std::wstring& rawValue, const bool fallback) {
+  if (rawValue.empty()) {
+    return fallback;
+  }
+
+  auto value = rawValue;
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  if (value == L"1" || value == L"true" || value == L"yes" || value == L"on") {
+    return true;
+  }
+  if (value == L"0" || value == L"false" || value == L"no" || value == L"off") {
+    return false;
+  }
+
+  return fallback;
+}
+
+std::uintmax_t MegabytesToBytes(const int megabytes) {
+  return static_cast<std::uintmax_t>(std::max(megabytes, 1)) * 1024ull * 1024ull;
+}
+
+StorageGovernancePolicy LoadStorageGovernancePolicy() {
+  StorageGovernancePolicy policy{};
+  policy.supportRetentionDays =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_SUPPORT_RETENTION_DAYS"), policy.supportRetentionDays);
+  policy.evidenceRetentionDays =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_EVIDENCE_RETENTION_DAYS"), policy.evidenceRetentionDays);
+  policy.updateRetentionDays =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_UPDATE_RETENTION_DAYS"), policy.updateRetentionDays);
+  policy.quarantineRetentionDays =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_QUARANTINE_RETENTION_DAYS"), policy.quarantineRetentionDays);
+  policy.journalRetentionDays =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_JOURNAL_RETENTION_DAYS"), policy.journalRetentionDays);
+
+  policy.supportQuotaBytes = MegabytesToBytes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_QUOTA_SUPPORT_MB"), 1024));
+  policy.evidenceQuotaBytes = MegabytesToBytes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_QUOTA_EVIDENCE_MB"), 1024));
+  policy.updateQuotaBytes = MegabytesToBytes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_QUOTA_UPDATE_MB"), 2048));
+  policy.quarantineQuotaBytes = MegabytesToBytes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_QUOTA_QUARANTINE_MB"), 2048));
+  policy.journalQuotaBytes = MegabytesToBytes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_QUOTA_JOURNAL_MB"), 512));
+  policy.lowDiskBytes = MegabytesToBytes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_LOW_DISK_MB"), 2048));
+
+  policy.secureDelete =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_SECURE_DELETE"), policy.secureDelete);
+  policy.secureDeletePasses =
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_SECURE_DELETE_PASSES"), policy.secureDeletePasses);
+  policy.aggressiveOnLowDisk =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_AGGRESSIVE_LOW_DISK"), policy.aggressiveOnLowDisk);
+  return policy;
+}
 
 std::wstring SanitizeFileNameComponent(std::wstring value) {
   for (auto& ch : value) {
@@ -66,6 +155,103 @@ bool CopyIfExists(const std::filesystem::path& source, const std::filesystem::pa
   error.clear();
   return std::filesystem::copy_file(source, destination, std::filesystem::copy_options::overwrite_existing, error) &&
          !error;
+}
+
+std::uintmax_t ComputePathSizeBytes(const std::filesystem::path& path) {
+  std::error_code error;
+  if (!std::filesystem::exists(path, error) || error) {
+    return 0;
+  }
+
+  if (std::filesystem::is_regular_file(path, error) && !error) {
+    const auto fileSize = std::filesystem::file_size(path, error);
+    return error ? 0 : fileSize;
+  }
+
+  std::uintmax_t total = 0;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(path, error)) {
+    if (error) {
+      error.clear();
+      continue;
+    }
+    if (entry.is_regular_file(error) && !error) {
+      const auto fileSize = entry.file_size(error);
+      if (!error) {
+        total += fileSize;
+      } else {
+        error.clear();
+      }
+    }
+  }
+
+  return total;
+}
+
+bool SecureDeleteFile(const std::filesystem::path& path, const int passes) {
+  if (passes <= 0) {
+    return true;
+  }
+
+  const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  LARGE_INTEGER size{};
+  if (GetFileSizeEx(file, &size) == FALSE || size.QuadPart < 0) {
+    CloseHandle(file);
+    return false;
+  }
+
+  std::vector<char> zeroBuffer(64 * 1024, 0);
+  for (int pass = 0; pass < passes; ++pass) {
+    LARGE_INTEGER seek{};
+    if (SetFilePointerEx(file, seek, nullptr, FILE_BEGIN) == FALSE) {
+      CloseHandle(file);
+      return false;
+    }
+
+    auto remaining = static_cast<std::uint64_t>(size.QuadPart);
+    while (remaining > 0) {
+      const auto toWrite = static_cast<DWORD>(std::min<std::uint64_t>(remaining, zeroBuffer.size()));
+      DWORD written = 0;
+      if (WriteFile(file, zeroBuffer.data(), toWrite, &written, nullptr) == FALSE || written != toWrite) {
+        CloseHandle(file);
+        return false;
+      }
+      remaining -= written;
+    }
+    FlushFileBuffers(file);
+  }
+
+  CloseHandle(file);
+  return true;
+}
+
+void SecureDeleteTree(const std::filesystem::path& path, const int passes) {
+  std::error_code error;
+  if (!std::filesystem::exists(path, error) || error) {
+    return;
+  }
+
+  if (std::filesystem::is_regular_file(path, error) && !error) {
+    SecureDeleteFile(path, passes);
+    return;
+  }
+
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(path, error)) {
+    if (error) {
+      error.clear();
+      continue;
+    }
+
+    if (entry.is_regular_file(error) && !error) {
+      SecureDeleteFile(entry.path(), passes);
+    } else {
+      error.clear();
+    }
+  }
 }
 
 std::wstring BuildSupportBundleManifest(const AgentConfig& config, const AgentState& state,
@@ -179,13 +365,18 @@ bool IsOlderThanDays(const std::filesystem::path& path, const int days) {
   return age > maxAge;
 }
 
-void ReclaimPath(const std::filesystem::path& path, std::size_t* deletedEntries, std::uintmax_t* reclaimedBytes) {
+void ReclaimPath(const std::filesystem::path& path, std::size_t* deletedEntries, std::uintmax_t* reclaimedBytes,
+                 const bool secureDelete, const int secureDeletePasses) {
   std::error_code error;
   if (!std::filesystem::exists(path, error) || error) {
     return;
   }
 
-  const auto size = std::filesystem::is_regular_file(path, error) ? std::filesystem::file_size(path, error) : 0;
+  const auto size = ComputePathSizeBytes(path);
+  if (secureDelete) {
+    SecureDeleteTree(path, secureDeletePasses);
+  }
+
   error.clear();
   const auto removed = std::filesystem::remove_all(path, error);
   if (!error && removed > 0) {
@@ -195,7 +386,7 @@ void ReclaimPath(const std::filesystem::path& path, std::size_t* deletedEntries,
 }
 
 void PruneDirectory(const std::filesystem::path& root, const int retentionDays, std::size_t* deletedEntries,
-                    std::uintmax_t* reclaimedBytes) {
+                    std::uintmax_t* reclaimedBytes, const bool secureDelete, const int secureDeletePasses) {
   std::error_code error;
   if (!std::filesystem::exists(root, error) || error) {
     return;
@@ -208,7 +399,66 @@ void PruneDirectory(const std::filesystem::path& root, const int retentionDays, 
     }
 
     if (IsOlderThanDays(entry.path(), retentionDays)) {
-      ReclaimPath(entry.path(), deletedEntries, reclaimedBytes);
+      ReclaimPath(entry.path(), deletedEntries, reclaimedBytes, secureDelete, secureDeletePasses);
+    }
+  }
+}
+
+void ApplyDirectoryQuota(const std::filesystem::path& root, const std::uintmax_t maxBytes,
+                         std::size_t* deletedEntries, std::uintmax_t* reclaimedBytes, const bool secureDelete,
+                         const int secureDeletePasses) {
+  if (maxBytes == 0) {
+    return;
+  }
+
+  std::error_code error;
+  if (!std::filesystem::exists(root, error) || error) {
+    return;
+  }
+
+  struct EntryState {
+    std::filesystem::path path;
+    std::filesystem::file_time_type lastWrite;
+    std::uintmax_t sizeBytes;
+  };
+
+  std::vector<EntryState> entries;
+  std::uintmax_t totalBytes = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
+    if (error) {
+      error.clear();
+      continue;
+    }
+
+    const auto sizeBytes = ComputePathSizeBytes(entry.path());
+    const auto lastWrite = std::filesystem::last_write_time(entry.path(), error);
+    if (error) {
+      error.clear();
+      continue;
+    }
+
+    entries.push_back(EntryState{.path = entry.path(), .lastWrite = lastWrite, .sizeBytes = sizeBytes});
+    totalBytes += sizeBytes;
+  }
+
+  if (totalBytes <= maxBytes) {
+    return;
+  }
+
+  std::sort(entries.begin(), entries.end(),
+            [](const EntryState& left, const EntryState& right) { return left.lastWrite < right.lastWrite; });
+
+  for (const auto& entry : entries) {
+    if (totalBytes <= maxBytes) {
+      break;
+    }
+
+    const auto sizeBefore = entry.sizeBytes;
+    ReclaimPath(entry.path, deletedEntries, reclaimedBytes, secureDelete, secureDeletePasses);
+    if (totalBytes > sizeBefore) {
+      totalBytes -= sizeBefore;
+    } else {
+      totalBytes = 0;
     }
   }
 }
@@ -270,17 +520,67 @@ StorageMaintenanceResult RunStorageMaintenance(const AgentConfig& config) {
   StorageMaintenanceResult result{};
 
   try {
-    PruneDirectory(config.journalRootPath / L"support", kSupportBundleRetentionDays, &result.deletedEntries,
-                   &result.reclaimedBytes);
-    PruneDirectory(config.updateRootPath / L"staged", kUpdateArtifactRetentionDays, &result.deletedEntries,
-                   &result.reclaimedBytes);
-    PruneDirectory(config.updateRootPath / L"backups", kUpdateArtifactRetentionDays, &result.deletedEntries,
-                   &result.reclaimedBytes);
-    PruneDirectory(config.evidenceRootPath, kEvidenceRetentionDays, &result.deletedEntries, &result.reclaimedBytes);
+    auto policy = LoadStorageGovernancePolicy();
+
+    PruneDirectory(config.journalRootPath / L"support", policy.supportRetentionDays, &result.deletedEntries,
+                   &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    PruneDirectory(config.updateRootPath / L"staged", policy.updateRetentionDays, &result.deletedEntries,
+                   &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    PruneDirectory(config.updateRootPath / L"backups", policy.updateRetentionDays, &result.deletedEntries,
+                   &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    PruneDirectory(config.evidenceRootPath, policy.evidenceRetentionDays, &result.deletedEntries, &result.reclaimedBytes,
+                   policy.secureDelete, policy.secureDeletePasses);
+    PruneDirectory(config.quarantineRootPath / L"files", policy.quarantineRetentionDays, &result.deletedEntries,
+                   &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    PruneDirectory(config.quarantineRootPath / L"records", policy.quarantineRetentionDays, &result.deletedEntries,
+                   &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    PruneDirectory(config.journalRootPath, policy.journalRetentionDays, &result.deletedEntries, &result.reclaimedBytes,
+                   policy.secureDelete, policy.secureDeletePasses);
+
+    ApplyDirectoryQuota(config.journalRootPath / L"support", policy.supportQuotaBytes, &result.deletedEntries,
+                        &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    ApplyDirectoryQuota(config.evidenceRootPath, policy.evidenceQuotaBytes, &result.deletedEntries,
+                        &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    ApplyDirectoryQuota(config.updateRootPath, policy.updateQuotaBytes, &result.deletedEntries, &result.reclaimedBytes,
+                        policy.secureDelete, policy.secureDeletePasses);
+    ApplyDirectoryQuota(config.quarantineRootPath, policy.quarantineQuotaBytes, &result.deletedEntries,
+                        &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    ApplyDirectoryQuota(config.journalRootPath, policy.journalQuotaBytes, &result.deletedEntries,
+                        &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+
+    auto runtimeRoot = config.runtimeDatabasePath.parent_path();
+    if (runtimeRoot.empty()) {
+      runtimeRoot = config.runtimeDatabasePath;
+    }
+
+    ULARGE_INTEGER freeBytesAvailable{};
+    ULARGE_INTEGER totalBytes{};
+    ULARGE_INTEGER totalFreeBytes{};
+    if (policy.aggressiveOnLowDisk && !runtimeRoot.empty() &&
+        GetDiskFreeSpaceExW(runtimeRoot.c_str(), &freeBytesAvailable, &totalBytes, &totalFreeBytes) != FALSE &&
+        freeBytesAvailable.QuadPart < policy.lowDiskBytes) {
+      policy.supportQuotaBytes = std::max<std::uintmax_t>(policy.supportQuotaBytes / 2, 64ull * 1024ull * 1024ull);
+      policy.evidenceQuotaBytes = std::max<std::uintmax_t>(policy.evidenceQuotaBytes / 2, 128ull * 1024ull * 1024ull);
+      policy.updateQuotaBytes = std::max<std::uintmax_t>(policy.updateQuotaBytes / 2, 256ull * 1024ull * 1024ull);
+      policy.quarantineQuotaBytes =
+          std::max<std::uintmax_t>(policy.quarantineQuotaBytes / 2, 256ull * 1024ull * 1024ull);
+      policy.journalQuotaBytes = std::max<std::uintmax_t>(policy.journalQuotaBytes / 2, 64ull * 1024ull * 1024ull);
+
+      ApplyDirectoryQuota(config.journalRootPath / L"support", policy.supportQuotaBytes, &result.deletedEntries,
+                          &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+      ApplyDirectoryQuota(config.evidenceRootPath, policy.evidenceQuotaBytes, &result.deletedEntries,
+                          &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+      ApplyDirectoryQuota(config.updateRootPath, policy.updateQuotaBytes, &result.deletedEntries,
+                          &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+      ApplyDirectoryQuota(config.quarantineRootPath, policy.quarantineQuotaBytes, &result.deletedEntries,
+                          &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+      ApplyDirectoryQuota(config.journalRootPath, policy.journalQuotaBytes, &result.deletedEntries,
+                          &result.reclaimedBytes, policy.secureDelete, policy.secureDeletePasses);
+    }
 
     result.success = true;
     result.summary = L"Deleted " + std::to_wstring(result.deletedEntries) + L" expired maintenance entries and reclaimed " +
-                     std::to_wstring(result.reclaimedBytes) + L" byte(s).";
+                     std::to_wstring(result.reclaimedBytes) + L" byte(s) under retention/quota policy.";
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());

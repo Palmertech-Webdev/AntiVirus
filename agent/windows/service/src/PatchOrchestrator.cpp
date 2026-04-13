@@ -32,6 +32,16 @@ struct SoftwareProviderResolution {
   bool manualOnly{false};
 };
 
+struct PatchDebtSignals {
+  int urgencyScore{0};
+  int debtScore{0};
+  std::wstring debtTier;
+  bool likelyKnownExploited{false};
+  bool internetFacingLikely{false};
+};
+
+constexpr std::size_t kMaxSoftwareUpdatesPerCycle = 24;
+
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
@@ -294,6 +304,154 @@ bool IsHighRiskSoftware(const InstalledSoftwareInventoryItem& item) {
 
   return std::any_of(patterns.begin(), patterns.end(),
                      [&lowerName](const auto& pattern) { return lowerName.find(pattern) != std::wstring::npos; });
+}
+
+int ClampPatchScore(const int value) {
+  return std::max(0, std::min(100, value));
+}
+
+std::wstring DebtTierFromScore(const int score) {
+  if (score >= 85) {
+    return L"critical";
+  }
+  if (score >= 65) {
+    return L"high";
+  }
+  if (score >= 40) {
+    return L"medium";
+  }
+  if (score >= 20) {
+    return L"low";
+  }
+  return L"minimal";
+}
+
+bool ContainsAnyToken(const std::wstring& value, const std::vector<std::wstring>& tokens) {
+  const auto lower = ToLowerCopy(value);
+  return std::any_of(tokens.begin(), tokens.end(),
+                     [&lower](const std::wstring& token) { return lower.find(token) != std::wstring::npos; });
+}
+
+PatchDebtSignals ComputeWindowsPatchDebtSignals(const WindowsUpdateRecord& record) {
+  const auto lowerTitle = ToLowerCopy(record.title);
+  const auto lowerSeverity = ToLowerCopy(record.severity);
+  const auto lowerCategories = ToLowerCopy(record.categories);
+  const auto lowerClassification = ToLowerCopy(record.classification);
+
+  int urgency = 15;
+  if (lowerClassification == L"security") {
+    urgency += 30;
+  } else if (lowerClassification == L"critical") {
+    urgency += 42;
+  } else if (lowerClassification == L"quality") {
+    urgency += 18;
+  }
+
+  if (lowerSeverity.find(L"critical") != std::wstring::npos) {
+    urgency += 30;
+  } else if (lowerSeverity.find(L"important") != std::wstring::npos ||
+             lowerSeverity.find(L"high") != std::wstring::npos) {
+    urgency += 18;
+  }
+
+  const auto cveReferenced = lowerTitle.find(L"cve-") != std::wstring::npos ||
+                             lowerCategories.find(L"cve-") != std::wstring::npos;
+  const auto likelyExploited = cveReferenced || lowerTitle.find(L"zero-day") != std::wstring::npos ||
+                               lowerTitle.find(L"actively exploited") != std::wstring::npos ||
+                               lowerTitle.find(L"out-of-band") != std::wstring::npos;
+  if (likelyExploited) {
+    urgency += 22;
+  }
+
+  if (record.mandatory) {
+    urgency += 8;
+  }
+  if (record.rebootRequired) {
+    urgency += 6;
+  }
+  if (record.driver || record.optional) {
+    urgency -= 18;
+  }
+  if (record.featureUpdate) {
+    urgency -= 15;
+  }
+
+  PatchDebtSignals signals;
+  signals.urgencyScore = ClampPatchScore(urgency);
+  signals.debtScore = ClampPatchScore(signals.urgencyScore + (record.downloaded ? 5 : 0));
+  signals.debtTier = DebtTierFromScore(signals.debtScore);
+  signals.likelyKnownExploited = likelyExploited;
+  return signals;
+}
+
+PatchDebtSignals ComputeSoftwarePatchDebtSignals(const SoftwarePatchRecord& record) {
+  int urgency = 8;
+  const auto lowerName = ToLowerCopy(record.displayName);
+  const auto lowerState = ToLowerCopy(record.updateState);
+  const auto lowerProvider = ToLowerCopy(record.provider);
+
+  const std::vector<std::wstring> internetFacingTokens = {L"chrome", L"edge", L"firefox", L"zoom", L"teams", L"vpn",
+                                                          L"remote", L"browser"};
+  const auto internetFacing = ContainsAnyToken(lowerName, internetFacingTokens);
+
+  if (record.highRisk) {
+    urgency += 32;
+  }
+
+  if (lowerState == L"available") {
+    urgency += 28;
+  } else if (lowerState == L"provider_ready") {
+    urgency += 20;
+  } else if (lowerState == L"manual") {
+    urgency -= 8;
+  }
+
+  if (lowerProvider == L"native-updater" || lowerProvider == L"winget") {
+    urgency += 10;
+  } else if (lowerProvider == L"recipe") {
+    urgency += 5;
+  }
+
+  if (record.manualOnly) {
+    urgency -= 18;
+  }
+  if (record.userInteractionRequired) {
+    urgency -= 10;
+  }
+  if (record.blocked) {
+    urgency = 0;
+  }
+
+  const auto likelyExploited = internetFacing && (record.highRisk || lowerState == L"available");
+  if (likelyExploited) {
+    urgency += 14;
+  }
+
+  PatchDebtSignals signals;
+  signals.urgencyScore = ClampPatchScore(urgency);
+  signals.debtScore = ClampPatchScore(signals.urgencyScore + (record.rebootRequired ? 4 : 0));
+  signals.debtTier = DebtTierFromScore(signals.debtScore);
+  signals.likelyKnownExploited = likelyExploited;
+  signals.internetFacingLikely = internetFacing;
+  return signals;
+}
+
+std::wstring BuildWindowsUpdateDetailJson(const bool canRequestUserInput, const PatchDebtSignals& signals) {
+  return std::wstring(L"{\"canRequestUserInput\":") + (canRequestUserInput ? L"true" : L"false") +
+         L",\"urgencyScore\":" + std::to_wstring(signals.urgencyScore) + L",\"debtScore\":" +
+         std::to_wstring(signals.debtScore) + L",\"debtTier\":\"" +
+         Utf8ToWide(EscapeJsonString(signals.debtTier)) + L"\",\"likelyKnownExploited\":" +
+         (signals.likelyKnownExploited ? L"true" : L"false") + L"}";
+}
+
+std::wstring BuildSoftwarePatchDetailJson(const SoftwarePatchRecord& record, const PatchDebtSignals& signals) {
+  return std::wstring(L"{\"urgencyScore\":") + std::to_wstring(signals.urgencyScore) + L",\"debtScore\":" +
+         std::to_wstring(signals.debtScore) + L",\"debtTier\":\"" +
+         Utf8ToWide(EscapeJsonString(signals.debtTier)) + L"\",\"likelyKnownExploited\":" +
+         (signals.likelyKnownExploited ? L"true" : L"false") + L",\"internetFacingLikely\":" +
+         (signals.internetFacingLikely ? L"true" : L"false") + L",\"provider\":\"" +
+         Utf8ToWide(EscapeJsonString(record.provider)) + L"\",\"updateState\":\"" +
+         Utf8ToWide(EscapeJsonString(record.updateState)) + L"\"}";
 }
 
 std::optional<PackageRecipeRecord> MatchRecipe(const InstalledSoftwareInventoryItem& item,
@@ -665,7 +823,7 @@ std::vector<SoftwarePatchRecord> BuildSoftwarePatchInventory(const DeviceInvento
       updateState = L"provider_ready";
     }
 
-    records.push_back(SoftwarePatchRecord{
+    auto record = SoftwarePatchRecord{
         .softwareId = item.softwareId,
         .displayName = item.displayName,
         .displayVersion = item.displayVersion,
@@ -685,7 +843,10 @@ std::vector<SoftwarePatchRecord> BuildSoftwarePatchInventory(const DeviceInvento
         .blocked = item.blocked,
         .supported = resolution.supported,
         .manualOnly = resolution.manualOnly,
-        .highRisk = IsHighRiskSoftware(item)});
+        .highRisk = IsHighRiskSoftware(item)};
+      const auto debtSignals = ComputeSoftwarePatchDebtSignals(record);
+      record.detailJson = BuildSoftwarePatchDetailJson(record, debtSignals);
+      records.push_back(std::move(record));
   }
 
   return records;
@@ -717,7 +878,7 @@ std::vector<WindowsUpdateRecord> DiscoverWindowsUpdates(const AgentConfig& confi
       const auto driver = parts[5] == L"driver";
       const auto optional = parts[11] == L"1";
       const auto classification = ClassifyWindowsUpdate(parts[3], parts[5], driver, optional);
-      updates.push_back(WindowsUpdateRecord{
+      auto record = WindowsUpdateRecord{
           .updateId = parts[1],
           .revision = parts[2],
           .title = parts[3],
@@ -729,7 +890,6 @@ std::vector<WindowsUpdateRecord> DiscoverWindowsUpdates(const AgentConfig& confi
           .deploymentAction = parts[7],
           .discoveredAt = CurrentUtcTimestamp(),
           .status = L"available",
-          .detailJson = std::wstring(L"{\"canRequestUserInput\":") + (parts[12] == L"1" ? L"true" : L"false") + L"}",
           .hidden = parts[9] == L"1",
           .downloaded = parts[8] == L"1",
           .mandatory = parts[10] == L"1",
@@ -737,7 +897,10 @@ std::vector<WindowsUpdateRecord> DiscoverWindowsUpdates(const AgentConfig& confi
           .rebootRequired = parts[7] != L"0",
           .driver = driver,
           .featureUpdate = classification == L"feature",
-          .optional = optional});
+            .optional = optional};
+          const auto debtSignals = ComputeWindowsPatchDebtSignals(record);
+          record.detailJson = BuildWindowsUpdateDetailJson(parts[12] == L"1", debtSignals);
+          updates.push_back(std::move(record));
       continue;
     }
 
@@ -1068,6 +1231,14 @@ PatchExecutionResult PatchOrchestrator::RunPatchCycle() const {
 
   const auto windowsResult = InstallWindowsUpdates(true);
   const auto software = database.ListSoftwarePatchRecords(500);
+  struct ScheduledSoftwareUpdate {
+    std::wstring softwareId;
+    int priorityScore{0};
+  };
+
+  std::vector<ScheduledSoftwareUpdate> scheduledUpdates;
+  scheduledUpdates.reserve(software.size());
+
   for (const auto& record : software) {
     if (!record.supported || record.manualOnly || record.blocked) {
       continue;
@@ -1078,7 +1249,32 @@ PatchExecutionResult PatchOrchestrator::RunPatchCycle() const {
     if (record.updateState != L"available" && !policy.autoUpdateAllSupportedApps) {
       continue;
     }
-    UpdateSoftware(record.softwareId, false);
+
+    auto priorityScore = ComputeSoftwarePatchDebtSignals(record).urgencyScore;
+    if (!record.failureCode.empty()) {
+      priorityScore = std::max(priorityScore - 8, 0);
+    }
+
+    scheduledUpdates.push_back(ScheduledSoftwareUpdate{
+        .softwareId = record.softwareId,
+        .priorityScore = priorityScore});
+  }
+
+  std::sort(scheduledUpdates.begin(), scheduledUpdates.end(), [](const ScheduledSoftwareUpdate& left,
+                                                                 const ScheduledSoftwareUpdate& right) {
+    if (left.priorityScore == right.priorityScore) {
+      return left.softwareId < right.softwareId;
+    }
+    return left.priorityScore > right.priorityScore;
+  });
+
+  std::size_t appliedCount = 0;
+  for (const auto& scheduled : scheduledUpdates) {
+    if (appliedCount >= kMaxSoftwareUpdatesPerCycle) {
+      break;
+    }
+    UpdateSoftware(scheduled.softwareId, false);
+    ++appliedCount;
   }
 
   RefreshPatchState();
@@ -1087,7 +1283,10 @@ PatchExecutionResult PatchOrchestrator::RunPatchCycle() const {
       .rebootRequired = windowsResult.rebootRequired,
       .action = L"cycle",
       .provider = L"fenrir",
-      .status = L"completed"};
+      .status = L"completed",
+      .detailJson = std::wstring(L"{\"scheduledSoftware\":") + std::to_wstring(scheduledUpdates.size()) +
+                    L",\"appliedSoftware\":" + std::to_wstring(appliedCount) + L",\"maxSoftwarePerCycle\":" +
+                    std::to_wstring(kMaxSoftwareUpdatesPerCycle) + L"}"};
 }
 
 void PatchOrchestrator::SavePolicy(const PatchPolicyRecord& policy) const {

@@ -110,6 +110,17 @@ Remote command additions:
 - `support.bundle.export.full`
 - `storage.maintenance.run`
 
+Local broker command additions:
+
+- `local.approval.execute`
+- `local.breakglass.enable`
+- `local.breakglass.disable`
+
+Approval request queue files:
+
+- Pending requests: `%ProgramData%\FenrirAgent\runtime\local-approval-requests.jsonl`
+- Approval ledger: `%ProgramData%\FenrirAgent\runtime\local-approval-ledger.jsonl`
+
 ## Environment Variables
 
 - `ANTIVIRUS_CONTROL_PLANE_URL`
@@ -138,6 +149,23 @@ Remote command additions:
 - `ANTIVIRUS_ISOLATION_ALLOW_REMOTE`
 - `ANTIVIRUS_ISOLATION_ALLOW_APPLICATIONS`
 - `ANTIVIRUS_SCAN_EXCLUDE_PATHS`
+- `ANTIVIRUS_ALLOW_SYSTEM_RESTORE`
+- `ANTIVIRUS_SECURE_DELETE_QUARANTINE`
+- `ANTIVIRUS_SECURE_DELETE_PASSES`
+- `ANTIVIRUS_SUPPORT_RETENTION_DAYS`
+- `ANTIVIRUS_EVIDENCE_RETENTION_DAYS`
+- `ANTIVIRUS_UPDATE_RETENTION_DAYS`
+- `ANTIVIRUS_QUARANTINE_RETENTION_DAYS`
+- `ANTIVIRUS_JOURNAL_RETENTION_DAYS`
+- `ANTIVIRUS_STORAGE_QUOTA_SUPPORT_MB`
+- `ANTIVIRUS_STORAGE_QUOTA_EVIDENCE_MB`
+- `ANTIVIRUS_STORAGE_QUOTA_UPDATE_MB`
+- `ANTIVIRUS_STORAGE_QUOTA_QUARANTINE_MB`
+- `ANTIVIRUS_STORAGE_QUOTA_JOURNAL_MB`
+- `ANTIVIRUS_STORAGE_LOW_DISK_MB`
+- `ANTIVIRUS_STORAGE_SECURE_DELETE`
+- `ANTIVIRUS_STORAGE_SECURE_DELETE_PASSES`
+- `ANTIVIRUS_STORAGE_AGGRESSIVE_LOW_DISK`
 
 The default sync interval is now 60 seconds when the agent is run in multi-iteration mode.
 

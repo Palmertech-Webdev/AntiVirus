@@ -49,6 +49,7 @@ struct LocalBrokerCommandResult {
   int statusCode{0};
   bool requestOnly{false};
   bool requiresReauth{false};
+  std::wstring approvalRequestId;
   std::wstring responseJson;
   std::wstring errorMessage;
 };
@@ -70,6 +71,9 @@ LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig& config, const
                                                 const std::wstring& payloadJson = L"{}",
                                                 const std::wstring& targetPath = L"",
                                                 const std::wstring& sessionAuth = L"");
+LocalBrokerCommandResult ExecuteQueuedLocalApproval(const AgentConfig& config, const std::wstring& approvalRequestId);
+LocalBrokerCommandResult SetBreakGlassMode(const AgentConfig& config, bool enable,
+                                           const std::wstring& reason = L"", bool queuePamRecovery = true);
 PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId);
 
 }  // namespace antivirus::agent

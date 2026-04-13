@@ -7,6 +7,8 @@
 #include <array>
 #include <chrono>
 #include <cwctype>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <regex>
@@ -62,7 +64,8 @@ bool IsSafeCommandType(const std::wstring& type) {
 
 bool RequiresSessionApproval(const std::wstring& type) {
   return type == L"quarantine.restore" || type == L"quarantine.delete" || type == L"patch.software.install" ||
-         type == L"patch.windows.install" || type == L"patch.cycle.run";
+         type == L"patch.windows.install" || type == L"patch.cycle.run" || type == L"local.approval.execute" ||
+         type == L"local.breakglass.enable" || type == L"local.breakglass.disable";
 }
 
 std::string EscapeRegex(const std::string& value) {
@@ -160,7 +163,8 @@ std::wstring EscapeJsonValue(const std::wstring& value) {
 std::wstring BuildResponseJson(const bool success, const int statusCode, const std::wstring& resultJson,
                                const std::wstring& errorMessage, const std::wstring& role = L"",
                                const std::wstring& requester = L"", const bool requestOnly = false,
-                               const bool requiresReauth = false) {
+                               const bool requiresReauth = false,
+                               const std::wstring& approvalRequestId = L"") {
   std::wstring json = L"{\"success\":";
   json += success ? L"true" : L"false";
   json += L",\"statusCode\":";
@@ -185,6 +189,11 @@ std::wstring BuildResponseJson(const bool success, const int statusCode, const s
   }
   if (requiresReauth) {
     json += L",\"requiresReauth\":true";
+  }
+  if (!approvalRequestId.empty()) {
+    json += L",\"approvalRequestId\":\"";
+    json += EscapeJsonValue(approvalRequestId);
+    json += L"\"";
   }
   json += L"}";
   return json;
@@ -211,15 +220,32 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
     return LocalAction::ExportSupportBundle;
   }
 
+  if (type == L"local.approval.execute") {
+    return LocalAction::StartServiceAction;
+  }
+
+  if (type == L"local.breakglass.enable" || type == L"local.breakglass.disable") {
+    return LocalAction::StartServiceAction;
+  }
+
   return LocalAction::ViewStatus;
 }
 
 bool IsSupportedLocalCommand(const std::wstring& type) {
-  static const std::array<const wchar_t*, 10> kSupportedTypes = {
+  static const std::array<const wchar_t*, 13> kSupportedTypes = {
       L"local.auth.session.begin",
-      L"quarantine.restore",      L"quarantine.delete",    L"patch.scan",         L"patch.software.install",
-      L"patch.windows.install",   L"patch.cycle.run",      L"support.bundle.export", L"support.bundle.export.full",
-      L"storage.maintenance.run"};
+      L"quarantine.restore",
+      L"quarantine.delete",
+      L"patch.scan",
+      L"patch.software.install",
+      L"patch.windows.install",
+      L"patch.cycle.run",
+      L"support.bundle.export",
+      L"support.bundle.export.full",
+      L"storage.maintenance.run",
+      L"local.approval.execute",
+      L"local.breakglass.enable",
+      L"local.breakglass.disable"};
 
   return std::any_of(kSupportedTypes.begin(), kSupportedTypes.end(),
                      [&type](const auto* candidate) { return type == candidate; });
@@ -336,6 +362,47 @@ HANDLE CreatePipeSecurityDescriptor() {
 
 std::wstring BuildLocalCommandId() {
   return L"local-" + CurrentUtcTimestamp() + L"-" + GenerateGuidString();
+}
+
+std::filesystem::path ResolveApprovalRequestQueuePath() {
+  const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
+  if (!programData.empty()) {
+    return std::filesystem::path(programData) / L"FenrirAgent" / L"runtime" / L"local-approval-requests.jsonl";
+  }
+
+  return std::filesystem::current_path() / L"runtime" / L"local-approval-requests.jsonl";
+}
+
+std::wstring QueueApprovalRequestRecord(const LocalPipeRequest& request, const std::wstring& requester,
+                                        const std::wstring& callerSid, const LocalActionAuthorization& authorization) {
+  const auto requestId = GenerateGuidString();
+  const auto queuePath = ResolveApprovalRequestQueuePath();
+
+  std::error_code createError;
+  std::filesystem::create_directories(queuePath.parent_path(), createError);
+  if (createError) {
+    return {};
+  }
+
+  std::ofstream output(queuePath, std::ios::binary | std::ios::app);
+  if (!output.is_open()) {
+    return {};
+  }
+
+  const std::wstring line =
+      L"{\"requestId\":\"" + requestId + L"\",\"createdAt\":\"" + CurrentUtcTimestamp() +
+      L"\",\"type\":\"" + EscapeJsonValue(request.type) + L"\",\"requester\":\"" +
+      EscapeJsonValue(requester) + L"\",\"callerSid\":\"" + EscapeJsonValue(callerSid) +
+      L"\",\"role\":\"" + EscapeJsonValue(LocalUserRoleToString(authorization.role)) +
+      L"\",\"reason\":\"" + EscapeJsonValue(authorization.reason) +
+      L"\",\"recordId\":\"" + EscapeJsonValue(request.recordId) + L"\",\"targetPath\":\"" +
+      EscapeJsonValue(request.targetPath) + L"\",\"payloadJson\":\"" + EscapeJsonValue(request.payloadJson) +
+      L"\",\"status\":\"pending\"}\n";
+  const auto utf8Line = WideToUtf8(line);
+  output.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
+  output.flush();
+
+  return requestId;
 }
 
 void PurgeExpiredSessionApprovals(std::unordered_map<std::wstring, SessionApprovalGrant>* grants) {
@@ -565,9 +632,18 @@ void LocalControlChannel::Run() {
 
     if (!authorization.allowed) {
       const auto deniedStatusCode = authorization.requestOnly ? 423 : 403;
+      std::wstring denialReason = authorization.reason;
+      std::wstring approvalRequestId;
+      if (authorization.requestOnly) {
+        approvalRequestId = QueueApprovalRequestRecord(request, requester, callerSid, authorization);
+        if (!approvalRequestId.empty()) {
+          denialReason += L" Use approval request " + approvalRequestId + L" to complete this action with an administrator.";
+        }
+      }
       WritePipeMessage(pipe,
-                       BuildResponseJson(false, deniedStatusCode, L"", authorization.reason,
-                                         LocalUserRoleToString(authorization.role), requester, authorization.requestOnly));
+                       BuildResponseJson(false, deniedStatusCode, L"", denialReason,
+                                         LocalUserRoleToString(authorization.role), requester,
+                                         authorization.requestOnly, false, approvalRequestId));
       FlushFileBuffers(pipe);
       DisconnectNamedPipe(pipe);
       {

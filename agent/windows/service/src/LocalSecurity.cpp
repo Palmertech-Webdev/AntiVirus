@@ -3,6 +3,8 @@
 #include <Windows.h>
 #include <sddl.h>
 
+#include <algorithm>
+#include <cwctype>
 #include <optional>
 #include <vector>
 
@@ -13,6 +15,55 @@ namespace {
 constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kLegacyRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
 constexpr wchar_t kOwnerSidValueName[] = L"DeviceOwnerSid";
+constexpr wchar_t kBreakGlassEnabledValueName[] = L"BreakGlassEnabled";
+constexpr wchar_t kTrustedHouseholdSidsValueName[] = L"HouseholdTrustedSids";
+constexpr wchar_t kRestrictedHouseholdSidsValueName[] = L"HouseholdRestrictedSids";
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool ParseBooleanValue(const std::wstring& rawValue, const bool fallback) {
+  if (rawValue.empty()) {
+    return fallback;
+  }
+
+  const auto lower = ToLowerCopy(rawValue);
+  if (lower == L"1" || lower == L"true" || lower == L"yes" || lower == L"on") {
+    return true;
+  }
+  if (lower == L"0" || lower == L"false" || lower == L"no" || lower == L"off") {
+    return false;
+  }
+
+  return fallback;
+}
+
+std::vector<std::wstring> SplitSidList(const std::wstring& value) {
+  std::vector<std::wstring> values;
+  std::wstring current;
+  for (const auto ch : value) {
+    if (ch == L';' || ch == L',') {
+      if (!current.empty()) {
+        values.push_back(current);
+        current.clear();
+      }
+      continue;
+    }
+    if (ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n') {
+      continue;
+    }
+    current.push_back(ch);
+  }
+
+  if (!current.empty()) {
+    values.push_back(current);
+  }
+
+  return values;
+}
 
 bool OpenEffectiveToken(const DWORD accessMask, HANDLE* token) {
   if (token == nullptr) {
@@ -108,6 +159,48 @@ std::wstring ReadDeviceOwnerSid() {
   return {};
 }
 
+std::vector<std::wstring> ReadHouseholdSidList(const wchar_t* valueName) {
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    const auto list = ReadRegistryStringFromRoot(hive, kRegistryRoot, valueName);
+    if (!list.empty()) {
+      return SplitSidList(list);
+    }
+
+    const auto legacyList = ReadRegistryStringFromRoot(hive, kLegacyRegistryRoot, valueName);
+    if (!legacyList.empty()) {
+      return SplitSidList(legacyList);
+    }
+  }
+
+  return {};
+}
+
+bool IsSidInList(const std::wstring& sid, const std::vector<std::wstring>& values) {
+  if (sid.empty()) {
+    return false;
+  }
+
+  return std::any_of(values.begin(), values.end(), [&sid](const std::wstring& candidate) {
+    return !candidate.empty() && _wcsicmp(candidate.c_str(), sid.c_str()) == 0;
+  });
+}
+
+bool IsBreakGlassEnabled() {
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    const auto current = ReadRegistryStringFromRoot(hive, kRegistryRoot, kBreakGlassEnabledValueName);
+    if (!current.empty()) {
+      return ParseBooleanValue(current, false);
+    }
+
+    const auto legacy = ReadRegistryStringFromRoot(hive, kLegacyRegistryRoot, kBreakGlassEnabledValueName);
+    if (!legacy.empty()) {
+      return ParseBooleanValue(legacy, false);
+    }
+  }
+
+  return false;
+}
+
 void PersistDeviceOwnerSid(const std::wstring& sid) {
   if (sid.empty()) {
     return;
@@ -135,7 +228,8 @@ std::wstring ResolveDeviceOwnerSid(const std::wstring& currentUserSid) {
 }
 
 bool IsAdminRole(const LocalUserRole role) {
-  return role == LocalUserRole::DeviceOwnerAdmin || role == LocalUserRole::LocalAdmin;
+  return role == LocalUserRole::DeviceOwnerAdmin || role == LocalUserRole::BreakGlassAdmin ||
+         role == LocalUserRole::LocalAdmin;
 }
 
 }  // namespace
@@ -146,14 +240,29 @@ LocalUserRole QueryCurrentLocalUserRole() {
     return LocalUserRole::Unknown;
   }
 
+  const auto currentSid = QueryCurrentUserSid();
+
   if (!(*adminMembership)) {
+    const auto restrictedHouseholdSids = ReadHouseholdSidList(kRestrictedHouseholdSidsValueName);
+    if (IsSidInList(currentSid, restrictedHouseholdSids)) {
+      return LocalUserRole::HouseholdRestrictedUser;
+    }
+
+    const auto trustedHouseholdSids = ReadHouseholdSidList(kTrustedHouseholdSidsValueName);
+    if (IsSidInList(currentSid, trustedHouseholdSids)) {
+      return LocalUserRole::HouseholdTrustedUser;
+    }
+
     return LocalUserRole::StandardUser;
   }
 
-  const auto currentSid = QueryCurrentUserSid();
   const auto ownerSid = ResolveDeviceOwnerSid(currentSid);
   if (!ownerSid.empty() && !currentSid.empty() && _wcsicmp(ownerSid.c_str(), currentSid.c_str()) == 0) {
     return LocalUserRole::DeviceOwnerAdmin;
+  }
+
+  if (IsBreakGlassEnabled()) {
+    return LocalUserRole::BreakGlassAdmin;
   }
 
   return LocalUserRole::LocalAdmin;
@@ -161,6 +270,25 @@ LocalUserRole QueryCurrentLocalUserRole() {
 
 bool IsCurrentUserElevatedAdmin() {
   return IsCurrentTokenElevated() && IsAdminRole(QueryCurrentLocalUserRole());
+}
+
+bool QueryBreakGlassModeEnabled() {
+  return IsBreakGlassEnabled();
+}
+
+bool SetBreakGlassModeEnabled(const bool enabled, std::wstring* errorMessage) {
+  const auto value = enabled ? L"1" : L"0";
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    if (WriteRegistryStringToRoot(hive, kRegistryRoot, kBreakGlassEnabledValueName, value) ||
+        WriteRegistryStringToRoot(hive, kLegacyRegistryRoot, kBreakGlassEnabledValueName, value)) {
+      return true;
+    }
+  }
+
+  if (errorMessage != nullptr) {
+    *errorMessage = L"Fenrir could not persist break-glass mode state to local policy registry hives.";
+  }
+  return false;
 }
 
 bool IsCurrentTokenElevated() {
@@ -213,8 +341,14 @@ std::wstring LocalUserRoleToString(const LocalUserRole role) {
   switch (role) {
     case LocalUserRole::DeviceOwnerAdmin:
       return L"device_owner_admin";
+    case LocalUserRole::BreakGlassAdmin:
+      return L"break_glass_admin";
     case LocalUserRole::LocalAdmin:
       return L"local_admin";
+    case LocalUserRole::HouseholdTrustedUser:
+      return L"household_trusted_user";
+    case LocalUserRole::HouseholdRestrictedUser:
+      return L"household_restricted_user";
     case LocalUserRole::StandardUser:
       return L"standard_user";
     default:
@@ -227,16 +361,45 @@ LocalActionAuthorization AuthorizeCurrentUser(const LocalAction action) {
   const auto elevated = IsCurrentTokenElevated();
   const auto isAdmin = IsAdminRole(role);
   const auto isOwner = role == LocalUserRole::DeviceOwnerAdmin;
+  const auto isBreakGlass = role == LocalUserRole::BreakGlassAdmin;
+  const auto isTrustedHouseholdUser = role == LocalUserRole::HouseholdTrustedUser;
+  const auto isRestrictedHouseholdUser = role == LocalUserRole::HouseholdRestrictedUser;
 
   switch (action) {
     case LocalAction::ViewStatus:
-    case LocalAction::PatchRefresh:
-    case LocalAction::ExportSupportBundle:
       return LocalActionAuthorization{
           .role = role,
           .allowed = true,
           .requestOnly = false,
           .reason = L"Local status and update posture inspection are available to all local users."};
+
+    case LocalAction::PatchRefresh:
+      if (isRestrictedHouseholdUser) {
+        return LocalActionAuthorization{
+            .role = role,
+            .allowed = false,
+            .requestOnly = true,
+            .reason = L"This household profile requires owner approval before requesting patch posture refresh actions."};
+      }
+      return LocalActionAuthorization{
+          .role = role,
+          .allowed = true,
+          .requestOnly = false,
+          .reason = L"Local patch posture refresh is available for trusted household and standard users."};
+
+    case LocalAction::ExportSupportBundle:
+      if (isRestrictedHouseholdUser) {
+        return LocalActionAuthorization{
+            .role = role,
+            .allowed = false,
+            .requestOnly = true,
+            .reason = L"Support bundle export is blocked for restricted household profiles unless approved by the owner."};
+      }
+      return LocalActionAuthorization{
+          .role = role,
+          .allowed = true,
+          .requestOnly = false,
+          .reason = L"Support bundle export is available to standard and trusted household users."};
 
     case LocalAction::IssueSessionApproval:
       if (isAdmin && elevated) {
@@ -263,6 +426,14 @@ LocalActionAuthorization AuthorizeCurrentUser(const LocalAction action) {
             .reason = L"Elevated administrators can run sensitive local response actions."};
       }
 
+      if (isTrustedHouseholdUser) {
+        return LocalActionAuthorization{
+            .role = role,
+            .allowed = false,
+            .requestOnly = true,
+            .reason = L"Trusted household users can request this action, but owner or administrator approval is required."};
+      }
+
       return LocalActionAuthorization{
           .role = role,
           .allowed = false,
@@ -271,12 +442,14 @@ LocalActionAuthorization AuthorizeCurrentUser(const LocalAction action) {
 
     case LocalAction::StartServiceAction:
     case LocalAction::EditExclusions:
-      if (isOwner && elevated) {
+      if ((isOwner || isBreakGlass) && elevated) {
         return LocalActionAuthorization{
             .role = role,
             .allowed = true,
             .requestOnly = false,
-            .reason = L"The device owner administrator can change long-lived local protection posture."};
+            .reason = isBreakGlass
+                          ? L"Break-glass administrator mode is active and permits emergency local protection changes."
+                          : L"The device owner administrator can change long-lived local protection posture."};
       }
 
       if (isAdmin) {

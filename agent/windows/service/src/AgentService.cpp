@@ -23,6 +23,7 @@
 #include "FileInventory.h"
 #include "FileSnapshotCollector.h"
 #include "HardeningManager.h"
+#include "LocalSecurity.h"
 #include "ProcessInventory.h"
 #include "ProcessSnapshotCollector.h"
 #include "ServiceSnapshotCollector.h"
@@ -48,6 +49,8 @@ constexpr wchar_t kPamRequestEventName[] = L"Global\\FenrirPamRequestReady";
 constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
 constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
 constexpr wchar_t kPamPolicyFileName[] = L"pam-policy.json";
+constexpr wchar_t kLocalApprovalQueueFileName[] = L"local-approval-requests.jsonl";
+constexpr wchar_t kLocalApprovalLedgerFileName[] = L"local-approval-ledger.jsonl";
 constexpr std::size_t kMaxCommandPayloadChars = 64 * 1024;
 
 struct PamRequestPayload {
@@ -76,6 +79,19 @@ struct PamPolicySnapshot {
   std::vector<std::wstring> allowedRequesters;
   std::vector<std::wstring> blockedPathPrefixes;
   std::vector<std::wstring> allowedPathPrefixes;
+};
+
+struct QueuedLocalApprovalRequest {
+  std::wstring requestId;
+  std::wstring createdAt;
+  std::wstring type;
+  std::wstring requester;
+  std::wstring callerSid;
+  std::wstring role;
+  std::wstring reason;
+  std::wstring recordId;
+  std::wstring targetPath;
+  std::wstring payloadJson;
 };
 
 std::string EscapeRegex(const std::string& value) {
@@ -260,6 +276,163 @@ std::filesystem::path ResolveInstallRootForConfig(const AgentConfig& config) {
 
   const auto runtimeRoot = ResolveRuntimeRoot(config);
   return runtimeRoot.has_parent_path() ? runtimeRoot.parent_path() : std::filesystem::current_path();
+}
+
+std::filesystem::path ResolveLocalApprovalRuntimeRoot() {
+  const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
+  if (!programData.empty()) {
+    return std::filesystem::path(programData) / L"FenrirAgent" / L"runtime";
+  }
+
+  return std::filesystem::current_path() / L"runtime";
+}
+
+std::filesystem::path ResolveLocalApprovalQueuePath() {
+  return ResolveLocalApprovalRuntimeRoot() / kLocalApprovalQueueFileName;
+}
+
+std::filesystem::path ResolveLocalApprovalLedgerPath() {
+  return ResolveLocalApprovalRuntimeRoot() / kLocalApprovalLedgerFileName;
+}
+
+bool IsLocalApprovalEligibleCommandType(const std::wstring& type) {
+  static const std::array<const wchar_t*, 11> kEligibleTypes = {
+      L"quarantine.restore",
+      L"quarantine.delete",
+      L"patch.scan",
+      L"patch.software.install",
+      L"patch.windows.install",
+      L"patch.cycle.run",
+      L"support.bundle.export",
+      L"support.bundle.export.full",
+      L"storage.maintenance.run",
+      L"local.breakglass.enable",
+      L"local.breakglass.disable"};
+
+  return std::any_of(kEligibleTypes.begin(), kEligibleTypes.end(),
+                     [&type](const auto* candidate) { return type == candidate; });
+}
+
+bool TryLoadQueuedLocalApprovalRequest(const std::filesystem::path& queuePath, const std::wstring& approvalRequestId,
+                                       QueuedLocalApprovalRequest* request, std::wstring* errorMessage) {
+  if (request == nullptr) {
+    return false;
+  }
+
+  std::ifstream input(queuePath, std::ios::binary);
+  if (!input.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not open the local approval request queue.";
+    }
+    return false;
+  }
+
+  std::string utf8Line;
+  while (std::getline(input, utf8Line)) {
+    if (utf8Line.empty()) {
+      continue;
+    }
+
+    const auto line = Utf8ToWide(utf8Line);
+    const auto lineRequestId = ExtractPayloadString(line, "requestId").value_or(L"");
+    if (lineRequestId.empty() || _wcsicmp(lineRequestId.c_str(), approvalRequestId.c_str()) != 0) {
+      continue;
+    }
+
+    const auto status = ToLowerCopy(ExtractPayloadString(line, "status").value_or(L"pending"));
+    if (status != L"pending") {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"This local approval request is no longer pending.";
+      }
+      return false;
+    }
+
+    request->requestId = lineRequestId;
+    request->createdAt = ExtractPayloadString(line, "createdAt").value_or(L"");
+    request->type = ExtractPayloadString(line, "type").value_or(L"");
+    request->requester = ExtractPayloadString(line, "requester").value_or(L"");
+    request->callerSid = ExtractPayloadString(line, "callerSid").value_or(L"");
+    request->role = ExtractPayloadString(line, "role").value_or(L"");
+    request->reason = ExtractPayloadString(line, "reason").value_or(L"");
+    request->recordId = ExtractPayloadString(line, "recordId").value_or(L"");
+    request->targetPath = ExtractPayloadString(line, "targetPath").value_or(L"");
+    request->payloadJson = ExtractPayloadString(line, "payloadJson").value_or(L"{}");
+    if (request->payloadJson.empty()) {
+      request->payloadJson = L"{}";
+    }
+
+    if (request->type.empty()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir found the local approval request but it is missing command metadata.";
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  if (errorMessage != nullptr) {
+    *errorMessage = L"Fenrir could not find a pending local approval request for the provided identifier.";
+  }
+  return false;
+}
+
+bool HasProcessedLocalApprovalRequest(const std::filesystem::path& ledgerPath, const std::wstring& approvalRequestId) {
+  std::ifstream input(ledgerPath, std::ios::binary);
+  if (!input.is_open()) {
+    return false;
+  }
+
+  std::string utf8Line;
+  while (std::getline(input, utf8Line)) {
+    if (utf8Line.empty()) {
+      continue;
+    }
+
+    const auto line = Utf8ToWide(utf8Line);
+    const auto lineRequestId = ExtractPayloadString(line, "requestId").value_or(L"");
+    if (!lineRequestId.empty() && _wcsicmp(lineRequestId.c_str(), approvalRequestId.c_str()) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool AppendLocalApprovalLedgerEntry(const std::filesystem::path& ledgerPath, const std::wstring& approvalRequestId,
+                                    const std::wstring& approver, const std::wstring& decision,
+                                    const std::wstring& detailMessage, const std::wstring& approvedType,
+                                    const std::wstring& executedCommandId, const std::wstring& requester) {
+  std::error_code createError;
+  std::filesystem::create_directories(ledgerPath.parent_path(), createError);
+  if (createError) {
+    return false;
+  }
+
+  std::ofstream output(ledgerPath, std::ios::binary | std::ios::app);
+  if (!output.is_open()) {
+    return false;
+  }
+
+  const auto escapedRequestId = Utf8ToWide(EscapeJsonString(approvalRequestId));
+  const auto escapedApprover = Utf8ToWide(EscapeJsonString(approver));
+  const auto escapedDecision = Utf8ToWide(EscapeJsonString(decision));
+  const auto escapedDetail = Utf8ToWide(EscapeJsonString(detailMessage));
+  const auto escapedType = Utf8ToWide(EscapeJsonString(approvedType));
+  const auto escapedExecutedCommandId = Utf8ToWide(EscapeJsonString(executedCommandId));
+  const auto escapedRequester = Utf8ToWide(EscapeJsonString(requester));
+
+  const std::wstring line =
+      L"{\"timestamp\":\"" + CurrentUtcTimestamp() + L"\",\"requestId\":\"" + escapedRequestId +
+      L"\",\"approver\":\"" + escapedApprover + L"\",\"decision\":\"" + escapedDecision +
+      L"\",\"detail\":\"" + escapedDetail + L"\",\"type\":\"" + escapedType +
+      L"\",\"executedCommandId\":\"" + escapedExecutedCommandId + L"\",\"requester\":\"" +
+      escapedRequester + L"\"}\n";
+
+  const auto utf8LineOut = WideToUtf8(line);
+  output.write(utf8LineOut.data(), static_cast<std::streamsize>(utf8LineOut.size()));
+  output.flush();
+  return output.good();
 }
 
 bool IsHardeningReady(const HardeningStatus& status, const AgentConfig& config) {
@@ -2049,6 +2222,18 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecuteStorageMaintenanceCommand(command);
   }
 
+  if (command.type == L"local.breakglass.enable") {
+    return ExecuteBreakGlassCommand(command, true);
+  }
+
+  if (command.type == L"local.breakglass.disable") {
+    return ExecuteBreakGlassCommand(command, false);
+  }
+
+  if (command.type == L"local.approval.execute") {
+    return ExecuteLocalApprovalCommand(command);
+  }
+
   if (command.type == L"software.block") {
     return ExecuteSoftwareBlockCommand(command);
   }
@@ -2343,6 +2528,133 @@ std::wstring AgentService::ExecuteStorageMaintenanceCommand(const RemoteCommand&
          std::to_wstring(result.deletedEntries) + L",\"reclaimedBytes\":" +
          std::to_wstring(result.reclaimedBytes) + L",\"summary\":\"" +
          Utf8ToWide(EscapeJsonString(result.summary)) + L"\"}";
+}
+
+std::wstring AgentService::ExecuteBreakGlassCommand(const RemoteCommand& command, const bool enable) {
+  const auto reason = TrimWhitespace(ExtractPayloadString(command.payloadJson, "reason").value_or(L""));
+
+  std::wstring persistError;
+  if (!SetBreakGlassModeEnabled(enable, &persistError)) {
+    throw std::runtime_error(WideToUtf8(persistError.empty()
+                                            ? L"Fenrir could not persist break-glass mode state."
+                                            : persistError));
+  }
+
+  const auto queuePamRecovery = enable && ExtractPayloadBool(command.payloadJson, "queuePamRecovery").value_or(true);
+  bool pamRecoveryQueued = false;
+  std::wstring pamQueueError;
+  if (queuePamRecovery) {
+    PamRequestPayload pamRequest{};
+    pamRequest.requestedAt = CurrentUtcTimestamp();
+    pamRequest.requester = command.issuedBy.empty() ? L"local-breakglass" : command.issuedBy;
+    pamRequest.action = L"launch_application";
+    const auto defaultRecoveryTarget = GetSystemBinaryPath(L"cmd.exe");
+    pamRequest.targetPath =
+        TrimWhitespace(ExtractPayloadString(command.payloadJson, "recoveryTargetPath").value_or(defaultRecoveryTarget));
+    pamRequest.arguments = ExtractPayloadString(command.payloadJson, "recoveryArguments").value_or(L"");
+    pamRequest.reason = reason.empty() ? L"Break-glass recovery session requested from local control channel." : reason;
+
+    if (pamRequest.targetPath.empty()) {
+      pamQueueError = L"Fenrir could not resolve a safe recovery target path for break-glass mode.";
+    } else {
+      pamRecoveryQueued = QueuePamRequestPayload(GetPamRequestPath(), pamRequest, &pamQueueError);
+      if (pamRecoveryQueued && pamRequestEvent_ != nullptr) {
+        SetEvent(pamRequestEvent_);
+      }
+    }
+  }
+
+  const auto breakGlassEnabled = QueryBreakGlassModeEnabled();
+  const auto eventType = enable ? L"local.breakglass.enabled" : L"local.breakglass.disabled";
+  QueueTelemetryEvent(eventType, L"local-control",
+                      enable ? L"Fenrir enabled break-glass administrator mode for emergency local recovery."
+                             : L"Fenrir disabled break-glass administrator mode and restored normal owner controls.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"breakGlassEnabled\":" +
+                          (breakGlassEnabled ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"pamRecoveryQueued\":" +
+                          (pamRecoveryQueued ? std::wstring(L"true") : std::wstring(L"false")) +
+                          L",\"reason\":\"" + Utf8ToWide(EscapeJsonString(reason)) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"breakGlassEnabled\":" +
+         (breakGlassEnabled ? std::wstring(L"true") : std::wstring(L"false")) + L",\"pamRecoveryQueued\":" +
+         (pamRecoveryQueued ? std::wstring(L"true") : std::wstring(L"false")) + L",\"reason\":\"" +
+         Utf8ToWide(EscapeJsonString(reason)) + L"\",\"pamRecoveryError\":\"" +
+         Utf8ToWide(EscapeJsonString(pamQueueError)) + L"\"}";
+}
+
+std::wstring AgentService::ExecuteLocalApprovalCommand(const RemoteCommand& command) {
+  const auto approvalRequestId = ExtractPayloadString(command.payloadJson, "approvalRequestId").value_or(L"");
+  if (approvalRequestId.empty()) {
+    throw std::runtime_error("local.approval.execute command is missing approvalRequestId");
+  }
+
+  const auto queuePath = ResolveLocalApprovalQueuePath();
+  const auto ledgerPath = ResolveLocalApprovalLedgerPath();
+  if (HasProcessedLocalApprovalRequest(ledgerPath, approvalRequestId)) {
+    throw std::runtime_error("The local approval request has already been processed");
+  }
+
+  QueuedLocalApprovalRequest queuedRequest{};
+  std::wstring loadError;
+  if (!TryLoadQueuedLocalApprovalRequest(queuePath, approvalRequestId, &queuedRequest, &loadError)) {
+    throw std::runtime_error(WideToUtf8(loadError.empty()
+                                            ? L"Fenrir could not find the local approval request to execute."
+                                            : loadError));
+  }
+
+  if (!IsLocalApprovalEligibleCommandType(queuedRequest.type)) {
+    AppendLocalApprovalLedgerEntry(
+        ledgerPath, approvalRequestId, command.issuedBy, L"rejected",
+        L"Fenrir rejected this approval request because the queued command type is not eligible for local approval.",
+        queuedRequest.type, L"", queuedRequest.requester);
+    throw std::runtime_error("The queued local approval request references an unsupported command type");
+  }
+
+  RemoteCommand approvedCommand{};
+  approvedCommand.commandId = L"local-approved-" + GenerateGuidString();
+  approvedCommand.type = queuedRequest.type;
+  approvedCommand.issuedBy = command.issuedBy.empty() ? L"local-approval" : command.issuedBy;
+  approvedCommand.createdAt = CurrentUtcTimestamp();
+  approvedCommand.updatedAt = approvedCommand.createdAt;
+  approvedCommand.recordId = queuedRequest.recordId;
+  approvedCommand.targetPath = queuedRequest.targetPath;
+  approvedCommand.payloadJson = queuedRequest.payloadJson;
+
+  std::wstring executionResult;
+  try {
+    executionResult = ExecuteCommand(approvedCommand);
+  } catch (const std::exception& error) {
+    const auto detail = Utf8ToWide(error.what());
+    AppendLocalApprovalLedgerEntry(ledgerPath, approvalRequestId, command.issuedBy, L"approved-failed", detail,
+                                   queuedRequest.type, approvedCommand.commandId, queuedRequest.requester);
+    QueueTelemetryEvent(L"local.approval.failed", L"local-control",
+                        L"Fenrir could not execute an approved local request.",
+                        std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"approvalRequestId\":\"" +
+                            Utf8ToWide(EscapeJsonString(approvalRequestId)) + L"\",\"approvedType\":\"" +
+                            Utf8ToWide(EscapeJsonString(queuedRequest.type)) + L"\",\"error\":\"" +
+                            Utf8ToWide(EscapeJsonString(detail)) + L"\"}");
+    throw;
+  }
+
+  if (!AppendLocalApprovalLedgerEntry(
+          ledgerPath, approvalRequestId, command.issuedBy, L"approved-executed",
+          L"Fenrir executed the approved local request with administrator authorization.", queuedRequest.type,
+          approvedCommand.commandId, queuedRequest.requester)) {
+    throw std::runtime_error("Fenrir executed the local approval request but could not persist the approval ledger entry");
+  }
+
+  QueueTelemetryEvent(L"local.approval.executed", L"local-control",
+                      L"Fenrir executed a queued local action after administrator approval.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"approvalRequestId\":\"" +
+                          Utf8ToWide(EscapeJsonString(approvalRequestId)) + L"\",\"approvedType\":\"" +
+                          Utf8ToWide(EscapeJsonString(queuedRequest.type)) + L"\",\"executedCommandId\":\"" +
+                          Utf8ToWide(EscapeJsonString(approvedCommand.commandId)) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"approvalRequestId\":\"" +
+         Utf8ToWide(EscapeJsonString(approvalRequestId)) + L"\",\"approvedType\":\"" +
+         Utf8ToWide(EscapeJsonString(queuedRequest.type)) + L"\",\"queuedRequester\":\"" +
+         Utf8ToWide(EscapeJsonString(queuedRequest.requester)) + L"\",\"executedCommandId\":\"" +
+         Utf8ToWide(EscapeJsonString(approvedCommand.commandId)) + L"\",\"executionResult\":" + executionResult + L"}";
 }
 
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {

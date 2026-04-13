@@ -7,7 +7,10 @@ namespace antivirus::agent {
 enum class LocalUserRole {
   Unknown,
   DeviceOwnerAdmin,
+  BreakGlassAdmin,
   LocalAdmin,
+  HouseholdTrustedUser,
+  HouseholdRestrictedUser,
   StandardUser
 };
 
@@ -35,5 +38,7 @@ bool IsCurrentTokenElevated();
 std::wstring QueryCurrentUserSid();
 std::wstring LocalUserRoleToString(LocalUserRole role);
 LocalActionAuthorization AuthorizeCurrentUser(LocalAction action);
+bool QueryBreakGlassModeEnabled();
+bool SetBreakGlassModeEnabled(bool enabled, std::wstring* errorMessage = nullptr);
 
 }  // namespace antivirus::agent

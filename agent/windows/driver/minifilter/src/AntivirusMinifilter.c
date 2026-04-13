@@ -53,6 +53,19 @@ AntivirusHasConnectedBroker(VOID);
 static BOOLEAN
 AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation);
 
+static BOOLEAN
+AntivirusShouldFailClosedForContext(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
+                                    _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
+
+static BOOLEAN
+AntivirusIsHighRiskPath(_In_z_ const WCHAR* Path);
+
+static BOOLEAN
+AntivirusPathContainsAlternateDataStream(_In_z_ const WCHAR* Path);
+
+static BOOLEAN
+AntivirusPathHasPrefixInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Prefix);
+
 const FLT_OPERATION_REGISTRATION gCallbacks[] = {
     {IRP_MJ_CREATE, 0, AntivirusPreCreate, NULL},
     {IRP_MJ_WRITE, 0, AntivirusPreWrite, NULL},
@@ -241,19 +254,21 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   ULONG replyLength;
   LARGE_INTEGER timeout;
   PFLT_PORT clientPort = NULL;
+  BOOLEAN strictFailClosed;
 
   UNREFERENCED_PARAMETER(FltObjects);
-
-  if (!AntivirusHasConnectedBroker()) {
-    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
-  }
 
   RtlZeroMemory(&request, sizeof(request));
   RtlZeroMemory(&reply, sizeof(reply));
 
   status = AntivirusBuildRequest(Data, Operation, &request);
+  strictFailClosed = AntivirusShouldFailClosedForContext(Data, Operation, NT_SUCCESS(status) ? &request : NULL);
   if (!NT_SUCCESS(status)) {
-    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+    return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+  }
+
+  if (!AntivirusHasConnectedBroker()) {
+    return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   ExAcquireFastMutex(&gClientPortLock);
@@ -261,7 +276,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   ExReleaseFastMutex(&gClientPortLock);
 
   if (clientPort == NULL) {
-    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+    return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   request.protocolVersion = ANTIVIRUS_REALTIME_PROTOCOL_VERSION;
@@ -276,11 +291,11 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
 
   status = FltSendMessage(gFilterHandle, &clientPort, &request, sizeof(request), &reply, &replyLength, &timeout);
   if (!NT_SUCCESS(status)) {
-    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+    return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   if (replyLength < sizeof(reply) || reply.protocolVersion != ANTIVIRUS_REALTIME_PROTOCOL_VERSION) {
-    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+    return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   if (reply.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK) {
@@ -288,7 +303,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   }
 
   if (reply.action != ANTIVIRUS_REALTIME_RESPONSE_ACTION_ALLOW) {
-    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+    return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
 
   return STATUS_SUCCESS;
@@ -372,4 +387,87 @@ AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation) {
   return Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
          Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
          Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE;
+}
+
+static BOOLEAN
+AntivirusShouldFailClosedForContext(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
+                                    _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
+  BOOLEAN isCreateReparseOpen = FALSE;
+
+  if (Data->Iopb != NULL && Data->Iopb->MajorFunction == IRP_MJ_CREATE) {
+    isCreateReparseOpen = FlagOn(Data->Iopb->Parameters.Create.Options, FILE_OPEN_REPARSE_POINT);
+  }
+
+  if (AntivirusShouldFailClosed(Operation) || isCreateReparseOpen) {
+    return TRUE;
+  }
+
+  if (Request != NULL && AntivirusIsHighRiskPath(Request->path)) {
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+static BOOLEAN
+AntivirusIsHighRiskPath(_In_z_ const WCHAR* Path) {
+  if (Path == NULL || Path[0] == L'\0') {
+    return FALSE;
+  }
+
+  if (AntivirusPathContainsAlternateDataStream(Path)) {
+    return TRUE;
+  }
+
+  if (AntivirusPathHasPrefixInsensitive(Path, L"\\Device\\Mup\\") ||
+      AntivirusPathHasPrefixInsensitive(Path, L"\\Device\\LanmanRedirector\\") ||
+      AntivirusPathHasPrefixInsensitive(Path, L"\\??\\UNC\\")) {
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+static BOOLEAN
+AntivirusPathContainsAlternateDataStream(_In_z_ const WCHAR* Path) {
+  SIZE_T index;
+  WCHAR previous = L'\0';
+
+  if (Path == NULL) {
+    return FALSE;
+  }
+
+  for (index = 0; Path[index] != L'\0'; ++index) {
+    if (Path[index] != L':') {
+      previous = Path[index];
+      continue;
+    }
+
+    if (index == 1 && ((Path[0] >= L'A' && Path[0] <= L'Z') || (Path[0] >= L'a' && Path[0] <= L'z'))) {
+      previous = Path[index];
+      continue;
+    }
+
+    if (previous != L'\\') {
+      return TRUE;
+    }
+
+    previous = Path[index];
+  }
+
+  return FALSE;
+}
+
+static BOOLEAN
+AntivirusPathHasPrefixInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Prefix) {
+  UNICODE_STRING pathString;
+  UNICODE_STRING prefixString;
+
+  if (Path == NULL || Prefix == NULL) {
+    return FALSE;
+  }
+
+  RtlInitUnicodeString(&pathString, Path);
+  RtlInitUnicodeString(&prefixString, Prefix);
+  return RtlPrefixUnicodeString(&prefixString, &pathString, TRUE);
 }

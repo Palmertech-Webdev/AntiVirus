@@ -601,6 +601,7 @@ LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig&, const std::w
       .statusCode = ExtractJsonInt(responseJson, "statusCode").value_or(0),
       .requestOnly = ExtractJsonBool(responseJson, "requestOnly").value_or(false),
       .requiresReauth = ExtractJsonBool(responseJson, "requiresReauth").value_or(false),
+      .approvalRequestId = ExtractJsonString(responseJson, "approvalRequestId").value_or(L""),
       .responseJson = ExtractJsonString(responseJson, "resultJson").value_or(L""),
       .errorMessage = ExtractJsonString(responseJson, "errorMessage").value_or(L"")};
 
@@ -613,6 +614,52 @@ LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig&, const std::w
   }
 
   return result;
+}
+
+LocalBrokerCommandResult ExecuteQueuedLocalApproval(const AgentConfig& config, const std::wstring& approvalRequestId) {
+  if (approvalRequestId.empty()) {
+    return LocalBrokerCommandResult{
+        .success = false,
+        .statusCode = 400,
+        .errorMessage = L"Fenrir local approval execution requires a non-empty approvalRequestId."};
+  }
+
+  std::wstring approvalError;
+  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
+  if (!approvalToken.has_value()) {
+    return LocalBrokerCommandResult{
+        .success = false,
+        .statusCode = 401,
+        .requiresReauth = true,
+        .errorMessage = approvalError.empty()
+                            ? L"Fenrir could not obtain a fresh local approval session to execute this request."
+                            : approvalError};
+  }
+
+  const auto payloadJson = std::wstring(L"{\"approvalRequestId\":\"") +
+                           EscapeJsonValue(approvalRequestId) + L"\"}";
+  return SendLocalBrokerCommand(config, L"local.approval.execute", L"", payloadJson, L"", *approvalToken);
+}
+
+LocalBrokerCommandResult SetBreakGlassMode(const AgentConfig& config, const bool enable,
+                                           const std::wstring& reason, const bool queuePamRecovery) {
+  std::wstring approvalError;
+  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
+  if (!approvalToken.has_value()) {
+    return LocalBrokerCommandResult{
+        .success = false,
+        .statusCode = 401,
+        .requiresReauth = true,
+        .errorMessage = approvalError.empty()
+                            ? L"Fenrir could not obtain a fresh local approval session for break-glass mode changes."
+                            : approvalError};
+  }
+
+  const auto commandType = enable ? L"local.breakglass.enable" : L"local.breakglass.disable";
+  const auto payloadJson = std::wstring(L"{\"reason\":\"") + EscapeJsonValue(reason) +
+                           L"\",\"queuePamRecovery\":" +
+                           (queuePamRecovery ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
+  return SendLocalBrokerCommand(config, commandType, L"", payloadJson, L"", *approvalToken);
 }
 
 PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId) {
