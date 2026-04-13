@@ -19,6 +19,7 @@
 #include "AgentConfig.h"
 #include "AmsiScanEngine.h"
 #include "CryptoUtils.h"
+#include "EndpointClient.h"
 #include "HardeningManager.h"
 #include "PatchOrchestrator.h"
 #include "RealtimeProtectionBroker.h"
@@ -363,6 +364,23 @@ bool WriteSelfTestSample(const std::filesystem::path& path, const char* content)
   }
 
   output.write(content, static_cast<std::streamsize>(std::char_traits<char>::length(content)));
+  return output.good();
+}
+
+bool WriteSelfTestUtf8File(const std::filesystem::path& path, const std::wstring& content) {
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  if (error) {
+    return false;
+  }
+
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    return false;
+  }
+
+  const auto utf8Content = WideToUtf8(content);
+  output.write(utf8Content.data(), static_cast<std::streamsize>(utf8Content.size()));
   return output.good();
 }
 
@@ -1635,6 +1653,306 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot", SelfTestStatus::Fail,
                L"Phase 4 patch visibility validation failed: " + Utf8ToWide(error.what()),
                L"Validate patch snapshot persistence and reporting surfaces before rerunning self-test.");
+    }
+
+    try {
+      auto phase5Config = config;
+      phase5Config.runtimeDatabasePath = phaseValidationRoot / L"phase5-runtime.db";
+      phase5Config.stateFilePath = phaseValidationRoot / L"phase5-state.ini";
+      phase5Config.telemetryQueuePath = phaseValidationRoot / L"phase5-telemetry.tsv";
+      phase5Config.updateRootPath = phaseValidationRoot / L"phase5-updates";
+      phase5Config.journalRootPath = phaseValidationRoot / L"phase5-journal";
+      phase5Config.quarantineRootPath = phaseValidationRoot / L"phase5-quarantine";
+      phase5Config.evidenceRootPath = phaseValidationRoot / L"phase5-evidence";
+      phase5Config.scanExcludedPaths.clear();
+
+      std::error_code phase5PathError;
+      std::filesystem::create_directories(phase5Config.runtimeDatabasePath.parent_path(), phase5PathError);
+      std::filesystem::create_directories(phase5Config.journalRootPath, phase5PathError);
+      std::filesystem::create_directories(phase5Config.updateRootPath, phase5PathError);
+      std::filesystem::create_directories(phase5Config.quarantineRootPath, phase5PathError);
+      std::filesystem::create_directories(phase5Config.evidenceRootPath, phase5PathError);
+
+      if (phase5PathError) {
+        AddCheck(report, L"phase5_pam_request_queue_visibility", L"Phase 5 PAM request queue visibility",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 5 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime and journal roots are writable before running Phase 5 PAM checks.");
+        AddCheck(report, L"phase5_pam_audit_visibility", L"Phase 5 PAM audit visibility", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 5 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime and journal roots are writable before running Phase 5 PAM checks.");
+        AddCheck(report, L"phase5_admin_membership_audit", L"Phase 5 local-admin membership audit",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 5 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime and journal roots are writable before running Phase 5 PAM checks.");
+      } else {
+        const auto phase5RuntimeRoot = phase5Config.runtimeDatabasePath.parent_path();
+        const auto phase5RequestPath = phase5RuntimeRoot / L"pam-request.json";
+        const auto phase5AuditPath = phase5Config.journalRootPath / L"privilege-requests.jsonl";
+
+        const auto phase5RequestPayload =
+            L"{\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requester\":\"selftest-user\",\"action\":\"run_application_timed\",\"targetPath\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\"arguments\":\"/c whoami\",\"reason\":\"Self-test Phase 5 timed request\"}";
+        const auto phase5AuditPayload =
+            L"{\"timestamp\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requester\":\"selftest-user\",\"action\":\"run_application_timed\",\"target\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\"reason\":\"Self-test approval\",\"decision\":\"approved\",\"detail\":\"Launched process id 4242\",\"approvalSource\":\"policy\",\"durationSeconds\":120,\"terminationOutcome\":\"pending\"}\n"
+            L"{\"timestamp\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requester\":\"guest-user\",\"action\":\"run_powershell\",\"target\":\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\",\"reason\":\"Denied by policy\",\"decision\":\"denied\",\"detail\":\"Requester is not permitted\",\"approvalSource\":\"policy\",\"durationSeconds\":0,\"terminationOutcome\":\"n/a\"}\n";
+
+        if (!WriteSelfTestUtf8File(phase5RequestPath, phase5RequestPayload) ||
+            !WriteSelfTestUtf8File(phase5AuditPath, phase5AuditPayload)) {
+          AddCheck(report, L"phase5_pam_request_queue_visibility", L"Phase 5 PAM request queue visibility",
+                   SelfTestStatus::Fail,
+                   L"Self-test could not stage PAM request/audit artifacts for Phase 5 validation.",
+                   L"Validate runtime and journal write permissions before rerunning Phase 5 checks.");
+          AddCheck(report, L"phase5_pam_audit_visibility", L"Phase 5 PAM audit visibility", SelfTestStatus::Fail,
+                   L"Self-test could not stage PAM request/audit artifacts for Phase 5 validation.",
+                   L"Validate runtime and journal write permissions before rerunning Phase 5 checks.");
+        } else {
+          const auto phase5Snapshot = LoadEndpointClientSnapshot(phase5Config, 10, 10, 10, 10);
+
+          if (phase5Snapshot.pendingPamRequestCount >= 1 &&
+              (phase5Snapshot.pamHealthState == L"healthy" || phase5Snapshot.pamHealthState == L"degraded")) {
+            AddCheck(report, L"phase5_pam_request_queue_visibility", L"Phase 5 PAM request queue visibility",
+                     SelfTestStatus::Pass,
+                     L"Endpoint snapshot surfaced pending PAM requests and PAM health posture from local runtime paths.");
+          } else {
+            AddCheck(report, L"phase5_pam_request_queue_visibility", L"Phase 5 PAM request queue visibility",
+                     SelfTestStatus::Fail,
+                     L"Endpoint snapshot did not surface pending PAM request state from the staged runtime payload.",
+                     L"Validate PAM request-path resolution and snapshot projection before promoting Phase 5.");
+          }
+
+          if (phase5Snapshot.pamApprovedCount >= 1 && phase5Snapshot.pamDeniedCount >= 1) {
+            AddCheck(report, L"phase5_pam_audit_visibility", L"Phase 5 PAM audit visibility", SelfTestStatus::Pass,
+                     L"Endpoint snapshot exposed PAM approval/denial counts from the local audit journal.");
+          } else {
+            AddCheck(report, L"phase5_pam_audit_visibility", L"Phase 5 PAM audit visibility", SelfTestStatus::Fail,
+                     L"Endpoint snapshot did not surface both approval and denial PAM audit outcomes from the staged journal.",
+                     L"Validate PAM audit journal parsing so elevation approvals and denials stay visible to users and support workflows.");
+          }
+
+          if (phase5Snapshot.localAdminExposureKnown) {
+            AddCheck(report, L"phase5_admin_membership_audit", L"Phase 5 local-admin membership audit",
+                     SelfTestStatus::Pass,
+                     L"Fenrir resolved local Administrators membership posture with " +
+                         std::to_wstring(phase5Snapshot.localAdminMemberCount) +
+                         L" member(s); exposure state is " +
+                         std::wstring(phase5Snapshot.localAdminExposure ? L"elevated" : L"reduced") + L".");
+          } else {
+            AddCheck(report, L"phase5_admin_membership_audit", L"Phase 5 local-admin membership audit",
+                     SelfTestStatus::Warning,
+                     L"Fenrir could not resolve local Administrators membership posture in this host context.",
+                     L"Run self-test from a host context that allows local group membership enumeration.");
+          }
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase5_pam_request_queue_visibility", L"Phase 5 PAM request queue visibility",
+               SelfTestStatus::Fail, L"Phase 5 PAM request visibility validation failed: " + Utf8ToWide(error.what()),
+               L"Validate PAM runtime path staging and snapshot projection before rerunning self-test.");
+      AddCheck(report, L"phase5_pam_audit_visibility", L"Phase 5 PAM audit visibility", SelfTestStatus::Fail,
+               L"Phase 5 PAM audit visibility validation failed: " + Utf8ToWide(error.what()),
+               L"Validate PAM journal parsing and snapshot projection before rerunning self-test.");
+      AddCheck(report, L"phase5_admin_membership_audit", L"Phase 5 local-admin membership audit",
+               SelfTestStatus::Fail, L"Phase 5 local-admin membership validation failed: " + Utf8ToWide(error.what()),
+               L"Validate local-admin posture collection before rerunning self-test.");
+    }
+
+    try {
+      auto phase6Config = config;
+      phase6Config.runtimeDatabasePath = phaseValidationRoot / L"phase6-runtime.db";
+      phase6Config.stateFilePath = phaseValidationRoot / L"phase6-state.ini";
+      phase6Config.telemetryQueuePath = phaseValidationRoot / L"phase6-telemetry.tsv";
+      phase6Config.updateRootPath = phaseValidationRoot / L"phase6-updates";
+      phase6Config.journalRootPath = phaseValidationRoot / L"phase6-journal";
+      phase6Config.quarantineRootPath = phaseValidationRoot / L"phase6-quarantine";
+      phase6Config.evidenceRootPath = phaseValidationRoot / L"phase6-evidence";
+      phase6Config.scanExcludedPaths.clear();
+
+      std::error_code phase6PathError;
+      std::filesystem::create_directories(phase6Config.runtimeDatabasePath.parent_path(), phase6PathError);
+      std::filesystem::create_directories(phase6Config.journalRootPath, phase6PathError);
+      std::filesystem::create_directories(phase6Config.updateRootPath, phase6PathError);
+      std::filesystem::create_directories(phase6Config.quarantineRootPath, phase6PathError);
+      std::filesystem::create_directories(phase6Config.evidenceRootPath, phase6PathError);
+
+      if (phase6PathError) {
+        AddCheck(report, L"phase6_integrated_posture_snapshot", L"Phase 6 integrated posture snapshot",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 6 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, patch, and journal roots are writable before running Phase 6 integration checks.");
+        AddCheck(report, L"phase6_posture_output_coverage", L"Phase 6 local posture output coverage",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 6 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, patch, and journal roots are writable before running Phase 6 integration checks.");
+      } else {
+        RuntimeDatabase phase6Database(phase6Config.runtimeDatabasePath);
+        phase6Database.RecordScanHistory(ScanHistoryRecord{
+            .recordedAt = CurrentUtcTimestamp(),
+            .source = L"realtime-broker",
+            .subjectPath = phaseValidationRoot / L"phase6-threat-sample.ps1",
+            .sha256 = L"phase6-threat-sha256",
+            .contentType = L"script",
+            .reputation = L"user-writable-unsigned",
+            .disposition = L"block",
+            .confidence = 98,
+            .tacticId = L"TA0040",
+            .techniqueId = L"T1486",
+            .remediationStatus = L"pending",
+            .evidenceRecordId = L"phase6-evidence-1",
+            .quarantineRecordId = L""});
+
+        phase6Database.ReplaceWindowsUpdateRecords({WindowsUpdateRecord{
+            .updateId = L"phase6-kb5040001",
+            .revision = L"1",
+            .title = L"2026-05 Security Cumulative Update",
+            .kbArticles = L"KB5040001",
+            .categories = L"Security Updates",
+            .classification = L"security",
+            .severity = L"Critical",
+            .updateType = L"software",
+            .deploymentAction = L"installation",
+            .discoveredAt = CurrentUtcTimestamp(),
+            .lastAttemptAt = CurrentUtcTimestamp(),
+            .status = L"failed",
+            .failureCode = L"0x80240022",
+            .detailJson = L"{\"phase\":\"install\"}",
+            .installed = false,
+            .hidden = false,
+            .downloaded = true,
+            .mandatory = true,
+            .browseOnly = false,
+            .rebootRequired = true,
+            .driver = false,
+            .featureUpdate = false,
+            .optional = false}});
+
+        phase6Database.ReplaceSoftwarePatchRecords({
+            SoftwarePatchRecord{
+                .softwareId = L"phase6-manual-app",
+                .displayName = L"Contoso Legacy Tool",
+                .displayVersion = L"3.2",
+                .availableVersion = L"3.3",
+                .publisher = L"Contoso",
+                .provider = L"manual",
+                .providerId = L"",
+                .supportedSource = L"manual",
+                .updateState = L"manual",
+                .updateSummary = L"User interaction required.",
+                .lastCheckedAt = CurrentUtcTimestamp(),
+                .manualOnly = true,
+                .userInteractionRequired = true,
+                .highRisk = true},
+            SoftwarePatchRecord{
+                .softwareId = L"phase6-unsupported-app",
+                .displayName = L"Unsupported Utility",
+                .displayVersion = L"1.0",
+                .availableVersion = L"",
+                .publisher = L"Legacy Publisher",
+                .provider = L"manual",
+                .providerId = L"",
+                .supportedSource = L"unsupported",
+                .updateState = L"unsupported",
+                .updateSummary = L"No trusted update source.",
+                .lastCheckedAt = CurrentUtcTimestamp(),
+                .supported = false}});
+
+        phase6Database.UpsertPatchHistoryRecord(PatchHistoryRecord{
+            .recordId = L"phase6-history-1",
+            .targetType = L"windows-update",
+            .targetId = L"phase6-kb5040001",
+            .title = L"2026-05 Security Cumulative Update",
+            .provider = L"windows-update-agent",
+            .action = L"install",
+            .status = L"failed",
+            .startedAt = CurrentUtcTimestamp(),
+            .completedAt = CurrentUtcTimestamp(),
+            .errorCode = L"0x80240022",
+            .detailJson = L"{\"stage\":\"install\"}",
+            .rebootRequired = true});
+
+        phase6Database.SaveRebootCoordinator(RebootCoordinatorRecord{
+            .rebootRequired = true,
+            .pendingWindowsUpdate = true,
+            .pendingFileRename = false,
+            .pendingComputerRename = false,
+            .pendingComponentServicing = true,
+            .rebootReasons = L"windows_update;component_servicing",
+            .detectedAt = CurrentUtcTimestamp(),
+            .deferredUntil = L"",
+            .gracePeriodMinutes = 120,
+            .status = L"pending"});
+
+        const auto phase6RuntimeRoot = phase6Config.runtimeDatabasePath.parent_path();
+        const auto phase6RequestPath = phase6RuntimeRoot / L"pam-request.json";
+        const auto phase6AuditPath = phase6Config.journalRootPath / L"privilege-requests.jsonl";
+        const auto phase6RequestPayload =
+            L"{\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requester\":\"selftest-user\",\"action\":\"run_application\",\"targetPath\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\"arguments\":\"/c whoami\",\"reason\":\"Phase 6 integration request\"}";
+        const auto phase6AuditPayload =
+            L"{\"timestamp\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requestedAt\":\"" + JsonEscape(CurrentUtcTimestamp()) +
+            L"\",\"requester\":\"selftest-user\",\"action\":\"run_application\",\"target\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\"reason\":\"Phase 6 integration request\",\"decision\":\"approved\",\"detail\":\"Launched process id 5151\",\"approvalSource\":\"policy\",\"durationSeconds\":0,\"terminationOutcome\":\"completed\"}\n";
+
+        if (!WriteSelfTestUtf8File(phase6RequestPath, phase6RequestPayload) ||
+            !WriteSelfTestUtf8File(phase6AuditPath, phase6AuditPayload)) {
+          AddCheck(report, L"phase6_integrated_posture_snapshot", L"Phase 6 integrated posture snapshot",
+                   SelfTestStatus::Fail,
+                   L"Self-test could not stage PAM integration artifacts for Phase 6 snapshot validation.",
+                   L"Validate PAM runtime and journal path permissions before rerunning Phase 6 checks.");
+          AddCheck(report, L"phase6_posture_output_coverage", L"Phase 6 local posture output coverage",
+                   SelfTestStatus::Fail,
+                   L"Self-test could not stage PAM integration artifacts for Phase 6 snapshot validation.",
+                   L"Validate PAM runtime and journal path permissions before rerunning Phase 6 checks.");
+        } else {
+          const auto phase6Snapshot = LoadEndpointClientSnapshot(phase6Config, 20, 20, 20, 20);
+
+          const auto hasFailedWindowsUpdate = std::any_of(
+              phase6Snapshot.windowsUpdates.begin(), phase6Snapshot.windowsUpdates.end(),
+              [](const auto& update) { return update.updateId == L"phase6-kb5040001" && update.status == L"failed"; });
+          const auto manualSoftwareCount = std::count_if(
+              phase6Snapshot.softwarePatches.begin(), phase6Snapshot.softwarePatches.end(),
+              [](const auto& software) { return software.manualOnly || software.updateState == L"manual"; });
+          const auto unsupportedSoftwareCount = std::count_if(
+              phase6Snapshot.softwarePatches.begin(), phase6Snapshot.softwarePatches.end(),
+              [](const auto& software) { return !software.supported || software.updateState == L"unsupported"; });
+
+          if (phase6Snapshot.openThreatCount >= 1 && hasFailedWindowsUpdate &&
+              phase6Snapshot.rebootCoordinator.rebootRequired && phase6Snapshot.pendingPamRequestCount >= 1 &&
+              phase6Snapshot.pamApprovedCount >= 1 && phase6Snapshot.localAdminExposureKnown) {
+            AddCheck(report, L"phase6_integrated_posture_snapshot", L"Phase 6 integrated posture snapshot",
+                     SelfTestStatus::Pass,
+                     L"Unified endpoint snapshot exposed threat, patch debt, reboot state, PAM queue/history, and local-admin posture signals together.");
+          } else {
+            AddCheck(report, L"phase6_integrated_posture_snapshot", L"Phase 6 integrated posture snapshot",
+                     SelfTestStatus::Fail,
+                     L"Unified endpoint snapshot did not preserve all cross-feature protection signals required for Phase 6 integration.",
+                     L"Validate endpoint snapshot projection so AV, patching, PAM, reboot, and admin posture state remain visible in one local model.");
+          }
+
+          if (!phase6Snapshot.patchHistory.empty() && manualSoftwareCount >= 1 && unsupportedSoftwareCount >= 1 &&
+              !phase6Snapshot.windowsUpdates.empty() && phase6Snapshot.pamApprovedCount >= 1) {
+            AddCheck(report, L"phase6_posture_output_coverage", L"Phase 6 local posture output coverage",
+                     SelfTestStatus::Pass,
+                     L"Local posture output preserved patch history, manual/unsupported software debt, Windows update status, and PAM decision history for dashboard/reporting surfaces.");
+          } else {
+            AddCheck(report, L"phase6_posture_output_coverage", L"Phase 6 local posture output coverage",
+                     SelfTestStatus::Fail,
+                     L"Local posture output is missing one or more required integration surfaces for patch, PAM, or compliance reporting.",
+                     L"Validate posture projection so dashboard and reporting views can explain missing patches, reboot risk, PAM outcomes, and admin exposure.");
+          }
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase6_integrated_posture_snapshot", L"Phase 6 integrated posture snapshot",
+               SelfTestStatus::Fail, L"Phase 6 integrated snapshot validation failed: " + Utf8ToWide(error.what()),
+               L"Validate endpoint snapshot integration for AV, patching, PAM, and admin posture signals before rerunning self-test.");
+      AddCheck(report, L"phase6_posture_output_coverage", L"Phase 6 local posture output coverage",
+               SelfTestStatus::Fail, L"Phase 6 posture output validation failed: " + Utf8ToWide(error.what()),
+               L"Validate local posture output projection and dashboard/reporting coverage before rerunning self-test.");
     }
 
     std::error_code cleanupError;

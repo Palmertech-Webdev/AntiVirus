@@ -128,3 +128,38 @@ Example:
 ```
 
 The script writes a JSON report to `tmp-phase4-exitcriteria/phase4-exitcriteria-report.json`.
+
+## Phase 5 Exit-Criteria Harness
+
+Use `RunPhase5ExitCriteria.ps1` to evaluate the Phase 5 PAM and local-admin posture criteria from the service self-test.
+
+Current required checks:
+
+- PAM request queue state is visible in endpoint posture
+- PAM audit approvals and denials are visible in endpoint posture
+- local Administrators membership posture can be audited
+
+Example:
+
+```powershell
+.\RunPhase5ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+The script writes a JSON report to `tmp-phase5-exitcriteria/phase5-exitcriteria-report.json`.
+
+## Phase 6 Exit-Criteria Harness
+
+Use `RunPhase6ExitCriteria.ps1` to evaluate the Phase 6 integration criteria from the service self-test.
+
+Current required checks:
+
+- unified local posture snapshot combines AV, patch, reboot, PAM, and admin posture signals
+- local posture output preserves patch debt and PAM decision history for dashboard/reporting surfaces
+
+Example:
+
+```powershell
+.\RunPhase6ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+The script writes a JSON report to `tmp-phase6-exitcriteria/phase6-exitcriteria-report.json`.

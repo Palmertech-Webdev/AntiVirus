@@ -26,6 +26,8 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - Startup and remote `agent.repair` flows now fail closed when required hardening/runtime trust controls cannot be re-applied
 - Phase 1 self-test gates that verify both malware blocking (disk-time and execute-time) and false-positive handling (cleanware allowance, browser/download/install clean-set coverage, signer trust, plus suppression allow-override flow)
 - Phase 2 self-test gates that validate ransomware-style destructive write-burst containment while preserving allow-only behavior for benign backup/sync bulk-I/O workloads
+- Phase 5 self-test gates and endpoint posture fields for PAM request visibility, PAM approval/denial audit visibility, and local Administrators membership exposure auditing
+- Phase 6 self-test gates for unified local posture projection that combines AV findings, patch debt, reboot state, PAM workflow state, and local-admin exposure in one endpoint snapshot
 - A shared on-demand scan engine used by `antivirus-scannercli`
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
 - Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories

@@ -27,6 +27,13 @@ struct EndpointClientSnapshot {
   std::size_t queuedTelemetryCount{0};
   std::size_t activeQuarantineCount{0};
   std::size_t openThreatCount{0};
+  std::size_t pendingPamRequestCount{0};
+  std::size_t pamApprovedCount{0};
+  std::size_t pamDeniedCount{0};
+  std::wstring pamHealthState{L"unknown"};
+  bool localAdminExposureKnown{false};
+  std::size_t localAdminMemberCount{0};
+  bool localAdminExposure{false};
   std::vector<ScanHistoryRecord> recentThreats;
   std::vector<ScanHistoryRecord> recentFindings;
   std::vector<QuarantineIndexRecord> quarantineItems;

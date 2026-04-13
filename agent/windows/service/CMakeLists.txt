@@ -96,7 +96,7 @@ add_library(antivirus-agent-core STATIC
 )
 
 target_include_directories(antivirus-agent-core PUBLIC include ../shared/include ../sensor/etw/include ../sensor/wfp/include)
-target_link_libraries(antivirus-agent-core PUBLIC antivirus-sqlite3 winhttp ole32 oleaut32 bcrypt advapi32 tdh crypt32 wintrust fwpuclnt iphlpapi shell32 ws2_32 wtsapi32 userenv)
+target_link_libraries(antivirus-agent-core PUBLIC antivirus-sqlite3 winhttp ole32 oleaut32 bcrypt advapi32 tdh crypt32 wintrust fwpuclnt iphlpapi shell32 ws2_32 wtsapi32 userenv netapi32)
 antivirus_apply_portable_runtime(antivirus-agent-core)
 
 add_library(antivirus-amsi-provider-core STATIC

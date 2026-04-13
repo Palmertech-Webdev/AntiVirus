@@ -1,9 +1,13 @@
 #include "EndpointClient.h"
 
 #include <Windows.h>
+#include <lm.h>
 
 #include <algorithm>
+#include <fstream>
 #include <memory>
+#include <set>
+#include <string>
 
 #include "LocalStateStore.h"
 #include "QuarantineStore.h"
@@ -12,6 +16,21 @@ namespace antivirus::agent {
 namespace {
 
 constexpr wchar_t kAgentServiceName[] = L"FenrirAgent";
+constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
+constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
+
+struct PamPostureSummary {
+  std::size_t pendingRequestCount{0};
+  std::size_t approvedCount{0};
+  std::size_t deniedCount{0};
+  std::wstring healthState{L"unknown"};
+};
+
+struct LocalAdminExposureSummary {
+  bool known{false};
+  std::size_t memberCount{0};
+  bool exposed{false};
+};
 
 struct ServiceHandleCloser {
   void operator()(SC_HANDLE handle) const noexcept {
@@ -29,6 +48,114 @@ bool IsThreatDisposition(const std::wstring& disposition) {
 
 bool IsScanSessionRecord(const ScanHistoryRecord& record) {
   return _wcsicmp(record.contentType.c_str(), L"scan-session") == 0;
+}
+
+std::filesystem::path ResolveRuntimeRoot(const AgentConfig& config) {
+  auto runtimeRoot = config.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = config.runtimeDatabasePath;
+  }
+
+  if (!runtimeRoot.empty()) {
+    return runtimeRoot;
+  }
+
+  return std::filesystem::current_path() / L"runtime";
+}
+
+std::filesystem::path ResolvePamRequestPath(const AgentConfig& config) {
+  return ResolveRuntimeRoot(config) / kPamRequestFileName;
+}
+
+std::filesystem::path ResolvePamAuditPath(const AgentConfig& config) {
+  auto journalRoot = config.journalRootPath;
+  if (journalRoot.empty()) {
+    journalRoot = ResolveRuntimeRoot(config);
+  }
+
+  return journalRoot / kPamAuditFileName;
+}
+
+std::size_t CountToken(const std::string& value, const std::string& token) {
+  if (token.empty() || value.empty()) {
+    return 0;
+  }
+
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = value.find(token, position)) != std::string::npos) {
+    ++count;
+    position += token.size();
+  }
+
+  return count;
+}
+
+PamPostureSummary QueryPamPosture(const AgentConfig& config) {
+  PamPostureSummary summary;
+
+  const auto requestPath = ResolvePamRequestPath(config);
+  const auto auditPath = ResolvePamAuditPath(config);
+
+  std::error_code error;
+  const auto requestRootReady = std::filesystem::exists(requestPath.parent_path(), error) && !error;
+  error.clear();
+  const auto auditRootReady = std::filesystem::exists(auditPath.parent_path(), error) && !error;
+  summary.healthState = (requestRootReady && auditRootReady) ? L"healthy" : L"degraded";
+
+  error.clear();
+  if (std::filesystem::exists(requestPath, error) && !error) {
+    summary.pendingRequestCount = 1;
+  }
+
+  error.clear();
+  if (std::filesystem::exists(auditPath, error) && !error) {
+    std::ifstream input(auditPath, std::ios::binary);
+    if (input.is_open()) {
+      const std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+      summary.approvedCount = CountToken(content, "\"decision\":\"approved\"");
+      summary.deniedCount = CountToken(content, "\"decision\":\"denied\"");
+    }
+  }
+
+  return summary;
+}
+
+LocalAdminExposureSummary QueryLocalAdminExposure() {
+  LocalAdminExposureSummary summary;
+
+  std::set<std::wstring> members;
+  DWORD_PTR resumeHandle = 0;
+  NET_API_STATUS status = NERR_Success;
+
+  do {
+    LPLOCALGROUP_MEMBERS_INFO_2 records = nullptr;
+    DWORD entriesRead = 0;
+    DWORD totalEntries = 0;
+    status = NetLocalGroupGetMembers(nullptr, L"Administrators", 2, reinterpret_cast<LPBYTE*>(&records),
+                                     MAX_PREFERRED_LENGTH, &entriesRead, &totalEntries, &resumeHandle);
+    if (status != NERR_Success && status != ERROR_MORE_DATA) {
+      if (records != nullptr) {
+        NetApiBufferFree(records);
+      }
+      return summary;
+    }
+
+    for (DWORD index = 0; index < entriesRead; ++index) {
+      if (records[index].lgrmi2_domainandname != nullptr) {
+        members.insert(records[index].lgrmi2_domainandname);
+      }
+    }
+
+    if (records != nullptr) {
+      NetApiBufferFree(records);
+    }
+  } while (status == ERROR_MORE_DATA);
+
+  summary.known = true;
+  summary.memberCount = members.size();
+  summary.exposed = summary.memberCount > 1;
+  return summary;
 }
 
 }  // namespace
@@ -180,6 +307,17 @@ EndpointClientSnapshot LoadEndpointClientSnapshot(const AgentConfig& config, con
       .patchHistory = database.ListPatchHistoryRecords(50)};
 
   database.LoadRebootCoordinator(snapshot.rebootCoordinator);
+
+  const auto pamPosture = QueryPamPosture(config);
+  snapshot.pendingPamRequestCount = pamPosture.pendingRequestCount;
+  snapshot.pamApprovedCount = pamPosture.approvedCount;
+  snapshot.pamDeniedCount = pamPosture.deniedCount;
+  snapshot.pamHealthState = pamPosture.healthState;
+
+  const auto localAdminExposure = QueryLocalAdminExposure();
+  snapshot.localAdminExposureKnown = localAdminExposure.known;
+  snapshot.localAdminMemberCount = localAdminExposure.memberCount;
+  snapshot.localAdminExposure = localAdminExposure.exposed;
 
   snapshot.activeQuarantineCount = std::count_if(
       quarantineItems.begin(), quarantineItems.end(),

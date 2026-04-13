@@ -1,1 +1,0 @@
-Support report 84: resolved customer account update issue and documented follow-up actions.
