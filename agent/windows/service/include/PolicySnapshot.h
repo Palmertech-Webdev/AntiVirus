@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace antivirus::agent {
 
@@ -13,6 +14,9 @@ struct PolicySnapshot {
   bool scriptInspectionEnabled{true};
   bool networkContainmentEnabled{false};
   bool quarantineOnMalicious{true};
+  std::vector<std::wstring> suppressionPathRoots;
+  std::vector<std::wstring> suppressionSha256;
+  std::vector<std::wstring> suppressionSignerNames;
 };
 
 inline PolicySnapshot CreateDefaultPolicySnapshot() {
@@ -24,7 +28,10 @@ inline PolicySnapshot CreateDefaultPolicySnapshot() {
       .cloudLookupEnabled = true,
       .scriptInspectionEnabled = true,
       .networkContainmentEnabled = false,
-      .quarantineOnMalicious = true};
+      .quarantineOnMalicious = true,
+      .suppressionPathRoots = {},
+      .suppressionSha256 = {},
+      .suppressionSignerNames = {}};
 }
 
 }  // namespace antivirus::agent

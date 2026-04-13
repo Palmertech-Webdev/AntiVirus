@@ -1,6 +1,9 @@
 #include "RealtimeProtectionBroker.h"
 
 #include <Windows.h>
+#include <TlHelp32.h>
+#include <sddl.h>
+#include <winternl.h>
 
 #include <algorithm>
 #include <chrono>
@@ -10,8 +13,10 @@
 #include <filesystem>
 #include <initializer_list>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -88,6 +93,25 @@ struct BrokerPortReply {
 #pragma pack(pop)
 
 constexpr DWORD kBrokerMessageWaitMilliseconds = 1'000;
+constexpr auto kProcessContextCacheTtl = std::chrono::seconds(15);
+constexpr std::size_t kProcessContextCacheMaxEntries = 512;
+
+struct CachedRealtimeProcessContext {
+  DWORD parentPid{0};
+  std::wstring imagePath;
+  std::wstring parentImagePath;
+  std::wstring commandLine;
+  std::wstring userSid;
+  std::chrono::steady_clock::time_point cachedAt{};
+};
+
+struct EnrichedRealtimeRequest {
+  RealtimeFileScanRequest request{};
+  bool contextEnriched{false};
+};
+
+std::mutex gProcessContextCacheMutex;
+std::unordered_map<DWORD, CachedRealtimeProcessContext> gProcessContextCache;
 
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -111,6 +135,242 @@ void CopyWideField(wchar_t (&destination)[N], const std::wstring& source) {
   }
 
   wcsncpy_s(destination, N, source.c_str(), _TRUNCATE);
+}
+
+void PruneProcessContextCacheLocked(const std::chrono::steady_clock::time_point now) {
+  for (auto iterator = gProcessContextCache.begin(); iterator != gProcessContextCache.end();) {
+    if ((now - iterator->second.cachedAt) > kProcessContextCacheTtl) {
+      iterator = gProcessContextCache.erase(iterator);
+      continue;
+    }
+
+    ++iterator;
+  }
+
+  if (gProcessContextCache.size() > kProcessContextCacheMaxEntries) {
+    gProcessContextCache.clear();
+  }
+}
+
+std::wstring QueryProcessImagePath(const DWORD pid) {
+  if (pid == 0) {
+    return {};
+  }
+
+  const HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (processHandle == nullptr) {
+    return {};
+  }
+
+  std::wstring buffer(4096, L'\0');
+  DWORD length = static_cast<DWORD>(buffer.size());
+  const auto succeeded = QueryFullProcessImageNameW(processHandle, 0, buffer.data(), &length) != FALSE;
+  CloseHandle(processHandle);
+
+  if (!succeeded) {
+    return {};
+  }
+
+  buffer.resize(length);
+  return buffer;
+}
+
+DWORD QueryParentProcessId(const DWORD pid) {
+  if (pid == 0) {
+    return 0;
+  }
+
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return 0;
+  }
+
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  DWORD parentPid = 0;
+
+  if (Process32FirstW(snapshot, &entry) != FALSE) {
+    do {
+      if (entry.th32ProcessID == pid) {
+        parentPid = entry.th32ParentProcessID;
+        break;
+      }
+    } while (Process32NextW(snapshot, &entry) != FALSE);
+  }
+
+  CloseHandle(snapshot);
+  return parentPid;
+}
+
+std::wstring QueryProcessUserSid(const DWORD pid) {
+  if (pid == 0) {
+    return {};
+  }
+
+  const HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (processHandle == nullptr) {
+    return {};
+  }
+
+  HANDLE tokenHandle = nullptr;
+  if (OpenProcessToken(processHandle, TOKEN_QUERY, &tokenHandle) == FALSE) {
+    CloseHandle(processHandle);
+    return {};
+  }
+
+  DWORD requiredBytes = 0;
+  GetTokenInformation(tokenHandle, TokenUser, nullptr, 0, &requiredBytes);
+  if (requiredBytes == 0) {
+    CloseHandle(tokenHandle);
+    CloseHandle(processHandle);
+    return {};
+  }
+
+  std::vector<unsigned char> buffer(requiredBytes);
+  if (GetTokenInformation(tokenHandle, TokenUser, buffer.data(), requiredBytes, &requiredBytes) == FALSE) {
+    CloseHandle(tokenHandle);
+    CloseHandle(processHandle);
+    return {};
+  }
+
+  const auto* tokenUser = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+  LPWSTR sidString = nullptr;
+  const auto converted = ConvertSidToStringSidW(tokenUser->User.Sid, &sidString) != FALSE;
+
+  std::wstring userSid;
+  if (converted && sidString != nullptr) {
+    userSid = sidString;
+    LocalFree(sidString);
+  }
+
+  CloseHandle(tokenHandle);
+  CloseHandle(processHandle);
+  return userSid;
+}
+
+std::wstring QueryProcessCommandLine(const DWORD pid) {
+  if (pid == 0) {
+    return {};
+  }
+
+  const HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (processHandle == nullptr) {
+    return {};
+  }
+
+  using NtQueryInformationProcessFn = LONG(WINAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+  static const auto ntQueryInformationProcess = reinterpret_cast<NtQueryInformationProcessFn>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+  if (ntQueryInformationProcess == nullptr) {
+    CloseHandle(processHandle);
+    return {};
+  }
+
+  ULONG requiredBytes = 0;
+  constexpr auto kProcessCommandLineInformation =
+      static_cast<PROCESSINFOCLASS>(60);
+  (void)ntQueryInformationProcess(processHandle, kProcessCommandLineInformation, nullptr, 0, &requiredBytes);
+  if (requiredBytes < sizeof(UNICODE_STRING)) {
+    CloseHandle(processHandle);
+    return {};
+  }
+
+  std::vector<unsigned char> buffer(requiredBytes);
+  const auto status =
+      ntQueryInformationProcess(processHandle, kProcessCommandLineInformation, buffer.data(), requiredBytes,
+                                &requiredBytes);
+  CloseHandle(processHandle);
+
+  if (status < 0) {
+    return {};
+  }
+
+  const auto* commandLine = reinterpret_cast<const UNICODE_STRING*>(buffer.data());
+  if (commandLine->Length == 0 || commandLine->Buffer == nullptr) {
+    return {};
+  }
+
+  return std::wstring(commandLine->Buffer, commandLine->Length / sizeof(wchar_t));
+}
+
+std::optional<CachedRealtimeProcessContext> QueryRealtimeProcessContext(const DWORD pid) {
+  if (pid == 0) {
+    return std::nullopt;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  {
+    const std::scoped_lock lock(gProcessContextCacheMutex);
+    PruneProcessContextCacheLocked(now);
+    if (const auto existing = gProcessContextCache.find(pid); existing != gProcessContextCache.end()) {
+      return existing->second;
+    }
+  }
+
+  CachedRealtimeProcessContext context{
+      .parentPid = QueryParentProcessId(pid),
+      .imagePath = QueryProcessImagePath(pid),
+      .parentImagePath = {},
+      .commandLine = QueryProcessCommandLine(pid),
+      .userSid = QueryProcessUserSid(pid),
+      .cachedAt = now};
+
+  if (context.parentPid != 0 && context.parentPid != pid) {
+    context.parentImagePath = QueryProcessImagePath(context.parentPid);
+  }
+
+  if (context.imagePath.empty() && context.parentImagePath.empty() && context.commandLine.empty() &&
+      context.userSid.empty()) {
+    return std::nullopt;
+  }
+
+  {
+    const std::scoped_lock lock(gProcessContextCacheMutex);
+    PruneProcessContextCacheLocked(now);
+    gProcessContextCache[pid] = context;
+  }
+
+  return context;
+}
+
+EnrichedRealtimeRequest EnrichRequestProcessContext(const RealtimeFileScanRequest& request) {
+  if (request.processId == 0) {
+    return EnrichedRealtimeRequest{.request = request, .contextEnriched = false};
+  }
+
+  const auto context = QueryRealtimeProcessContext(request.processId);
+  if (!context.has_value()) {
+    return EnrichedRealtimeRequest{.request = request, .contextEnriched = false};
+  }
+
+  auto enriched = request;
+  bool changed = false;
+  const auto processImage = SafeCopy(request.processImage);
+  const auto parentImage = SafeCopy(request.parentImage);
+  const auto commandLine = SafeCopy(request.commandLine);
+  const auto userSid = SafeCopy(request.userSid);
+
+  if (!context->imagePath.empty() && (processImage.empty() || processImage.find(L'\\') == std::wstring::npos)) {
+    CopyWideField(enriched.processImage, context->imagePath);
+    changed = true;
+  }
+
+  if (!context->parentImagePath.empty() && (parentImage.empty() || parentImage.find(L'\\') == std::wstring::npos)) {
+    CopyWideField(enriched.parentImage, context->parentImagePath);
+    changed = true;
+  }
+
+  if (!context->commandLine.empty() && commandLine.empty()) {
+    CopyWideField(enriched.commandLine, context->commandLine);
+    changed = true;
+  }
+
+  if (!context->userSid.empty() && userSid.empty()) {
+    CopyWideField(enriched.userSid, context->userSid);
+    changed = true;
+  }
+
+  return EnrichedRealtimeRequest{.request = enriched, .contextEnriched = changed};
 }
 
 std::wstring OperationToString(const RealtimeFileOperation operation) {
@@ -791,6 +1051,10 @@ bool ApplyBehaviorChainCorrelation(const RealtimeFileScanRequest& request, const
 ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const RealtimeFileOperation operation,
                                  const RealtimeFileScanRequest& request, const PolicySnapshot& policy,
                                  const std::vector<std::filesystem::path>& excludedPaths) {
+  if (const auto allowOverride = BuildAllowOverrideFinding(path, policy, excludedPaths); allowOverride.has_value()) {
+    return *allowOverride;
+  }
+
   const auto extension = ToLowerCopy(path.extension().wstring());
   const auto userControlledPath = IsUserControlledPath(path);
   const auto processImageLower = ToLowerCopy(SafeCopy(request.processImage));
@@ -909,7 +1173,8 @@ TelemetryRecord BuildRealtimeProtectionTelemetry(const ScanFinding& finding, con
                                                  const std::wstring& deviceId, const std::wstring& correlationId,
                                                  const RealtimeFileOperation operation,
                                                  const RealtimeResponseAction action,
-                                                 const RealtimeFileScanRequest& request) {
+                                                 const RealtimeFileScanRequest& request,
+                                                 const bool contextEnriched) {
   const auto actionValue = action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK ? L"block" : L"allow";
   const auto dispositionValue = VerdictDispositionToString(finding.verdict.disposition);
   const auto techniqueId = finding.verdict.techniqueId.empty() ? L"unknown" : finding.verdict.techniqueId;
@@ -964,7 +1229,9 @@ TelemetryRecord BuildRealtimeProtectionTelemetry(const ScanFinding& finding, con
   payload += Utf8ToWide(EscapeJsonString(SafeCopy(request.commandLine)));
   payload += L"\",\"userSid\":\"";
   payload += Utf8ToWide(EscapeJsonString(SafeCopy(request.userSid)));
-  payload += L"\"}";
+  payload += L"\",\"contextEnriched\":";
+  payload += contextEnriched ? L"true" : L"false";
+  payload += L"}";
 
   return TelemetryRecord{
       .eventId = GenerateGuidString(),
@@ -1044,6 +1311,7 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
     deviceId = deviceId_;
   }
 
+  const auto effectiveRequest = EnrichRequestProcessContext(request);
   const auto operation = static_cast<RealtimeFileOperation>(request.operation);
   const std::filesystem::path targetPath(SafeCopy(request.path));
 
@@ -1063,8 +1331,9 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
                         .reasons = {{L"REALTIME_DISABLED", L"Real-time protection is disabled by policy."}}}}};
   }
 
-  auto finding = BuildRealtimeFinding(targetPath, operation, request, policy, config_.scanExcludedPaths);
-  const auto correlatedChain = ApplyBehaviorChainCorrelation(request, operation, policy, finding);
+  auto finding =
+      BuildRealtimeFinding(targetPath, operation, effectiveRequest.request, policy, config_.scanExcludedPaths);
+  const auto correlatedChain = ApplyBehaviorChainCorrelation(effectiveRequest.request, operation, policy, finding);
   if (finding.verdict.disposition == VerdictDisposition::Allow) {
     const auto elevatedAllowSignal =
         correlatedChain ||
@@ -1074,8 +1343,9 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
         });
     if (elevatedAllowSignal) {
       QueueTelemetry(BuildRealtimeProtectionTelemetry(finding, L"realtime-protection", deviceId,
-                                                     SafeCopy(request.correlationId), operation,
-                                                     ANTIVIRUS_REALTIME_RESPONSE_ACTION_ALLOW, request));
+                                                     SafeCopy(effectiveRequest.request.correlationId), operation,
+                                                     ANTIVIRUS_REALTIME_RESPONSE_ACTION_ALLOW,
+                                                     effectiveRequest.request, effectiveRequest.contextEnriched));
     }
 
     return RealtimeInspectionOutcome{
@@ -1141,8 +1411,9 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
 
   QueueTelemetry(BuildScanFindingTelemetry(finding, L"realtime-protection"));
   QueueTelemetry(BuildRealtimeProtectionTelemetry(finding, L"realtime-protection", deviceId,
-                                                 SafeCopy(request.correlationId), operation,
-                                                 ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK, request));
+                                                 SafeCopy(effectiveRequest.request.correlationId), operation,
+                                                 ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK,
+                                                 effectiveRequest.request, effectiveRequest.contextEnriched));
 
   return RealtimeInspectionOutcome{
       .action = ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK,

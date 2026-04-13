@@ -11,6 +11,17 @@ function formatBoolean(value: boolean) {
   return value ? "Enabled" : "Disabled";
 }
 
+function formatPolicyList(values: string[]) {
+  return values.join("\n");
+}
+
+function parsePolicyList(value: string) {
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 export default function PoliciesView() {
   const { snapshot, source, refreshing, refreshSnapshot } = useConsoleData();
   const [query, setQuery] = useState("");
@@ -26,6 +37,9 @@ export default function PoliciesView() {
   const [newScriptInspection, setNewScriptInspection] = useState(true);
   const [newNetworkContainment, setNewNetworkContainment] = useState(true);
   const [newQuarantineOnMalicious, setNewQuarantineOnMalicious] = useState(true);
+  const [newSuppressionPathRoots, setNewSuppressionPathRoots] = useState("");
+  const [newSuppressionSha256, setNewSuppressionSha256] = useState("");
+  const [newSuppressionSignerNames, setNewSuppressionSignerNames] = useState("");
 
   const policies = snapshot.policies;
   const currentPolicy = policies.find((item) => item.id === selectedPolicyId) ?? policies[0] ?? null;
@@ -38,6 +52,9 @@ export default function PoliciesView() {
   const [policyScriptInspection, setPolicyScriptInspection] = useState(true);
   const [policyNetworkContainment, setPolicyNetworkContainment] = useState(true);
   const [policyQuarantineOnMalicious, setPolicyQuarantineOnMalicious] = useState(true);
+  const [policySuppressionPathRoots, setPolicySuppressionPathRoots] = useState("");
+  const [policySuppressionSha256, setPolicySuppressionSha256] = useState("");
+  const [policySuppressionSignerNames, setPolicySuppressionSignerNames] = useState("");
 
   useEffect(() => {
     if (!selectedPolicyId && policies[0]) {
@@ -57,6 +74,9 @@ export default function PoliciesView() {
     setPolicyScriptInspection(currentPolicy.scriptInspection);
     setPolicyNetworkContainment(currentPolicy.networkContainment);
     setPolicyQuarantineOnMalicious(currentPolicy.quarantineOnMalicious);
+    setPolicySuppressionPathRoots(formatPolicyList(currentPolicy.suppressionPathRoots));
+    setPolicySuppressionSha256(formatPolicyList(currentPolicy.suppressionSha256));
+    setPolicySuppressionSignerNames(formatPolicyList(currentPolicy.suppressionSignerNames));
     setSelectedDeviceIds(currentPolicy.assignedDeviceIds);
   }, [currentPolicy]);
 
@@ -172,6 +192,36 @@ export default function PoliciesView() {
             <label className="field-group inline-toggle"><span>Script inspection</span><input type="checkbox" checked={newScriptInspection} onChange={(event) => setNewScriptInspection(event.target.checked)} /></label>
             <label className="field-group inline-toggle"><span>Network containment</span><input type="checkbox" checked={newNetworkContainment} onChange={(event) => setNewNetworkContainment(event.target.checked)} /></label>
             <label className="field-group inline-toggle"><span>Quarantine on malicious</span><input type="checkbox" checked={newQuarantineOnMalicious} onChange={(event) => setNewQuarantineOnMalicious(event.target.checked)} /></label>
+            <label className="field-group field-span-2">
+              <span>Suppressed path roots</span>
+              <textarea
+                className="admin-input"
+                rows={4}
+                placeholder={"C:\\Program Files\\Trusted App\nC:\\Tools\\KnownClean"}
+                value={newSuppressionPathRoots}
+                onChange={(event) => setNewSuppressionPathRoots(event.target.value)}
+              />
+            </label>
+            <label className="field-group">
+              <span>Suppressed SHA-256</span>
+              <textarea
+                className="admin-input"
+                rows={4}
+                placeholder={"ab12...\ncd34..."}
+                value={newSuppressionSha256}
+                onChange={(event) => setNewSuppressionSha256(event.target.value)}
+              />
+            </label>
+            <label className="field-group">
+              <span>Suppressed signer names</span>
+              <textarea
+                className="admin-input"
+                rows={4}
+                placeholder={"Microsoft Windows\nAdobe Inc."}
+                value={newSuppressionSignerNames}
+                onChange={(event) => setNewSuppressionSignerNames(event.target.value)}
+              />
+            </label>
           </div>
           <div className="form-actions">
             <button
@@ -187,10 +237,16 @@ export default function PoliciesView() {
                     cloudLookup: newCloudLookup,
                     scriptInspection: newScriptInspection,
                     networkContainment: newNetworkContainment,
-                    quarantineOnMalicious: newQuarantineOnMalicious
+                    quarantineOnMalicious: newQuarantineOnMalicious,
+                    suppressionPathRoots: parsePolicyList(newSuppressionPathRoots),
+                    suppressionSha256: parsePolicyList(newSuppressionSha256),
+                    suppressionSignerNames: parsePolicyList(newSuppressionSignerNames)
                   });
                   setNewPolicyName("");
                   setNewPolicyDescription("");
+                  setNewSuppressionPathRoots("");
+                  setNewSuppressionSha256("");
+                  setNewSuppressionSignerNames("");
                 });
               }}
             >
@@ -245,6 +301,36 @@ export default function PoliciesView() {
               <label className="field-group inline-toggle"><span>Script inspection</span><input type="checkbox" checked={policyScriptInspection} onChange={(event) => setPolicyScriptInspection(event.target.checked)} /></label>
               <label className="field-group inline-toggle"><span>Network containment</span><input type="checkbox" checked={policyNetworkContainment} onChange={(event) => setPolicyNetworkContainment(event.target.checked)} /></label>
               <label className="field-group inline-toggle"><span>Quarantine on malicious</span><input type="checkbox" checked={policyQuarantineOnMalicious} onChange={(event) => setPolicyQuarantineOnMalicious(event.target.checked)} /></label>
+              <label className="field-group field-span-2">
+                <span>Suppressed path roots</span>
+                <textarea
+                  className="admin-input"
+                  rows={4}
+                  placeholder={"C:\\Program Files\\Trusted App\nC:\\Tools\\KnownClean"}
+                  value={policySuppressionPathRoots}
+                  onChange={(event) => setPolicySuppressionPathRoots(event.target.value)}
+                />
+              </label>
+              <label className="field-group">
+                <span>Suppressed SHA-256</span>
+                <textarea
+                  className="admin-input"
+                  rows={4}
+                  placeholder={"ab12...\ncd34..."}
+                  value={policySuppressionSha256}
+                  onChange={(event) => setPolicySuppressionSha256(event.target.value)}
+                />
+              </label>
+              <label className="field-group">
+                <span>Suppressed signer names</span>
+                <textarea
+                  className="admin-input"
+                  rows={4}
+                  placeholder={"Microsoft Windows\nAdobe Inc."}
+                  value={policySuppressionSignerNames}
+                  onChange={(event) => setPolicySuppressionSignerNames(event.target.value)}
+                />
+              </label>
             </div>
             <div className="form-actions">
               <button
@@ -260,7 +346,10 @@ export default function PoliciesView() {
                       cloudLookup: policyCloudLookup,
                       scriptInspection: policyScriptInspection,
                       networkContainment: policyNetworkContainment,
-                      quarantineOnMalicious: policyQuarantineOnMalicious
+                      quarantineOnMalicious: policyQuarantineOnMalicious,
+                      suppressionPathRoots: parsePolicyList(policySuppressionPathRoots),
+                      suppressionSha256: parsePolicyList(policySuppressionSha256),
+                      suppressionSignerNames: parsePolicyList(policySuppressionSignerNames)
                     });
                   });
                 }}

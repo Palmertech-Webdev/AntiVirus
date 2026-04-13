@@ -5,8 +5,8 @@
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
-#include <string>
 #include <sstream>
+#include <string>
 
 #include "StringUtils.h"
 
@@ -17,6 +17,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
+constexpr int kRuntimeDatabaseSchemaVersion = 2;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -35,23 +36,45 @@ void Exec(sqlite3* db, const char* sql) {
   }
 }
 
-ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
-  if (databasePath.has_parent_path()) {
-    std::filesystem::create_directories(databasePath.parent_path());
+void ExecIgnoreDuplicateColumn(sqlite3* db, const char* sql) {
+  char* errorMessage = nullptr;
+  if (sqlite3_exec(db, sql, nullptr, nullptr, &errorMessage) != SQLITE_OK) {
+    const auto message = std::string(errorMessage == nullptr ? "sqlite exec failed" : errorMessage);
+    if (errorMessage != nullptr) {
+      sqlite3_free(errorMessage);
+    }
+
+    if (message.find("duplicate column name") == std::string::npos) {
+      throw std::runtime_error(message);
+    }
+  }
+}
+
+void Begin(sqlite3* db) { Exec(db, "BEGIN IMMEDIATE TRANSACTION;"); }
+void Commit(sqlite3* db) { Exec(db, "COMMIT;"); }
+void Rollback(sqlite3* db) noexcept { sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr); }
+
+int GetUserVersion(sqlite3* db) {
+  sqlite3_stmt* raw = nullptr;
+  if (sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &raw, nullptr) != SQLITE_OK) {
+    ThrowSqliteError(db, "sqlite3_prepare_v2 failed for PRAGMA user_version");
   }
 
-  sqlite3* raw = nullptr;
-  if (sqlite3_open_v2(WidePathToUtf8(databasePath).c_str(), &raw,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
-    ThrowSqliteError(raw, "sqlite3_open_v2 failed");
+  StatementHandle statement(raw, sqlite3_finalize);
+  const auto step = sqlite3_step(statement.get());
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db, "sqlite3_step failed for PRAGMA user_version");
   }
 
-  ConnectionHandle connection(raw, sqlite3_close);
-  Exec(connection.get(), "PRAGMA journal_mode=WAL;");
-  Exec(connection.get(), "PRAGMA synchronous=FULL;");
-  Exec(connection.get(), "PRAGMA foreign_keys=ON;");
-  Exec(connection.get(), "PRAGMA busy_timeout=5000;");
-  Exec(connection.get(),
+  return sqlite3_column_int(statement.get(), 0);
+}
+
+void SetUserVersion(sqlite3* db, const int version) {
+  Exec(db, ("PRAGMA user_version=" + std::to_string(version) + ";").c_str());
+}
+
+void EnsureBaseSchema(sqlite3* db) {
+  Exec(db,
        "CREATE TABLE IF NOT EXISTS agent_state ("
        " singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
        " device_id TEXT, hostname TEXT, os_version TEXT, serial_number TEXT,"
@@ -66,7 +89,10 @@ ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
        " cloud_lookup_enabled INTEGER NOT NULL,"
        " script_inspection_enabled INTEGER NOT NULL,"
        " network_containment_enabled INTEGER NOT NULL,"
-       " quarantine_on_malicious INTEGER NOT NULL"
+       " quarantine_on_malicious INTEGER NOT NULL,"
+       " suppression_path_roots TEXT NOT NULL DEFAULT '',"
+       " suppression_sha256 TEXT NOT NULL DEFAULT '',"
+       " suppression_signer_names TEXT NOT NULL DEFAULT ''"
        ");"
        "CREATE TABLE IF NOT EXISTS telemetry_queue ("
        " queue_id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -112,6 +138,49 @@ ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
        "CREATE INDEX IF NOT EXISTS idx_scan_history_recorded_at ON scan_history(recorded_at DESC);"
        "CREATE INDEX IF NOT EXISTS idx_update_journal_status ON update_journal(status, started_at DESC);"
        "CREATE INDEX IF NOT EXISTS idx_blocked_software_name ON blocked_software(display_name);");
+}
+
+void RunSchemaMigrations(sqlite3* db) {
+  const auto currentVersion = GetUserVersion(db);
+  if (currentVersion >= kRuntimeDatabaseSchemaVersion) {
+    return;
+  }
+
+  try {
+    Begin(db);
+
+    if (currentVersion < 2) {
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE policy_cache ADD COLUMN suppression_path_roots TEXT NOT NULL DEFAULT '';");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE policy_cache ADD COLUMN suppression_sha256 TEXT NOT NULL DEFAULT '';");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE policy_cache ADD COLUMN suppression_signer_names TEXT NOT NULL DEFAULT '';");
+    }
+
+    SetUserVersion(db, kRuntimeDatabaseSchemaVersion);
+    Commit(db);
+  } catch (...) {
+    Rollback(db);
+    throw;
+  }
+}
+
+ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
+  if (databasePath.has_parent_path()) {
+    std::filesystem::create_directories(databasePath.parent_path());
+  }
+
+  sqlite3* raw = nullptr;
+  if (sqlite3_open_v2(WidePathToUtf8(databasePath).c_str(), &raw,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
+    ThrowSqliteError(raw, "sqlite3_open_v2 failed");
+  }
+
+  ConnectionHandle connection(raw, sqlite3_close);
+  Exec(connection.get(), "PRAGMA journal_mode=WAL;");
+  Exec(connection.get(), "PRAGMA synchronous=FULL;");
+  Exec(connection.get(), "PRAGMA foreign_keys=ON;");
+  Exec(connection.get(), "PRAGMA busy_timeout=5000;");
+  EnsureBaseSchema(connection.get());
+  RunSchemaMigrations(connection.get());
   return connection;
 }
 
@@ -128,10 +197,6 @@ void StepDone(sqlite3* db, sqlite3_stmt* statement) {
     ThrowSqliteError(db, "sqlite3_step did not finish");
   }
 }
-
-void Begin(sqlite3* db) { Exec(db, "BEGIN IMMEDIATE TRANSACTION;"); }
-void Commit(sqlite3* db) { Exec(db, "COMMIT;"); }
-void Rollback(sqlite3* db) noexcept { sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr); }
 
 void BindText(sqlite3_stmt* statement, const int index, const std::wstring& value) {
   const auto utf8 = WideToUtf8(value);
@@ -204,7 +269,8 @@ bool RuntimeDatabase::LoadAgentState(AgentState& state) const {
   auto policyStatement = Prepare(db.get(),
                                  "SELECT policy_id, policy_name, revision, realtime_protection_enabled,"
                                  " cloud_lookup_enabled, script_inspection_enabled, network_containment_enabled,"
-                                 " quarantine_on_malicious FROM policy_cache WHERE singleton=1;");
+                                 " quarantine_on_malicious, suppression_path_roots, suppression_sha256,"
+                                 " suppression_signer_names FROM policy_cache WHERE singleton=1;");
   const auto policyStep = sqlite3_step(policyStatement.get());
   if (policyStep == SQLITE_ROW) {
     state.policy.policyId = ColumnText(policyStatement.get(), 0);
@@ -215,6 +281,9 @@ bool RuntimeDatabase::LoadAgentState(AgentState& state) const {
     state.policy.scriptInspectionEnabled = sqlite3_column_int(policyStatement.get(), 5) != 0;
     state.policy.networkContainmentEnabled = sqlite3_column_int(policyStatement.get(), 6) != 0;
     state.policy.quarantineOnMalicious = sqlite3_column_int(policyStatement.get(), 7) != 0;
+    state.policy.suppressionPathRoots = SplitStrings(ColumnText(policyStatement.get(), 8));
+    state.policy.suppressionSha256 = SplitStrings(ColumnText(policyStatement.get(), 9));
+    state.policy.suppressionSignerNames = SplitStrings(ColumnText(policyStatement.get(), 10));
   }
 
   return true;
@@ -259,8 +328,9 @@ void RuntimeDatabase::SaveAgentState(const AgentState& state) const {
                                    "INSERT INTO policy_cache("
                                    " singleton, policy_id, policy_name, revision, realtime_protection_enabled,"
                                    " cloud_lookup_enabled, script_inspection_enabled, network_containment_enabled,"
-                                   " quarantine_on_malicious)"
-                                   " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                                   " quarantine_on_malicious, suppression_path_roots, suppression_sha256,"
+                                   " suppression_signer_names)"
+                                   " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                                    " ON CONFLICT(singleton) DO UPDATE SET"
                                    " policy_id=excluded.policy_id, policy_name=excluded.policy_name,"
                                    " revision=excluded.revision,"
@@ -268,7 +338,10 @@ void RuntimeDatabase::SaveAgentState(const AgentState& state) const {
                                    " cloud_lookup_enabled=excluded.cloud_lookup_enabled,"
                                    " script_inspection_enabled=excluded.script_inspection_enabled,"
                                    " network_containment_enabled=excluded.network_containment_enabled,"
-                                   " quarantine_on_malicious=excluded.quarantine_on_malicious;");
+                                   " quarantine_on_malicious=excluded.quarantine_on_malicious,"
+                                   " suppression_path_roots=excluded.suppression_path_roots,"
+                                   " suppression_sha256=excluded.suppression_sha256,"
+                                   " suppression_signer_names=excluded.suppression_signer_names;");
     sqlite3_bind_int(policyStatement.get(), 1, kSingletonKey);
     BindText(policyStatement.get(), 2, state.policy.policyId);
     BindText(policyStatement.get(), 3, state.policy.policyName);
@@ -278,6 +351,9 @@ void RuntimeDatabase::SaveAgentState(const AgentState& state) const {
     sqlite3_bind_int(policyStatement.get(), 7, state.policy.scriptInspectionEnabled ? 1 : 0);
     sqlite3_bind_int(policyStatement.get(), 8, state.policy.networkContainmentEnabled ? 1 : 0);
     sqlite3_bind_int(policyStatement.get(), 9, state.policy.quarantineOnMalicious ? 1 : 0);
+    BindText(policyStatement.get(), 10, JoinStrings(state.policy.suppressionPathRoots));
+    BindText(policyStatement.get(), 11, JoinStrings(state.policy.suppressionSha256));
+    BindText(policyStatement.get(), 12, JoinStrings(state.policy.suppressionSignerNames));
     StepDone(db.get(), policyStatement.get());
 
     Commit(db.get());

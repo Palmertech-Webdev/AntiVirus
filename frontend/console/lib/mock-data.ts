@@ -26,7 +26,10 @@ export const emptyDashboard: DashboardSnapshot = {
     pamLiteEnabled: false,
     denyHighRiskElevation: false,
     denyUnsignedElevation: false,
-    requireBreakGlassEscrow: false
+    requireBreakGlassEscrow: false,
+    suppressionPathRoots: [],
+    suppressionSha256: [],
+    suppressionSignerNames: []
   },
   policies: [],
   scripts: []
@@ -271,7 +274,10 @@ export const fallbackDashboard: DashboardSnapshot = {
     pamLiteEnabled: true,
     denyHighRiskElevation: true,
     denyUnsignedElevation: true,
-    requireBreakGlassEscrow: true
+    requireBreakGlassEscrow: true,
+    suppressionPathRoots: [],
+    suppressionSha256: [],
+    suppressionSignerNames: []
   },
   policies: [
     {
@@ -291,6 +297,9 @@ export const fallbackDashboard: DashboardSnapshot = {
       denyHighRiskElevation: true,
       denyUnsignedElevation: true,
       requireBreakGlassEscrow: true,
+      suppressionPathRoots: [],
+      suppressionSha256: [],
+      suppressionSignerNames: [],
       description: "Balanced endpoint baseline for everyday protected workstations.",
       isDefault: true,
       assignedDeviceIds: ["dev-lon-001", "dev-lon-002"],
@@ -314,6 +323,9 @@ export const fallbackDashboard: DashboardSnapshot = {
       denyHighRiskElevation: true,
       denyUnsignedElevation: true,
       requireBreakGlassEscrow: true,
+      suppressionPathRoots: [],
+      suppressionSha256: [],
+      suppressionSignerNames: [],
       description: "Tighter network containment and aggressive quarantine for high-risk devices.",
       isDefault: false,
       assignedDeviceIds: ["dev-lon-003"],

@@ -115,7 +115,7 @@ The default sync interval is now 60 seconds when the agent is run in multi-itera
 
 ## Packaging
 
-- Use [BuildInstallerBundle.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/BuildInstallerBundle.ps1) to produce a native `AntiVirusSetup.exe` installer that embeds the service, endpoint client, AMSI provider, scanner CLI, and signature bundle.
-- Use [BuildReleaseLayout.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/BuildReleaseLayout.ps1) to stage the built binaries, docs, signature bundle, and optional driver artifacts into a release tree.
+- Use [BuildReleaseLayout.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/BuildReleaseLayout.ps1) to stage the built binaries, docs, signature bundle, and optional driver artifacts into `agent/windows/out/dev`.
+- Use [BuildInstallerBundle.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/BuildInstallerBundle.ps1) to produce a native `FenrirSetup.exe` installer in `agent/windows/out/install`.
 - Use [GenerateUpdateManifest.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/installer/GenerateUpdateManifest.ps1) to produce an updater manifest consumable by the rollback-aware update service.
-- Use `--self-test` against the staged layout before treating a build as promotion-ready.
+- Use `--self-test` against the staged `out/dev` layout before treating a build as promotion-ready.

@@ -43,7 +43,10 @@ function createDefaultPolicy() {
     pamLiteEnabled: true,
     denyHighRiskElevation: true,
     denyUnsignedElevation: true,
-    requireBreakGlassEscrow: true
+    requireBreakGlassEscrow: true,
+    suppressionPathRoots: [],
+    suppressionSha256: [],
+    suppressionSignerNames: []
   };
 }
 
@@ -182,6 +185,9 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         denyHighRiskElevation: true,
         denyUnsignedElevation: true,
         requireBreakGlassEscrow: true,
+        suppressionPathRoots: [],
+        suppressionSha256: [],
+        suppressionSignerNames: [],
         description: "Tighter network containment and aggressive quarantine for high-risk devices.",
         isDefault: false,
         assignedDeviceIds: ["dev-lon-003", "dev-lon-005", "dev-lon-006", "dev-lon-007"],
@@ -205,6 +211,9 @@ export function createSeedState(baseIso: string = new Date().toISOString()): Con
         denyHighRiskElevation: true,
         denyUnsignedElevation: true,
         requireBreakGlassEscrow: true,
+        suppressionPathRoots: [],
+        suppressionSha256: [],
+        suppressionSignerNames: [],
         description: "Harder exposure controls and tighter admin-surface review for server-class endpoints.",
         isDefault: false,
         assignedDeviceIds: ["dev-lon-004"],

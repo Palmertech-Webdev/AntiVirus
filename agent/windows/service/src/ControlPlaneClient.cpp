@@ -286,6 +286,65 @@ std::vector<std::string> ExtractJsonObjectArray(const std::string& json, const s
   return objects;
 }
 
+std::vector<std::string> ExtractJsonStringArray(const std::string& json, const std::string& key) {
+  std::vector<std::string> values;
+
+  const auto keyToken = "\"" + key + "\"";
+  const auto keyPosition = json.find(keyToken);
+  if (keyPosition == std::string::npos) {
+    return values;
+  }
+
+  const auto arrayStart = json.find('[', keyPosition);
+  if (arrayStart == std::string::npos) {
+    return values;
+  }
+
+  bool insideString = false;
+  bool escaping = false;
+  std::string current;
+
+  for (std::size_t index = arrayStart + 1; index < json.size(); ++index) {
+    const auto ch = json[index];
+
+    if (!insideString) {
+      if (ch == ']') {
+        break;
+      }
+
+      if (ch == '"') {
+        insideString = true;
+        current.clear();
+      }
+
+      continue;
+    }
+
+    if (escaping) {
+      current.push_back(ch);
+      escaping = false;
+      continue;
+    }
+
+    if (ch == '\\') {
+      current.push_back(ch);
+      escaping = true;
+      continue;
+    }
+
+    if (ch == '"') {
+      values.push_back(UnescapeJsonString(current));
+      insideString = false;
+      current.clear();
+      continue;
+    }
+
+    current.push_back(ch);
+  }
+
+  return values;
+}
+
 std::wstring RequireString(const std::optional<std::string>& value, const char* fieldName) {
   if (!value.has_value()) {
     throw std::runtime_error(std::string("Missing JSON string field: ") + fieldName);
@@ -311,6 +370,25 @@ PolicySnapshot ParsePolicySnapshot(const std::string& json) {
   policy.cloudLookupEnabled = RequireBool(ExtractJsonBool(json, "cloudLookup"), "cloudLookup");
   policy.scriptInspectionEnabled = RequireBool(ExtractJsonBool(json, "scriptInspection"), "scriptInspection");
   policy.networkContainmentEnabled = RequireBool(ExtractJsonBool(json, "networkContainment"), "networkContainment");
+  policy.quarantineOnMalicious = RequireBool(ExtractJsonBool(json, "quarantineOnMalicious"), "quarantineOnMalicious");
+  for (const auto& root : ExtractJsonStringArray(json, "suppressionPathRoots")) {
+    const auto wide = Utf8ToWide(root);
+    if (!wide.empty()) {
+      policy.suppressionPathRoots.push_back(wide);
+    }
+  }
+  for (const auto& sha256 : ExtractJsonStringArray(json, "suppressionSha256")) {
+    const auto wide = Utf8ToWide(sha256);
+    if (!wide.empty()) {
+      policy.suppressionSha256.push_back(wide);
+    }
+  }
+  for (const auto& signer : ExtractJsonStringArray(json, "suppressionSignerNames")) {
+    const auto wide = Utf8ToWide(signer);
+    if (!wide.empty()) {
+      policy.suppressionSignerNames.push_back(wide);
+    }
+  }
   return policy;
 }
 

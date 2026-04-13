@@ -1,5 +1,5 @@
 param(
-    [string]$ReleaseRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\release'),
+    [string]$ReleaseRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
     [string]$OutputPath = '',
     [string]$PackageId = 'platform',
     [string]$PackageType = 'platform',
@@ -21,7 +21,7 @@ if (-not $OutputPath) {
 }
 
 $manifestLines = [System.Collections.Generic.List[string]]::new()
-$manifestLines.Add('# AntiVirus update manifest')
+$manifestLines.Add('# Fenrir update manifest')
 $manifestLines.Add("package_id=$PackageId")
 $manifestLines.Add("package_type=$PackageType")
 $manifestLines.Add("target_version=$TargetVersion")

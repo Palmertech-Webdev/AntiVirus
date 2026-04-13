@@ -289,6 +289,28 @@ function readOptionalStringArray(value: unknown) {
   return value.filter((item): item is string => typeof item === "string");
 }
 
+function normalizePolicyStringArray(value: unknown, normalizer: (value: string) => string = (item) => item.trim()) {
+  const results: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of readOptionalStringArray(value)) {
+    const normalized = normalizer(item).trim();
+    if (!normalized) {
+      continue;
+    }
+
+    const dedupeKey = normalized.toLowerCase();
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    results.push(normalized);
+  }
+
+  return results;
+}
+
 function normalizeTelemetryProcessContext(record: Partial<TelemetryRecord>, payload: ParsedPayload | null) {
   if (record.eventType === "process.started" || record.eventType === "process.exited") {
     return {
@@ -848,7 +870,10 @@ function toPolicySummary(policy: PolicyProfile): PolicySummary {
     pamLiteEnabled: policy.pamLiteEnabled,
     denyHighRiskElevation: policy.denyHighRiskElevation,
     denyUnsignedElevation: policy.denyUnsignedElevation,
-    requireBreakGlassEscrow: policy.requireBreakGlassEscrow
+    requireBreakGlassEscrow: policy.requireBreakGlassEscrow,
+    suppressionPathRoots: policy.suppressionPathRoots,
+    suppressionSha256: policy.suppressionSha256,
+    suppressionSignerNames: policy.suppressionSignerNames
   };
 }
 
@@ -883,6 +908,18 @@ function normalizePolicyProfile(raw: unknown, fallback: PolicySummary, nowIso: s
       typeof policy.requireBreakGlassEscrow === "boolean"
         ? policy.requireBreakGlassEscrow
         : fallback.requireBreakGlassEscrow,
+    suppressionPathRoots:
+      Array.isArray(policy.suppressionPathRoots)
+        ? normalizePolicyStringArray(policy.suppressionPathRoots)
+        : fallback.suppressionPathRoots,
+    suppressionSha256:
+      Array.isArray(policy.suppressionSha256)
+        ? normalizePolicyStringArray(policy.suppressionSha256, (item) => item.toLowerCase())
+        : fallback.suppressionSha256,
+    suppressionSignerNames:
+      Array.isArray(policy.suppressionSignerNames)
+        ? normalizePolicyStringArray(policy.suppressionSignerNames)
+        : fallback.suppressionSignerNames,
     description: readOptionalString(policy.description, `${fallback.name} protection profile`),
     isDefault: policy.isDefault === true,
     assignedDeviceIds: readOptionalStringArray(policy.assignedDeviceIds),
@@ -4049,6 +4086,9 @@ export function createFileBackedControlPlaneStore(
           denyHighRiskElevation: request.denyHighRiskElevation ?? request.privilegeHardeningEnabled ?? false,
           denyUnsignedElevation: request.denyUnsignedElevation ?? request.privilegeHardeningEnabled ?? false,
           requireBreakGlassEscrow: request.requireBreakGlassEscrow ?? request.privilegeHardeningEnabled ?? false,
+          suppressionPathRoots: normalizePolicyStringArray(request.suppressionPathRoots),
+          suppressionSha256: normalizePolicyStringArray(request.suppressionSha256, (item) => item.toLowerCase()),
+          suppressionSignerNames: normalizePolicyStringArray(request.suppressionSignerNames),
           isDefault: false,
           assignedDeviceIds: [],
           createdAt: timestamp,
@@ -4102,6 +4142,18 @@ export function createFileBackedControlPlaneStore(
           denyHighRiskElevation: request.denyHighRiskElevation ?? policy.denyHighRiskElevation,
           denyUnsignedElevation: request.denyUnsignedElevation ?? policy.denyUnsignedElevation,
           requireBreakGlassEscrow: request.requireBreakGlassEscrow ?? policy.requireBreakGlassEscrow,
+          suppressionPathRoots:
+            request.suppressionPathRoots !== undefined
+              ? normalizePolicyStringArray(request.suppressionPathRoots)
+              : policy.suppressionPathRoots,
+          suppressionSha256:
+            request.suppressionSha256 !== undefined
+              ? normalizePolicyStringArray(request.suppressionSha256, (item) => item.toLowerCase())
+              : policy.suppressionSha256,
+          suppressionSignerNames:
+            request.suppressionSignerNames !== undefined
+              ? normalizePolicyStringArray(request.suppressionSignerNames)
+              : policy.suppressionSignerNames,
           revision: buildPolicyRevision(timestamp),
           updatedAt: timestamp
         });

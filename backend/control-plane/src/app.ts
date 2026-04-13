@@ -190,7 +190,10 @@ const createPolicyRequestSchema = z.object({
   pamLiteEnabled: z.boolean().optional(),
   denyHighRiskElevation: z.boolean().optional(),
   denyUnsignedElevation: z.boolean().optional(),
-  requireBreakGlassEscrow: z.boolean().optional()
+  requireBreakGlassEscrow: z.boolean().optional(),
+  suppressionPathRoots: z.array(z.string().min(1)).optional(),
+  suppressionSha256: z.array(z.string().min(1)).optional(),
+  suppressionSignerNames: z.array(z.string().min(1)).optional()
 });
 
 const updatePolicyRequestSchema = createPolicyRequestSchema.partial();

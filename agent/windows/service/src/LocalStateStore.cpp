@@ -95,6 +95,23 @@ bool GetBool(const std::map<std::string, std::string>& values, const std::string
   return fallback;
 }
 
+std::vector<std::wstring> GetStringList(const std::map<std::string, std::string>& values, const std::string& key) {
+  if (const auto entry = values.find(key); entry != values.end()) {
+    std::vector<std::wstring> results;
+    std::stringstream stream(entry->second);
+    std::string item;
+    while (std::getline(stream, item, ';')) {
+      const auto trimmed = TrimCopy(item);
+      if (!trimmed.empty()) {
+        results.push_back(Utf8ToWide(trimmed));
+      }
+    }
+    return results;
+  }
+
+  return {};
+}
+
 AgentState ImportLegacyState(const std::filesystem::path& stateFilePath) {
   AgentState state = BuildSeedState();
   const auto values = ParseLegacyStateFile(stateFilePath);
@@ -126,6 +143,9 @@ AgentState ImportLegacyState(const std::filesystem::path& stateFilePath) {
       GetBool(values, "policy_network_containment_enabled", state.policy.networkContainmentEnabled);
   state.policy.quarantineOnMalicious =
       GetBool(values, "policy_quarantine_on_malicious", state.policy.quarantineOnMalicious);
+  state.policy.suppressionPathRoots = GetStringList(values, "policy_suppression_path_roots");
+  state.policy.suppressionSha256 = GetStringList(values, "policy_suppression_sha256");
+  state.policy.suppressionSignerNames = GetStringList(values, "policy_suppression_signer_names");
   return state;
 }
 

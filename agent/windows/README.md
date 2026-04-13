@@ -33,6 +33,12 @@ The Windows agent is responsible for local prevention, telemetry collection, enf
 - Use a local SQLite or embedded store only for short-lived cache and queue state, not long-term analytics.
 - Make every decision path produce a compact local evidence record for later backend upload.
 
+## Canonical Output Layout
+
+- `agent/windows/out/dev` is the canonical staged payload tree for local testing, release verification, and update-manifest generation.
+- `agent/windows/out/install` is the canonical packaged-installer location for `FenrirSetup.exe`.
+- `agent/windows/out/dev/build` is only the CMake intermediate workspace. Promotion-ready binaries should be consumed from `out/dev`, not directly from the build tree.
+
 ## First Build Targets
 
 - Agent service starts at boot and loads policy from local cache

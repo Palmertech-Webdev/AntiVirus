@@ -140,6 +140,9 @@ export interface PolicySummary {
   denyHighRiskElevation: boolean;
   denyUnsignedElevation: boolean;
   requireBreakGlassEscrow: boolean;
+  suppressionPathRoots: string[];
+  suppressionSha256: string[];
+  suppressionSignerNames: string[];
 }
 
 export interface PolicyProfile extends PolicySummary {
@@ -644,6 +647,9 @@ export interface CreatePolicyRequest {
   denyHighRiskElevation?: boolean;
   denyUnsignedElevation?: boolean;
   requireBreakGlassEscrow?: boolean;
+  suppressionPathRoots?: string[];
+  suppressionSha256?: string[];
+  suppressionSignerNames?: string[];
 }
 
 export interface UpdatePolicyRequest extends Partial<CreatePolicyRequest> {}

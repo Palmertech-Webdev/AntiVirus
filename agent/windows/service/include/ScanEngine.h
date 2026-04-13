@@ -47,6 +47,9 @@ using ScanProgressCallback = std::function<void(const ScanProgressUpdate&)>;
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy);
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
                                     const std::vector<std::filesystem::path>& excludedPaths);
+std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy);
+std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy,
+                                                     const std::vector<std::filesystem::path>& excludedPaths);
 std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy);
 std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy,
                                      const ScanProgressCallback& progressCallback);

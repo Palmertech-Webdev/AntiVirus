@@ -1,6 +1,7 @@
 param(
     [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev\build'),
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
+    [string]$InstallerOutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
     [string]$DriverArtifactRoot = '',
     [switch]$Clean
 )
@@ -61,6 +62,36 @@ function Get-CMakeCacheValue {
     return $match.Matches[0].Groups[1].Value.Trim()
 }
 
+function Assert-PathPresent {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Required release artifact is missing: $Path"
+    }
+}
+
+function Remove-LegacyBuildOutputs {
+    param([string]$BuildRoot)
+
+    foreach ($name in @(
+        'fenrir-agent-service.exe',
+        'fenrir-amsi-provider.dll',
+        'fenrir-amsitestcli.exe',
+        'fenrir-endpoint-client.exe',
+        'fenrir-etwtestcli.exe',
+        'fenrir-pam.exe',
+        'fenrir-scannercli.exe',
+        'fenrir-wfptestcli.exe',
+        'FenrirSetup.exe',
+        'WebView2Loader.dll'
+    )) {
+        $candidate = Join-Path $BuildRoot $name
+        if (Test-Path -LiteralPath $candidate) {
+            Remove-Item -LiteralPath $candidate -Force
+        }
+    }
+}
+
 function Find-MinGwRuntimeDll {
     param(
         [string]$BuildRoot,
@@ -87,10 +118,26 @@ function Find-MinGwRuntimeDll {
     return ''
 }
 
+function Test-PathWithin {
+    param(
+        [string]$Root,
+        [string]$Path
+    )
+
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    if ($pathFull.Length -lt $rootFull.Length) {
+        return $false
+    }
+
+    return $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 $windowsRoot = Split-Path $PSScriptRoot -Parent
 $serviceSourceRoot = Join-Path $windowsRoot 'service'
 $buildRoot = [System.IO.Path]::GetFullPath($BuildRoot)
 $outputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+$installerOutputRoot = [System.IO.Path]::GetFullPath($InstallerOutputRoot)
 
 if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
     Remove-Item -LiteralPath $outputRoot -Recurse -Force
@@ -98,9 +145,9 @@ if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
 
 Ensure-Directory -Path $buildRoot
 
-if (-not (Test-Path -LiteralPath (Join-Path $buildRoot 'CMakeCache.txt'))) {
-    cmake -S $serviceSourceRoot -B $buildRoot | Out-Host
-}
+cmake -S $serviceSourceRoot -B $buildRoot `
+    -DANTIVIRUS_DEV_OUTPUT_ROOT="$outputRoot" `
+    -DANTIVIRUS_INSTALL_OUTPUT_ROOT="$installerOutputRoot" | Out-Host
 
 cmake --build $buildRoot --target antivirus-agent-service antivirus-endpoint-client antivirus-pam-client antivirus-amsi-provider antivirus-scannercli antivirus-amsitestcli antivirus-etwtestcli antivirus-wfptestcli | Out-Host
 
@@ -110,16 +157,23 @@ Ensure-Directory -Path (Join-Path $outputRoot 'signatures')
 Ensure-Directory -Path (Join-Path $outputRoot 'driver')
 Ensure-Directory -Path (Join-Path $outputRoot 'docs')
 
+$requiredBuiltArtifacts = @(
+    (Join-Path $outputRoot 'fenrir-agent-service.exe'),
+    (Join-Path $outputRoot 'fenrir-endpoint-client.exe'),
+    (Join-Path $outputRoot 'fenrir-pam.exe'),
+    (Join-Path $outputRoot 'fenrir-amsi-provider.dll'),
+    (Join-Path $outputRoot 'WebView2Loader.dll'),
+    (Join-Path $outputRoot 'tools\fenrir-scannercli.exe'),
+    (Join-Path $outputRoot 'tools\fenrir-amsitestcli.exe'),
+    (Join-Path $outputRoot 'tools\fenrir-etwtestcli.exe'),
+    (Join-Path $outputRoot 'tools\fenrir-wfptestcli.exe')
+)
+
+foreach ($artifactPath in $requiredBuiltArtifacts) {
+    Assert-PathPresent -Path $artifactPath
+}
+
 $artifactMap = @(
-    @{ Source = (Join-Path $buildRoot 'fenrir-agent-service.exe'); Target = (Join-Path $outputRoot 'fenrir-agent-service.exe') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-endpoint-client.exe'); Target = (Join-Path $outputRoot 'fenrir-endpoint-client.exe') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-pam.exe'); Target = (Join-Path $outputRoot 'fenrir-pam.exe') },
-    @{ Source = (Join-Path $buildRoot 'WebView2Loader.dll'); Target = (Join-Path $outputRoot 'WebView2Loader.dll') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-amsi-provider.dll'); Target = (Join-Path $outputRoot 'fenrir-amsi-provider.dll') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-scannercli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-scannercli.exe') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-amsitestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-amsitestcli.exe') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-etwtestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-etwtestcli.exe') },
-    @{ Source = (Join-Path $buildRoot 'fenrir-wfptestcli.exe'); Target = (Join-Path $outputRoot 'tools\fenrir-wfptestcli.exe') },
     @{ Source = (Join-Path $windowsRoot 'service\README.md'); Target = (Join-Path $outputRoot 'docs\service-README.md') },
     @{ Source = (Join-Path $windowsRoot 'tools\endpointui\README.md'); Target = (Join-Path $outputRoot 'docs\endpoint-client-README.md') },
     @{ Source = (Join-Path $windowsRoot 'installer\README.md'); Target = (Join-Path $outputRoot 'docs\installer-README.md') },
@@ -150,12 +204,14 @@ if ($DriverArtifactRoot) {
 
 $inventory = @()
 Get-ChildItem -LiteralPath $outputRoot -Recurse -File | ForEach-Object {
-    $relativePath = Get-RelativePath -Root $outputRoot -Path $_.FullName
-    $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    $inventory += [pscustomobject]@{
-        path = $relativePath
-        sizeBytes = $_.Length
-        sha256 = $hash
+    if (-not (Test-PathWithin -Root $buildRoot -Path $_.FullName)) {
+        $relativePath = Get-RelativePath -Root $outputRoot -Path $_.FullName
+        $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $inventory += [pscustomobject]@{
+            path = $relativePath
+            sizeBytes = $_.Length
+            sha256 = $hash
+        }
     }
 }
 
@@ -167,6 +223,8 @@ $inventoryDocument = [pscustomobject]@{
     artifacts = $inventory
 }
 $inventoryDocument | ConvertTo-Json -Depth 4 | Out-File -LiteralPath $inventoryPath -Encoding utf8
+
+Remove-LegacyBuildOutputs -BuildRoot $buildRoot
 
 Write-Host "Release layout written to $outputRoot"
 Write-Host "Inventory written to $inventoryPath"

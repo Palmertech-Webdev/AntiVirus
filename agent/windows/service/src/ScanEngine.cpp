@@ -69,6 +69,11 @@ struct FileData {
   std::uint32_t archiveEntryCount{0};
 };
 
+struct AllowOverrideMatch {
+  std::wstring code;
+  std::wstring message;
+};
+
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
@@ -667,6 +672,57 @@ std::optional<FileData> LoadFileData(const std::filesystem::path& path) {
   return file;
 }
 
+std::wstring NormalizeSuppressionValue(std::wstring value) { return ToLowerCopy(TrimWide(std::move(value))); }
+
+bool IsDriveRootPath(const std::wstring& path) {
+  return path.size() == 3 && path[1] == L':' && path[2] == L'\\';
+}
+
+std::optional<AllowOverrideMatch> MatchPolicyAllowOverride(const FileData& file, const PolicySnapshot& policy) {
+  const auto highRiskUnsignedUserSurface =
+      file.userPath && file.signer.empty() && IsHighRiskExecutionSurface(file);
+
+  if (!file.sha256.empty()) {
+    const auto normalizedSha256 = NormalizeSuppressionValue(file.sha256);
+    for (const auto& candidate : policy.suppressionSha256) {
+      if (NormalizeSuppressionValue(candidate) == normalizedSha256) {
+        return AllowOverrideMatch{
+            .code = L"POLICY_SUPPRESSION_SHA256",
+            .message = L"Policy suppression matched an exact SHA-256 allow entry."};
+      }
+    }
+  }
+
+  if (!highRiskUnsignedUserSurface) {
+    const auto normalizedPath = NormalizePathForComparison(file.path);
+    for (const auto& root : policy.suppressionPathRoots) {
+      const auto normalizedRoot = NormalizePathForComparison(std::filesystem::path(root));
+      if (normalizedRoot.empty() || IsDriveRootPath(normalizedRoot)) {
+        continue;
+      }
+
+      if (PathIsWithinRoot(normalizedPath, normalizedRoot)) {
+        return AllowOverrideMatch{
+            .code = L"POLICY_SUPPRESSION_PATH_ROOT",
+            .message = L"Policy suppression matched configured cleanware path root " + normalizedRoot + L"."};
+      }
+    }
+  }
+
+  if (!file.signer.empty() && !file.userPath) {
+    const auto normalizedSigner = NormalizeSuppressionValue(file.signer);
+    for (const auto& signer : policy.suppressionSignerNames) {
+      if (NormalizeSuppressionValue(signer) == normalizedSigner) {
+        return AllowOverrideMatch{
+            .code = L"POLICY_SUPPRESSION_SIGNER",
+            .message = L"Policy suppression matched signed publisher " + file.signer + L"."};
+      }
+    }
+  }
+
+  return std::nullopt;
+}
+
 std::wstring BuildReportedReputation(const std::wstring& internalReputation,
                                      const ReputationLookupResult& reputationLookup) {
   if (!reputationLookup.attempted) {
@@ -691,6 +747,32 @@ std::wstring GuessTechnique(const FileData& file) {
   return L"T1204.002";
 }
 
+ScanFinding BuildAllowOverrideFindingInternal(const std::filesystem::path& path, const std::optional<FileData>& loaded,
+                                              const AllowOverrideMatch& match) {
+  ScanFinding finding{
+      .path = path,
+      .sizeBytes = loaded.has_value() ? loaded->sizeBytes : 0,
+      .sha256 = loaded.has_value() ? loaded->sha256 : std::wstring{},
+      .contentType = loaded.has_value() ? loaded->contentType : std::wstring{},
+      .reputation = loaded.has_value() ? loaded->reputation : std::wstring{},
+      .signer = loaded.has_value() ? loaded->signer : std::wstring{},
+      .heuristicScore = 0,
+      .archiveEntryCount = loaded.has_value() ? loaded->archiveEntryCount : 0,
+      .verdict =
+          ScanVerdict{
+              .disposition = VerdictDisposition::Allow,
+              .confidence = 100,
+              .tacticId = L"",
+              .techniqueId = loaded.has_value() ? GuessTechnique(*loaded) : L"",
+              .reasons = {{match.code, match.message}}}};
+
+  if (loaded.has_value() && !loaded->signer.empty()) {
+    finding.verdict.reasons.push_back({L"SIGNER_CONTEXT", L"Embedded signer: " + loaded->signer});
+  }
+
+  return finding;
+}
+
 }  // namespace
 
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
@@ -706,6 +788,9 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
 
   const auto& file = *loaded;
   if (ShouldSuppressNoisyCacheFile(file)) {
+    return std::nullopt;
+  }
+  if (MatchPolicyAllowOverride(file, policy).has_value()) {
     return std::nullopt;
   }
 
@@ -964,6 +1049,59 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
 
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy) {
   return ScanFile(path, policy, {});
+}
+
+std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy,
+                                                     const std::vector<std::filesystem::path>& excludedPaths) {
+  if (IsExcludedPath(path, excludedPaths)) {
+    return BuildAllowOverrideFindingInternal(
+        path, LoadFileData(path),
+        AllowOverrideMatch{.code = L"EXCLUDED_PATH",
+                           .message = L"The target path is inside a configured Fenrir exclusion root."});
+  }
+
+  const auto normalizedPath = NormalizePathForComparison(path);
+  bool suppressionPathCandidate = false;
+  for (const auto& root : policy.suppressionPathRoots) {
+    const auto normalizedRoot = NormalizePathForComparison(std::filesystem::path(root));
+    if (normalizedRoot.empty() || IsDriveRootPath(normalizedRoot)) {
+      continue;
+    }
+
+    if (PathIsWithinRoot(normalizedPath, normalizedRoot)) {
+      suppressionPathCandidate = true;
+      break;
+    }
+  }
+
+  const auto requiresLoadedInspection =
+      IsNoisyCachePath(path) || suppressionPathCandidate || !policy.suppressionSha256.empty() ||
+      !policy.suppressionSignerNames.empty();
+  if (!requiresLoadedInspection) {
+    return std::nullopt;
+  }
+
+  const auto loaded = LoadFileData(path);
+  if (!loaded.has_value()) {
+    return std::nullopt;
+  }
+
+  if (ShouldSuppressNoisyCacheFile(*loaded)) {
+    return BuildAllowOverrideFindingInternal(
+        path, loaded,
+        AllowOverrideMatch{.code = L"NOISY_CACHE_SUPPRESSION",
+                           .message = L"Fenrir skipped a known noisy cache artifact outside high-risk execution surfaces."});
+  }
+
+  if (const auto match = MatchPolicyAllowOverride(*loaded, policy); match.has_value()) {
+    return BuildAllowOverrideFindingInternal(path, loaded, *match);
+  }
+
+  return std::nullopt;
+}
+
+std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy) {
+  return BuildAllowOverrideFinding(path, policy, {});
 }
 
 std::vector<ScanFinding> ScanTargets(const std::vector<std::filesystem::path>& targets, const PolicySnapshot& policy,
