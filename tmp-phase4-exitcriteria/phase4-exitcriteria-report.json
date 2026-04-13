@@ -1,0 +1,40 @@
+{
+  "generatedAtUtc": "2026-04-13T13:51:33.1646698Z",
+  "servicePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\fenrir-agent-service.exe",
+  "selfTestExitCode": 2,
+  "selfTestOverallStatus": "fail",
+  "requiredCheckIds": [
+    "phase4_patch_policy_roundtrip",
+    "phase4_windows_patch_state_refresh",
+    "phase4_software_patch_recipe_coverage",
+    "phase4_patch_visibility_snapshot"
+  ],
+  "criteria": [
+    {
+      "Criterion": "phase4_patch_policy_roundtrip",
+      "Status": "pass",
+      "Details": "Patch policy persisted maintenance windows, reboot grace, provider toggles, and feature deferral settings.",
+      "Remediation": ""
+    },
+    {
+      "Criterion": "phase4_windows_patch_state_refresh",
+      "Status": "pass",
+      "Details": "Patch orchestrator refreshed policy, reboot coordination, recipe catalog, and local patch inventory without execution errors.",
+      "Remediation": ""
+    },
+    {
+      "Criterion": "phase4_software_patch_recipe_coverage",
+      "Status": "pass",
+      "Details": "Phase 4 recipe catalog covers the initial high-risk household software baseline including browsers, reader, archive, runtime, conferencing, and media tooling.",
+      "Remediation": ""
+    },
+    {
+      "Criterion": "phase4_patch_visibility_snapshot",
+      "Status": "pass",
+      "Details": "Patch snapshot preserved failed updates, reboot-required state, manual-only software, unsupported software, and patch history for user-facing reporting.",
+      "Remediation": ""
+    }
+  ],
+  "additionalPhase4Checks": [],
+  "allCriteriaPass": true
+}
