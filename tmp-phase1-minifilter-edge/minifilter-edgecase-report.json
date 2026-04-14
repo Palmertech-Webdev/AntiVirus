@@ -1,7 +1,7 @@
 {
-  "generatedAtUtc": "2026-04-14T10:47:56.0699781Z",
+  "generatedAtUtc": "2026-04-14T14:21:36.6889866Z",
   "scannerPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\tools\\fenrir-scannercli.exe",
-  "caseCount": 7,
+  "caseCount": 9,
   "allPass": true,
   "failures": [],
   "results": [
@@ -17,7 +17,7 @@
       "requireJsonOutput": true,
       "jsonValid": true,
       "status": "pass",
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase1-minifilter-edge\\\\samples\\\\missing-create-target.exe\",\"sizeBytes\":0,\"disposition\":\"block\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.002\",\"confidence\":72,\"sha256\":\"\",\"contentType\":\"\",\"reputation\":\"\",\"signer\":\"\",\"heuristicScore\":0,\"archiveEntryCount\":0,\"remediationStatus\":\"failed\",\"quarantineRecordId\":\"0AA3FB07-8F28-401D-B1CD-46FECAF15694\",\"evidenceRecordId\":\"09E6CE57-A6BC-434A-B1E7-56A9D67F4E98\",\"quarantinedPath\":\"\",\"remediationError\":\"Copy to quarantine failed\"}]}"
+      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase1-minifilter-edge\\\\samples\\\\missing-create-target.exe\",\"sizeBytes\":0,\"disposition\":\"block\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.002\",\"confidence\":72,\"sha256\":\"\",\"contentType\":\"\",\"reputation\":\"\",\"signer\":\"\",\"heuristicScore\":0,\"archiveEntryCount\":0,\"remediationStatus\":\"failed\",\"quarantineRecordId\":\"535ECA2F-9E32-4B0F-AD3F-DCA0006CC228\",\"evidenceRecordId\":\"7B9EE8D6-9519-4A8C-9294-BB71A4D283C5\",\"quarantinedPath\":\"\",\"remediationError\":\"Copy to quarantine failed\"}]}"
     },
     {
       "operation": "open",
@@ -48,7 +48,35 @@
       "output": "{\"findings\":[]}"
     },
     {
+      "operation": "rename",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-script.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 0,
+      "requireJsonOutput": true,
+      "jsonValid": true,
+      "status": "pass",
+      "output": "{\"findings\":[]}"
+    },
+    {
       "operation": "execute",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-script.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 0,
+      "requireJsonOutput": true,
+      "jsonValid": true,
+      "status": "pass",
+      "output": "{\"findings\":[]}"
+    },
+    {
+      "operation": "section-map",
       "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-script.ps1",
       "expectedExitCodes": [
         0,

@@ -49,7 +49,7 @@ bool RequiresProcessContainment(const antivirus::agent::ScanFinding& finding) {
 }
 
 void PrintUsage() {
-  std::wcout << L"Usage: antivirus-scannercli.exe [--json] [--no-telemetry] [--no-remediation] [--exclude <path>] [--realtime-op <create|open|write|execute>] [--path <target>] <target>..."
+  std::wcout << L"Usage: antivirus-scannercli.exe [--json] [--no-telemetry] [--no-remediation] [--exclude <path>] [--realtime-op <create|open|write|execute|rename|section-map>] [--path <target>] <target>..."
              << std::endl;
   std::wcout << L"  --json          Print findings as JSON." << std::endl;
   std::wcout << L"  --no-telemetry  Do not queue scan telemetry locally." << std::endl;
@@ -78,6 +78,16 @@ bool TryParseRealtimeOperation(const std::wstring& rawValue, antivirus::agent::R
 
   if (rawValue == L"execute") {
     operation = ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE;
+    return true;
+  }
+
+  if (rawValue == L"rename") {
+    operation = ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME;
+    return true;
+  }
+
+  if (rawValue == L"section-map" || rawValue == L"section_map") {
+    operation = ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP;
     return true;
   }
 
@@ -121,7 +131,7 @@ bool ParseOptions(const int argc, wchar_t* argv[], CliOptions& options) {
 
     if (argument == L"--realtime-op") {
       if (index + 1 >= argc) {
-        std::wcerr << L"--realtime-op requires one of: create, open, write, execute." << std::endl;
+        std::wcerr << L"--realtime-op requires one of: create, open, write, execute, rename, section-map." << std::endl;
         return false;
       }
 

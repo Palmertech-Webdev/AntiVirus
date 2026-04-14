@@ -363,13 +363,15 @@ if (-not $SkipMinifilterEdgeCases) {
     $ErrorActionPreference = $savedErrorActionPreference
   }
 
-  $minifilterHarnessText = ((@($minifilterHarnessOutput) | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-          $_.ToString()
-        } else {
-          [string]$_
-        }
-      }) | Out-String).Trim()
+  $minifilterHarnessLines = [System.Collections.Generic.List[string]]::new()
+  foreach ($entry in @($minifilterHarnessOutput)) {
+    if ($entry -is [System.Management.Automation.ErrorRecord]) {
+      $null = $minifilterHarnessLines.Add($entry.ToString())
+    } else {
+      $null = $minifilterHarnessLines.Add([string]$entry)
+    }
+  }
+  $minifilterHarnessText = [string]::Join([Environment]::NewLine, $minifilterHarnessLines).Trim()
 
   $reportMatch = [regex]::Match($minifilterHarnessText, "REPORT_PATH=([^`r`n]+)")
   if ($reportMatch.Success) {
@@ -385,7 +387,13 @@ if (-not $SkipMinifilterEdgeCases) {
   )
 }
 
-$allCriteriaPass = @($script:CriteriaResults | Where-Object { $_.Status -ne "pass" }).Count -eq 0
+$failedCriteriaCount = 0
+foreach ($criterion in $script:CriteriaResults) {
+  if ($criterion.Status -ne "pass") {
+    $failedCriteriaCount += 1
+  }
+}
+$allCriteriaPass = $failedCriteriaCount -eq 0
 $reportPath = Join-Path $workingRootAbsolute "phase1-exitcriteria-report.json"
 $report = [PSCustomObject]@{
   generatedAtUtc = [DateTime]::UtcNow.ToString("o")
@@ -406,8 +414,11 @@ $report = [PSCustomObject]@{
   allCriteriaPass = $allCriteriaPass
 }
 
-$report | ConvertTo-Json -Depth 8 | Set-Content -Path $reportPath -Encoding UTF8
-$script:CriteriaResults | Format-Table -AutoSize
+$reportJson = ConvertTo-Json -InputObject $report -Depth 8
+Set-Content -Path $reportPath -Encoding UTF8 -Value $reportJson
+foreach ($criterion in $script:CriteriaResults) {
+  Write-Host ("{0}`t{1}`t{2}" -f "$($criterion.Criterion)", "$($criterion.Status)", "$($criterion.Details)")
+}
 Write-Host "REPORT_PATH=$reportPath"
 Write-Host ("PHASE1_EXIT_CRITERIA={0}" -f ($(if ($allCriteriaPass) { "PASS" } else { "FAIL" })))
 

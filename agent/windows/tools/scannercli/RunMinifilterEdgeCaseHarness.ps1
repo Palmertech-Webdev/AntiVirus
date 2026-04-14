@@ -42,7 +42,7 @@ function Invoke-RealtimeCase {
     [switch]$RequireJsonOutput
   )
 
-  New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
+  $null = New-Item -ItemType Directory -Force -Path $RuntimeRoot
   $runtimeDbPath = Join-Path $RuntimeRoot "agent-runtime.db"
   $stateFilePath = Join-Path $RuntimeRoot "agent-state.ini"
   $telemetryPath = Join-Path $RuntimeRoot "telemetry-queue.tsv"
@@ -51,7 +51,7 @@ function Invoke-RealtimeCase {
   $quarantineRoot = Join-Path $RuntimeRoot "quarantine"
   $evidenceRoot = Join-Path $RuntimeRoot "evidence"
 
-  New-Item -ItemType Directory -Force -Path $updateRoot, $journalRoot, $quarantineRoot, $evidenceRoot | Out-Null
+  $null = New-Item -ItemType Directory -Force -Path $updateRoot, $journalRoot, $quarantineRoot, $evidenceRoot
 
   $savedEnvironment = @{
     ANTIVIRUS_RUNTIME_DB_PATH = $env:ANTIVIRUS_RUNTIME_DB_PATH
@@ -74,7 +74,14 @@ function Invoke-RealtimeCase {
   try {
     $stdout = & $Scanner --json --no-telemetry --no-remediation --realtime-op $Operation --path $TargetPath
     $exitCode = $LASTEXITCODE
-    $output = ($stdout | Out-String).Trim()
+    if ($null -eq $stdout) {
+      $output = ""
+    } elseif ($stdout -is [System.Array]) {
+      $output = [string]::Join([Environment]::NewLine, @($stdout))
+    } else {
+      $output = [string]$stdout
+    }
+    $output = $output.Trim()
   } finally {
     foreach ($entry in $savedEnvironment.GetEnumerator()) {
       if ($null -eq $entry.Value) {
@@ -89,7 +96,7 @@ function Invoke-RealtimeCase {
   if ($RequireJsonOutput) {
     if (-not [string]::IsNullOrWhiteSpace($output)) {
       try {
-        $null = $output | ConvertFrom-Json
+        $null = ConvertFrom-Json -InputObject $output
         $jsonValid = $true
       } catch {
         $jsonValid = $false
@@ -120,7 +127,7 @@ $script:WorkspaceRootAbsolute = [System.IO.Path]::GetFullPath($workspaceCandidat
 $scannerAbsolute = Resolve-AbsolutePath -InputPath $ScannerPath -MustExist
 $workingRootAbsolute = Resolve-AbsolutePath -InputPath $WorkingRoot
 $sampleRoot = Join-Path $workingRootAbsolute "samples"
-New-Item -ItemType Directory -Force -Path $sampleRoot | Out-Null
+$null = New-Item -ItemType Directory -Force -Path $sampleRoot
 
 $normalFile = Join-Path $sampleRoot "edge-normal.txt"
 Set-Content -Path $normalFile -Value "Fenrir realtime edge-case normal sample" -Encoding UTF8
@@ -136,7 +143,7 @@ $longLeaf = Join-Path $sampleRoot "long-path"
 for ($index = 0; $index -lt 5; $index++) {
   $longLeaf = Join-Path $longLeaf ("segment-{0:D2}-edge-case" -f $index)
 }
-New-Item -ItemType Directory -Force -Path $longLeaf | Out-Null
+$null = New-Item -ItemType Directory -Force -Path $longLeaf
 $longPathFile = Join-Path $longLeaf "edge-long-path-script.ps1"
 Set-Content -Path $longPathFile -Value "Write-Output 'long path test'" -Encoding UTF8
 
@@ -147,7 +154,9 @@ $cases = @(
   @{ Operation = "create"; TargetPath = $missingCreatePath; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
   @{ Operation = "open"; TargetPath = $normalFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
   @{ Operation = "write"; TargetPath = $suspiciousFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
+  @{ Operation = "rename"; TargetPath = $suspiciousFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
   @{ Operation = "execute"; TargetPath = $suspiciousFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
+  @{ Operation = "section-map"; TargetPath = $suspiciousFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
   @{ Operation = "execute"; TargetPath = $unicodeFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
   @{ Operation = "execute"; TargetPath = $longPathFile; ExpectedExitCodes = @(0, 2, 3); RequireJson = $true },
   @{ Operation = "open"; TargetPath = $directoryTarget; ExpectedExitCodes = @(1); RequireJson = $false }
@@ -158,10 +167,15 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
   $case = $cases[$index]
   $runtimeRoot = Join-Path $workingRootAbsolute ("runtime-case-{0:D2}" -f $index)
   $result = Invoke-RealtimeCase -Scanner $scannerAbsolute -Operation $case.Operation -TargetPath $case.TargetPath -ExpectedExitCodes $case.ExpectedExitCodes -RuntimeRoot $runtimeRoot -RequireJsonOutput:([bool]$case.RequireJson)
-  $results.Add($result) | Out-Null
+  $null = $results.Add($result)
 }
 
-$failures = @($results | Where-Object { $_.status -ne "pass" })
+$failures = [System.Collections.Generic.List[object]]::new()
+foreach ($result in $results) {
+  if ($result.status -ne "pass") {
+    $null = $failures.Add($result)
+  }
+}
 $allPass = $failures.Count -eq 0
 $reportPath = Join-Path $workingRootAbsolute "minifilter-edgecase-report.json"
 $report = [PSCustomObject]@{
@@ -169,11 +183,12 @@ $report = [PSCustomObject]@{
   scannerPath = $scannerAbsolute
   caseCount = $cases.Count
   allPass = $allPass
-  failures = $failures
+  failures = @($failures)
   results = $results
 }
 
-$report | ConvertTo-Json -Depth 8 | Set-Content -Path $reportPath -Encoding UTF8
+$reportJson = ConvertTo-Json -InputObject $report -Depth 8
+Set-Content -Path $reportPath -Encoding UTF8 -Value $reportJson
 Write-Host "REPORT_PATH=$reportPath"
 Write-Host ("MINIFILTER_EDGE_CASES={0}" -f ($(if ($allPass) { "PASS" } else { "FAIL" })))
 

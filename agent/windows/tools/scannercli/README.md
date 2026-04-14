@@ -24,6 +24,8 @@ Current examples:
 .\antivirus-scannercli.exe --exclude C:\Users\matt_admin\Documents\GitHub\AntiVirus\agent\windows\service\build C:\Temp\suspect-folder
 .\antivirus-scannercli.exe --json --realtime-op execute C:\Temp\sample.ps1
 .\antivirus-scannercli.exe --json --realtime-op create C:\Temp\dropper.exe
+.\antivirus-scannercli.exe --json --realtime-op rename C:\Temp\sample.ps1
+.\antivirus-scannercli.exe --json --realtime-op section-map C:\Temp\sample.ps1
 ```
 
 This is still an early scan and real-time inspection scaffold, not the final detection engine. It does not yet unpack
@@ -153,6 +155,8 @@ Current required checks:
 - PAM request queue state is visible in endpoint posture
 - PAM audit approvals and denials are visible in endpoint posture
 - local Administrators membership posture can be audited
+- household role propagation policy governance is validated
+- local admin baseline persistence is validated through runtime database roundtrip
 
 Example:
 
