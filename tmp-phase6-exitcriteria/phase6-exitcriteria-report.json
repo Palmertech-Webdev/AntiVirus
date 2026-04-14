@@ -1,28 +1,26 @@
-﻿{
-    "generatedAtUtc":  "2026-04-14T08:27:14.9243346Z",
-    "servicePath":  "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\fenrir-agent-service.exe",
-    "selfTestExitCode":  2,
-    "selfTestOverallStatus":  "fail",
-    "requiredCheckIds":  [
-                             "phase6_integrated_posture_snapshot",
-                             "phase6_posture_output_coverage"
-                         ],
-    "criteria":  [
-                     {
-                         "Criterion":  "phase6_integrated_posture_snapshot",
-                         "Status":  "pass",
-                         "Details":  "Unified endpoint snapshot exposed threat, patch debt, reboot state, PAM queue/history, and local-admin posture signals together.",
-                         "Remediation":  ""
-                     },
-                     {
-                         "Criterion":  "phase6_posture_output_coverage",
-                         "Status":  "pass",
-                         "Details":  "Local posture output preserved patch history, manual/unsupported software debt, Windows update status, and PAM decision history for dashboard/reporting surfaces.",
-                         "Remediation":  ""
-                     }
-                 ],
-    "additionalPhase6Checks":  [
-
-                               ],
-    "allCriteriaPass":  true
+{
+  "generatedAtUtc": "2026-04-14T08:53:40.5203122Z",
+  "servicePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\fenrir-agent-service.exe",
+  "selfTestExitCode": 2,
+  "selfTestOverallStatus": "fail",
+  "requiredCheckIds": [
+    "phase6_integrated_posture_snapshot",
+    "phase6_posture_output_coverage"
+  ],
+  "criteria": [
+    {
+      "Criterion": "phase6_integrated_posture_snapshot",
+      "Status": "pass",
+      "Details": "Unified endpoint snapshot exposed threat, patch debt, reboot state, PAM queue/history, and local-admin posture signals together.",
+      "Remediation": ""
+    },
+    {
+      "Criterion": "phase6_posture_output_coverage",
+      "Status": "pass",
+      "Details": "Local posture output preserved patch history, manual/unsupported software debt, Windows update status, and PAM decision history for dashboard/reporting surfaces.",
+      "Remediation": ""
+    }
+  ],
+  "additionalPhase6Checks": [],
+  "allCriteriaPass": true
 }

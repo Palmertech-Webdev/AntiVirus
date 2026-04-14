@@ -132,6 +132,97 @@
 				"."
 			],
 			"isBackground": false
+		},
+		{
+			"label": "run-phase3-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase3ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase3-exitcriteria-skip-fuzz",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase3ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				".",
+				"-SkipHostileInputFuzz"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase4-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase4ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase5-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase5ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase6-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase6ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-minifilter-edge-harness",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunMinifilterEdgeCaseHarness.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-minifilter-edge-harness",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunMinifilterEdgeCaseHarness.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-hostile-fuzz-harness",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunHostileInputFuzzHarness.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-hostile-fuzz-harness",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunHostileInputFuzzHarness.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
 		}
 	]
 }

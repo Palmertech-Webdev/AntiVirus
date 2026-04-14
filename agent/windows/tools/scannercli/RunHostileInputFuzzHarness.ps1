@@ -81,7 +81,38 @@ for ($index = 0; $index -lt $MutationCount; $index++) {
 $results = [System.Collections.Generic.List[object]]::new()
 $failures = [System.Collections.Generic.List[object]]::new()
 
-foreach ($samplePath in $samplePaths) {
+$savedEnvironment = @{
+  ANTIVIRUS_RUNTIME_DB_PATH = $env:ANTIVIRUS_RUNTIME_DB_PATH
+  ANTIVIRUS_AGENT_STATE_FILE = $env:ANTIVIRUS_AGENT_STATE_FILE
+  ANTIVIRUS_TELEMETRY_QUEUE_FILE = $env:ANTIVIRUS_TELEMETRY_QUEUE_FILE
+  ANTIVIRUS_UPDATE_ROOT = $env:ANTIVIRUS_UPDATE_ROOT
+  ANTIVIRUS_JOURNAL_ROOT = $env:ANTIVIRUS_JOURNAL_ROOT
+  ANTIVIRUS_QUARANTINE_ROOT = $env:ANTIVIRUS_QUARANTINE_ROOT
+  ANTIVIRUS_EVIDENCE_ROOT = $env:ANTIVIRUS_EVIDENCE_ROOT
+}
+
+for ($sampleIndex = 0; $sampleIndex -lt $samplePaths.Count; $sampleIndex++) {
+  $samplePath = $samplePaths[$sampleIndex]
+
+  $runtimeRoot = Join-Path $workingRootAbsolute ("runtime-{0:D4}" -f $sampleIndex)
+  $runtimeDbPath = Join-Path $runtimeRoot "agent-runtime.db"
+  $stateFilePath = Join-Path $runtimeRoot "agent-state.ini"
+  $telemetryPath = Join-Path $runtimeRoot "telemetry-queue.tsv"
+  $updateRoot = Join-Path $runtimeRoot "update"
+  $journalRoot = Join-Path $runtimeRoot "journal"
+  $quarantineRoot = Join-Path $runtimeRoot "quarantine"
+  $evidenceRoot = Join-Path $runtimeRoot "evidence"
+
+  New-Item -ItemType Directory -Force -Path $updateRoot, $journalRoot, $quarantineRoot, $evidenceRoot | Out-Null
+
+  $env:ANTIVIRUS_RUNTIME_DB_PATH = $runtimeDbPath
+  $env:ANTIVIRUS_AGENT_STATE_FILE = $stateFilePath
+  $env:ANTIVIRUS_TELEMETRY_QUEUE_FILE = $telemetryPath
+  $env:ANTIVIRUS_UPDATE_ROOT = $updateRoot
+  $env:ANTIVIRUS_JOURNAL_ROOT = $journalRoot
+  $env:ANTIVIRUS_QUARANTINE_ROOT = $quarantineRoot
+  $env:ANTIVIRUS_EVIDENCE_ROOT = $evidenceRoot
+
   $stdout = & $scannerAbsolute --json --no-remediation --no-telemetry --path $samplePath
   $exitCode = $LASTEXITCODE
   $jsonText = ($stdout | Out-String).Trim()
@@ -118,6 +149,14 @@ foreach ($samplePath in $samplePaths) {
         exitCode = $exitCode
         output = $jsonText
       }) | Out-Null
+  }
+}
+
+foreach ($entry in $savedEnvironment.GetEnumerator()) {
+  if ($null -eq $entry.Value) {
+    Remove-Item -Path "Env:$($entry.Key)" -ErrorAction SilentlyContinue
+  } else {
+    Set-Item -Path "Env:$($entry.Key)" -Value $entry.Value
   }
 }
 

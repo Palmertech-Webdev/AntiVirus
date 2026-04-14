@@ -1,0 +1,29 @@
+{
+  "evidenceId": "96C01D93-86DE-41C7-A8EA-92B8CC75BCAB",
+  "recordedAt": "2026-04-14T09:01:15.341Z",
+  "source": "scannercli",
+  "policyRevision": "local-bootstrap",
+  "path": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\ole-header-only.doc",
+  "sizeBytes": 12,
+  "sha256": "c0d2a8c0e4c4874399a7a787f8a40eb7416f9935c8f14f58f947f4e2291cb477",
+  "contentType": "ole-document",
+  "reputation": "user-writable-unsigned;intel-known-good",
+  "signer": "",
+  "heuristicScore": 62,
+  "archiveEntryCount": 0,
+  "disposition": "allow",
+  "tacticId": "TA0005",
+  "techniqueId": "T1562.001",
+  "remediationStatus": "none",
+  "quarantineRecordId": "",
+  "quarantinedPath": "",
+  "remediationError": "",
+  "reasons": [
+    {"code": "REPUTATION_VERIFIED", "message": "Verified known file in CIRCL hashlookup."},
+    {"code": "OLE_MALFORMED_HEADER", "message": "OLE content is shorter than the minimum structured-storage header size."}
+  ],
+  "timeline": [
+    {"phase": "detection", "recordedAt": "2026-04-14T09:01:15.341Z", "summary": "allow"},
+    {"phase": "remediation", "recordedAt": "2026-04-14T09:01:15.341Z", "summary": "none"}
+  ]
+}

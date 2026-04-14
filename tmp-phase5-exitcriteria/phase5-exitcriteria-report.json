@@ -1,0 +1,39 @@
+{
+  "generatedAtUtc": "2026-04-14T08:50:35.2280101Z",
+  "servicePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\fenrir-agent-service.exe",
+  "selfTestExitCode": 2,
+  "selfTestOverallStatus": "fail",
+  "requiredCheckIds": [
+    "phase5_pam_request_queue_visibility",
+    "phase5_pam_audit_visibility",
+    "phase5_admin_membership_audit"
+  ],
+  "warningAllowedCheckIds": [
+    "phase5_admin_membership_audit"
+  ],
+  "criteria": [
+    {
+      "Criterion": "phase5_pam_request_queue_visibility",
+      "Status": "pass",
+      "RawStatus": "pass",
+      "Details": "Endpoint snapshot surfaced pending PAM requests and PAM health posture from local runtime paths.",
+      "Remediation": ""
+    },
+    {
+      "Criterion": "phase5_pam_audit_visibility",
+      "Status": "pass",
+      "RawStatus": "pass",
+      "Details": "Endpoint snapshot exposed PAM approval/denial counts from the local audit journal.",
+      "Remediation": ""
+    },
+    {
+      "Criterion": "phase5_admin_membership_audit",
+      "Status": "pass",
+      "RawStatus": "pass",
+      "Details": "Fenrir resolved local Administrators membership posture with 2 member(s); exposure state is elevated.",
+      "Remediation": ""
+    }
+  ],
+  "additionalPhase5Checks": [],
+  "allCriteriaPass": true
+}

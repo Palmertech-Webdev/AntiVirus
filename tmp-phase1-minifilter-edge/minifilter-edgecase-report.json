@@ -1,0 +1,134 @@
+{
+  "generatedAtUtc": "2026-04-14T08:54:58.4275573Z",
+  "scannerPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\tools\\fenrir-scannercli.exe",
+  "caseCount": 7,
+  "allPass": false,
+  "failures": [
+    {
+      "operation": "create",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\missing-create-target.exe",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": -1073740791,
+      "requireJsonOutput": true,
+      "jsonValid": false,
+      "status": "fail",
+      "output": ""
+    },
+    {
+      "operation": "execute",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\long-path\\segment-00-edge-case\\segment-01-edge-case\\segment-02-edge-case\\segment-03-edge-case\\segment-04-edge-case\\segment-05-edge-case\\segment-06-edge-case\\segment-07-edge-case\\edge-long-path-script.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 1,
+      "requireJsonOutput": true,
+      "jsonValid": false,
+      "status": "fail",
+      "output": ""
+    }
+  ],
+  "results": [
+    {
+      "operation": "create",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\missing-create-target.exe",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": -1073740791,
+      "requireJsonOutput": true,
+      "jsonValid": false,
+      "status": "fail",
+      "output": ""
+    },
+    {
+      "operation": "open",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-normal.txt",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 0,
+      "requireJsonOutput": true,
+      "jsonValid": true,
+      "status": "pass",
+      "output": "{\"findings\":[]}"
+    },
+    {
+      "operation": "write",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-script.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 0,
+      "requireJsonOutput": true,
+      "jsonValid": true,
+      "status": "pass",
+      "output": "{\"findings\":[]}"
+    },
+    {
+      "operation": "execute",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-script.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 0,
+      "requireJsonOutput": true,
+      "jsonValid": true,
+      "status": "pass",
+      "output": "{\"findings\":[]}"
+    },
+    {
+      "operation": "execute",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\edge-unicode-中文.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 0,
+      "requireJsonOutput": true,
+      "jsonValid": true,
+      "status": "pass",
+      "output": "{\"findings\":[]}"
+    },
+    {
+      "operation": "execute",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\long-path\\segment-00-edge-case\\segment-01-edge-case\\segment-02-edge-case\\segment-03-edge-case\\segment-04-edge-case\\segment-05-edge-case\\segment-06-edge-case\\segment-07-edge-case\\edge-long-path-script.ps1",
+      "expectedExitCodes": [
+        0,
+        2,
+        3
+      ],
+      "exitCode": 1,
+      "requireJsonOutput": true,
+      "jsonValid": false,
+      "status": "fail",
+      "output": ""
+    },
+    {
+      "operation": "open",
+      "targetPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples",
+      "expectedExitCodes": [
+        1
+      ],
+      "exitCode": 1,
+      "requireJsonOutput": false,
+      "jsonValid": false,
+      "status": "pass",
+      "output": ""
+    }
+  ]
+}
