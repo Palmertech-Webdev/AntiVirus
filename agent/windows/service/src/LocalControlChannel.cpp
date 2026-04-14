@@ -65,7 +65,10 @@ bool IsSafeCommandType(const std::wstring& type) {
 bool RequiresSessionApproval(const std::wstring& type) {
   return type == L"quarantine.restore" || type == L"quarantine.delete" || type == L"patch.software.install" ||
          type == L"patch.windows.install" || type == L"patch.cycle.run" || type == L"local.approval.execute" ||
-         type == L"local.approval.list" || type == L"local.breakglass.enable" || type == L"local.breakglass.disable";
+         type == L"local.approval.list" || type == L"local.breakglass.enable" ||
+         type == L"local.breakglass.disable" || type == L"local.admin.audit" ||
+         type == L"local.admin.reduction.plan" || type == L"local.admin.reduction.apply" ||
+         type == L"local.admin.reduction.rollback";
 }
 
 std::string EscapeRegex(const std::string& value) {
@@ -232,11 +235,16 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
     return LocalAction::StartServiceAction;
   }
 
+  if (type == L"local.admin.audit" || type == L"local.admin.reduction.plan" ||
+      type == L"local.admin.reduction.apply" || type == L"local.admin.reduction.rollback") {
+    return LocalAction::StartServiceAction;
+  }
+
   return LocalAction::ViewStatus;
 }
 
 bool IsSupportedLocalCommand(const std::wstring& type) {
-  static const std::array<const wchar_t*, 14> kSupportedTypes = {
+  static const std::array<const wchar_t*, 18> kSupportedTypes = {
       L"local.auth.session.begin",
       L"quarantine.restore",
       L"quarantine.delete",
@@ -250,7 +258,11 @@ bool IsSupportedLocalCommand(const std::wstring& type) {
       L"local.approval.execute",
       L"local.approval.list",
       L"local.breakglass.enable",
-      L"local.breakglass.disable"};
+      L"local.breakglass.disable",
+      L"local.admin.audit",
+      L"local.admin.reduction.plan",
+      L"local.admin.reduction.apply",
+      L"local.admin.reduction.rollback"};
 
   return std::any_of(kSupportedTypes.begin(), kSupportedTypes.end(),
                      [&type](const auto* candidate) { return type == candidate; });

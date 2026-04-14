@@ -304,8 +304,288 @@ std::filesystem::path ResolveLocalApprovalLedgerPath() {
   return ResolveLocalApprovalRuntimeRoot() / kLocalApprovalLedgerFileName;
 }
 
+std::filesystem::path ResolveLocalAdminBaselinePath(const AgentConfig& config) {
+  return ResolveRuntimeRoot(config) / kLocalAdminBaselineFileName;
+}
+
+std::wstring BuildJsonStringArray(const std::vector<std::wstring>& values) {
+  std::wstring result = L"[";
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (index != 0) {
+      result += L",";
+    }
+    result += L"\"" + Utf8ToWide(EscapeJsonString(values[index])) + L"\"";
+  }
+  result += L"]";
+  return result;
+}
+
+std::wstring BuildLocalAdminMembersJson(const std::vector<LocalAdminMember>& members) {
+  std::wstring result = L"[";
+  for (std::size_t index = 0; index < members.size(); ++index) {
+    if (index != 0) {
+      result += L",";
+    }
+
+    result += L"{\"accountName\":\"" + Utf8ToWide(EscapeJsonString(members[index].accountName)) +
+              L"\",\"sid\":\"" + Utf8ToWide(EscapeJsonString(members[index].sid)) + L"\"}";
+  }
+  result += L"]";
+  return result;
+}
+
+std::vector<std::wstring> NormalizeSidList(const std::vector<std::wstring>& sids) {
+  std::vector<std::wstring> normalized;
+  normalized.reserve(sids.size());
+  for (const auto& sid : sids) {
+    auto lowered = ToLowerCopy(sid);
+    lowered.erase(std::remove_if(lowered.begin(), lowered.end(),
+                                 [](const wchar_t ch) {
+                                   return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+                                 }),
+                 lowered.end());
+    if (!lowered.empty()) {
+      normalized.push_back(std::move(lowered));
+    }
+  }
+  std::sort(normalized.begin(), normalized.end());
+  normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+  return normalized;
+}
+
+std::vector<LocalAdminMember> EnumerateLocalAdminMembers(std::wstring* errorMessage) {
+  std::vector<LocalAdminMember> members;
+
+  DWORD_PTR resumeHandle = 0;
+  NET_API_STATUS status = NERR_Success;
+  do {
+    LPLOCALGROUP_MEMBERS_INFO_2 records = nullptr;
+    DWORD entriesRead = 0;
+    DWORD totalEntries = 0;
+    status = NetLocalGroupGetMembers(nullptr, L"Administrators", 2, reinterpret_cast<LPBYTE*>(&records),
+                                     MAX_PREFERRED_LENGTH, &entriesRead, &totalEntries, &resumeHandle);
+    if (status != NERR_Success && status != ERROR_MORE_DATA) {
+      if (records != nullptr) {
+        NetApiBufferFree(records);
+      }
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir could not enumerate local Administrators group members (status " +
+                        std::to_wstring(status) + L").";
+      }
+      return {};
+    }
+
+    for (DWORD index = 0; index < entriesRead; ++index) {
+      LocalAdminMember member{};
+      if (records[index].lgrmi2_domainandname != nullptr) {
+        member.accountName = records[index].lgrmi2_domainandname;
+      }
+
+      if (records[index].lgrmi2_sid != nullptr) {
+        LPWSTR sidString = nullptr;
+        if (ConvertSidToStringSidW(records[index].lgrmi2_sid, &sidString) != FALSE && sidString != nullptr) {
+          member.sid = sidString;
+          LocalFree(sidString);
+        }
+      }
+
+      if (member.accountName.empty()) {
+        member.accountName = member.sid.empty() ? L"<unknown>" : member.sid;
+      }
+
+      members.push_back(std::move(member));
+    }
+
+    if (records != nullptr) {
+      NetApiBufferFree(records);
+    }
+  } while (status == ERROR_MORE_DATA);
+
+  std::sort(members.begin(), members.end(), [](const LocalAdminMember& left, const LocalAdminMember& right) {
+    return ToLowerCopy(left.accountName) < ToLowerCopy(right.accountName);
+  });
+
+  return members;
+}
+
+bool IsProtectedLocalAdminMember(const LocalAdminMember& member, const std::wstring& ownerSidLower,
+                                 const std::vector<std::wstring>& keepSidsLower) {
+  if (member.sid.empty()) {
+    return true;
+  }
+
+  const auto sidLower = ToLowerCopy(member.sid);
+  if (!ownerSidLower.empty() && sidLower == ownerSidLower) {
+    return true;
+  }
+
+  if (std::find(keepSidsLower.begin(), keepSidsLower.end(), sidLower) != keepSidsLower.end()) {
+    return true;
+  }
+
+  if (sidLower == L"s-1-5-18" || sidLower == L"s-1-5-19" || sidLower == L"s-1-5-20" ||
+      sidLower == L"s-1-5-32-544" || sidLower.ends_with(L"-500")) {
+    return true;
+  }
+
+  return false;
+}
+
+std::vector<LocalAdminMember> BuildReducibleLocalAdminMembers(const std::vector<LocalAdminMember>& members,
+                                                              const std::wstring& ownerSid,
+                                                              const std::vector<std::wstring>& keepSids) {
+  std::vector<LocalAdminMember> reducible;
+  const auto ownerSidLower = ToLowerCopy(ownerSid);
+  const auto keepSidsLower = NormalizeSidList(keepSids);
+
+  for (const auto& member : members) {
+    if (IsProtectedLocalAdminMember(member, ownerSidLower, keepSidsLower)) {
+      continue;
+    }
+    reducible.push_back(member);
+  }
+
+  return reducible;
+}
+
+bool SaveLocalAdminBaselineSnapshot(const std::filesystem::path& baselinePath,
+                                    const std::vector<LocalAdminMember>& members,
+                                    std::wstring* errorMessage) {
+  std::error_code directoryError;
+  std::filesystem::create_directories(baselinePath.parent_path(), directoryError);
+  if (directoryError) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not create local admin baseline directory.";
+    }
+    return false;
+  }
+
+  std::ofstream output(baselinePath, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not open the local admin baseline snapshot file.";
+    }
+    return false;
+  }
+
+  for (const auto& member : members) {
+    const auto line = std::wstring(L"{\"capturedAt\":\"") + CurrentUtcTimestamp() +
+                      L"\",\"accountName\":\"" + Utf8ToWide(EscapeJsonString(member.accountName)) +
+                      L"\",\"sid\":\"" + Utf8ToWide(EscapeJsonString(member.sid)) + L"\"}\n";
+    const auto utf8Line = WideToUtf8(line);
+    output.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
+  }
+
+  output.flush();
+  if (!output.good()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not persist the local admin baseline snapshot.";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+std::vector<LocalAdminMember> LoadLocalAdminBaselineSnapshot(const std::filesystem::path& baselinePath,
+                                                             std::wstring* errorMessage) {
+  std::vector<LocalAdminMember> members;
+
+  std::ifstream input(baselinePath, std::ios::binary);
+  if (!input.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not open the local admin baseline snapshot.";
+    }
+    return members;
+  }
+
+  std::string utf8Line;
+  while (std::getline(input, utf8Line)) {
+    if (utf8Line.empty()) {
+      continue;
+    }
+
+    const auto line = Utf8ToWide(utf8Line);
+    LocalAdminMember member{};
+    member.accountName = ExtractPayloadString(line, "accountName").value_or(L"");
+    member.sid = ExtractPayloadString(line, "sid").value_or(L"");
+    if (!member.accountName.empty() || !member.sid.empty()) {
+      members.push_back(std::move(member));
+    }
+  }
+
+  if (!input.good() && !input.eof()) {
+    members.clear();
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir encountered an I/O error reading the local admin baseline snapshot.";
+    }
+  }
+
+  return members;
+}
+
+bool RemoveLocalAdminMemberBySid(const std::wstring& sid, std::wstring* errorMessage) {
+  if (sid.empty()) {
+    return true;
+  }
+
+  PSID memberSid = nullptr;
+  if (ConvertStringSidToSidW(sid.c_str(), &memberSid) == FALSE || memberSid == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not parse local admin SID " + sid + L".";
+    }
+    return false;
+  }
+
+  LOCALGROUP_MEMBERS_INFO_0 memberInfo{};
+  memberInfo.lgrmi0_sid = memberSid;
+  const auto status = NetLocalGroupDelMembers(nullptr, L"Administrators", 0,
+                                               reinterpret_cast<LPBYTE>(&memberInfo), 1);
+  LocalFree(memberSid);
+
+  if (status == NERR_Success || status == NERR_UserNotFound || status == ERROR_NO_SUCH_MEMBER) {
+    return true;
+  }
+
+  if (errorMessage != nullptr) {
+    *errorMessage = L"Fenrir could not remove SID " + sid + L" from local Administrators (status " +
+                    std::to_wstring(status) + L").";
+  }
+  return false;
+}
+
+bool AddLocalAdminMemberBySid(const std::wstring& sid, std::wstring* errorMessage) {
+  if (sid.empty()) {
+    return true;
+  }
+
+  PSID memberSid = nullptr;
+  if (ConvertStringSidToSidW(sid.c_str(), &memberSid) == FALSE || memberSid == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not parse local admin SID " + sid + L" for restore.";
+    }
+    return false;
+  }
+
+  LOCALGROUP_MEMBERS_INFO_0 memberInfo{};
+  memberInfo.lgrmi0_sid = memberSid;
+  const auto status = NetLocalGroupAddMembers(nullptr, L"Administrators", 0,
+                                               reinterpret_cast<LPBYTE>(&memberInfo), 1);
+  LocalFree(memberSid);
+
+  if (status == NERR_Success || status == ERROR_MEMBER_IN_ALIAS) {
+    return true;
+  }
+
+  if (errorMessage != nullptr) {
+    *errorMessage = L"Fenrir could not restore SID " + sid + L" to local Administrators (status " +
+                    std::to_wstring(status) + L").";
+  }
+  return false;
+}
+
 bool IsLocalApprovalEligibleCommandType(const std::wstring& type) {
-  static const std::array<const wchar_t*, 11> kEligibleTypes = {
+  static const std::array<const wchar_t*, 15> kEligibleTypes = {
       L"quarantine.restore",
       L"quarantine.delete",
       L"patch.scan",
@@ -316,7 +596,11 @@ bool IsLocalApprovalEligibleCommandType(const std::wstring& type) {
       L"support.bundle.export.full",
       L"storage.maintenance.run",
       L"local.breakglass.enable",
-      L"local.breakglass.disable"};
+      L"local.breakglass.disable",
+      L"local.admin.audit",
+      L"local.admin.reduction.plan",
+      L"local.admin.reduction.apply",
+      L"local.admin.reduction.rollback"};
 
   return std::any_of(kEligibleTypes.begin(), kEligibleTypes.end(),
                      [&type](const auto* candidate) { return type == candidate; });
@@ -2332,6 +2616,22 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecuteLocalApprovalListCommand(command);
   }
 
+  if (command.type == L"local.admin.audit") {
+    return ExecuteLocalAdminAuditCommand(command);
+  }
+
+  if (command.type == L"local.admin.reduction.plan") {
+    return ExecuteLocalAdminReductionCommand(command, false);
+  }
+
+  if (command.type == L"local.admin.reduction.apply") {
+    return ExecuteLocalAdminReductionCommand(command, true);
+  }
+
+  if (command.type == L"local.admin.reduction.rollback") {
+    return ExecuteLocalAdminRollbackCommand(command);
+  }
+
   if (command.type == L"software.block") {
     return ExecuteSoftwareBlockCommand(command);
   }
@@ -2836,6 +3136,162 @@ std::wstring AgentService::ExecuteLocalApprovalListCommand(const RemoteCommand& 
   return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"pendingCount\":" +
          std::to_wstring(totalPending) + L",\"returnedCount\":" +
          std::to_wstring(pendingRequests.size()) + L",\"requests\":" + requestsJson + L"}";
+}
+
+std::wstring AgentService::ExecuteLocalAdminAuditCommand(const RemoteCommand& command) {
+  std::wstring enumerateError;
+  const auto members = EnumerateLocalAdminMembers(&enumerateError);
+  if (!enumerateError.empty()) {
+    throw std::runtime_error(WideToUtf8(enumerateError));
+  }
+
+  const auto ownerSid = QueryConfiguredDeviceOwnerSid();
+  const auto keepSids = ExtractPayloadStringArray(command.payloadJson, "keepSids");
+  const auto reducibleMembers = BuildReducibleLocalAdminMembers(members, ownerSid, keepSids);
+
+  QueueTelemetryEvent(L"local.admin.audit.completed", L"local-control",
+                      L"Fenrir audited local Administrators group membership for PAM admin-reduction planning.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"memberCount\":" +
+                          std::to_wstring(members.size()) + L",\"reducibleCount\":" +
+                          std::to_wstring(reducibleMembers.size()) + L",\"ownerSid\":\"" +
+                          Utf8ToWide(EscapeJsonString(ownerSid)) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"ownerSid\":\"" +
+         Utf8ToWide(EscapeJsonString(ownerSid)) + L"\",\"memberCount\":" +
+         std::to_wstring(members.size()) + L",\"reducibleCount\":" +
+         std::to_wstring(reducibleMembers.size()) + L",\"members\":" + BuildLocalAdminMembersJson(members) +
+         L",\"reducibleMembers\":" + BuildLocalAdminMembersJson(reducibleMembers) + L"}";
+}
+
+std::wstring AgentService::ExecuteLocalAdminReductionCommand(const RemoteCommand& command, const bool applyChanges) {
+  std::wstring enumerateError;
+  const auto members = EnumerateLocalAdminMembers(&enumerateError);
+  if (!enumerateError.empty()) {
+    throw std::runtime_error(WideToUtf8(enumerateError));
+  }
+
+  const auto ownerSid = QueryConfiguredDeviceOwnerSid();
+  const auto keepSids = ExtractPayloadStringArray(command.payloadJson, "keepSids");
+  const auto reducibleMembers = BuildReducibleLocalAdminMembers(members, ownerSid, keepSids);
+  const auto dryRun = ExtractPayloadBool(command.payloadJson, "dryRun").value_or(!applyChanges);
+
+  if (!applyChanges || dryRun) {
+    QueueTelemetryEvent(L"local.admin.reduction.planned", L"local-control",
+                        L"Fenrir generated a local admin reduction plan without applying membership changes.",
+                        std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"plannedCount\":" +
+                            std::to_wstring(reducibleMembers.size()) + L",\"memberCount\":" +
+                            std::to_wstring(members.size()) + L"}");
+
+    return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"applied\":false,\"dryRun\":true,\"ownerSid\":\"" +
+           Utf8ToWide(EscapeJsonString(ownerSid)) + L"\",\"memberCount\":" +
+           std::to_wstring(members.size()) + L",\"plannedReductionCount\":" +
+           std::to_wstring(reducibleMembers.size()) + L",\"plannedRemovals\":" +
+           BuildLocalAdminMembersJson(reducibleMembers) + L"}";
+  }
+
+  const auto baselinePath = ResolveLocalAdminBaselinePath(config_);
+  std::wstring baselineError;
+  if (!SaveLocalAdminBaselineSnapshot(baselinePath, members, &baselineError)) {
+    throw std::runtime_error(WideToUtf8(baselineError.empty()
+                                            ? L"Fenrir could not create a baseline snapshot before admin reduction."
+                                            : baselineError));
+  }
+
+  std::vector<std::wstring> removedSids;
+  std::vector<std::wstring> failedChanges;
+  for (const auto& member : reducibleMembers) {
+    std::wstring removeError;
+    if (RemoveLocalAdminMemberBySid(member.sid, &removeError)) {
+      removedSids.push_back(member.sid);
+      continue;
+    }
+
+    failedChanges.push_back(member.sid + L": " + removeError);
+  }
+
+  const auto eventType = failedChanges.empty() ? L"local.admin.reduction.applied" : L"local.admin.reduction.partial";
+  QueueTelemetryEvent(eventType, L"local-control",
+                      failedChanges.empty()
+                          ? L"Fenrir applied local admin reduction according to PAM governance policy."
+                          : L"Fenrir applied local admin reduction with partial failures.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"plannedCount\":" +
+                          std::to_wstring(reducibleMembers.size()) + L",\"removedCount\":" +
+                          std::to_wstring(removedSids.size()) + L",\"failedCount\":" +
+                          std::to_wstring(failedChanges.size()) + L",\"baselinePath\":\"" +
+                          Utf8ToWide(EscapeJsonString(baselinePath.wstring())) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"applied\":true,\"ownerSid\":\"" +
+         Utf8ToWide(EscapeJsonString(ownerSid)) + L"\",\"baselinePath\":\"" +
+         Utf8ToWide(EscapeJsonString(baselinePath.wstring())) + L"\",\"plannedReductionCount\":" +
+         std::to_wstring(reducibleMembers.size()) + L",\"removedCount\":" + std::to_wstring(removedSids.size()) +
+         L",\"failedCount\":" + std::to_wstring(failedChanges.size()) + L",\"removedSids\":" +
+         BuildJsonStringArray(removedSids) + L",\"failedChanges\":" + BuildJsonStringArray(failedChanges) + L"}";
+}
+
+std::wstring AgentService::ExecuteLocalAdminRollbackCommand(const RemoteCommand& command) {
+  const auto baselinePath = ResolveLocalAdminBaselinePath(config_);
+  std::wstring baselineError;
+  const auto baselineMembers = LoadLocalAdminBaselineSnapshot(baselinePath, &baselineError);
+  if (!baselineError.empty()) {
+    throw std::runtime_error(WideToUtf8(baselineError));
+  }
+  if (baselineMembers.empty()) {
+    throw std::runtime_error("Fenrir local admin rollback baseline is empty or missing");
+  }
+
+  std::wstring enumerateError;
+  const auto currentMembers = EnumerateLocalAdminMembers(&enumerateError);
+  if (!enumerateError.empty()) {
+    throw std::runtime_error(WideToUtf8(enumerateError));
+  }
+
+  std::vector<std::wstring> currentSids;
+  currentSids.reserve(currentMembers.size());
+  for (const auto& member : currentMembers) {
+    if (!member.sid.empty()) {
+      currentSids.push_back(member.sid);
+    }
+  }
+  auto currentSidSet = NormalizeSidList(currentSids);
+
+  std::vector<std::wstring> restoredSids;
+  std::vector<std::wstring> failedRestores;
+  for (const auto& baselineMember : baselineMembers) {
+    if (baselineMember.sid.empty()) {
+      continue;
+    }
+
+    const auto sidLower = ToLowerCopy(baselineMember.sid);
+    if (std::find(currentSidSet.begin(), currentSidSet.end(), sidLower) != currentSidSet.end()) {
+      continue;
+    }
+
+    std::wstring restoreError;
+    if (AddLocalAdminMemberBySid(baselineMember.sid, &restoreError)) {
+      restoredSids.push_back(baselineMember.sid);
+      currentSidSet.push_back(sidLower);
+      continue;
+    }
+
+    failedRestores.push_back(baselineMember.sid + L": " + restoreError);
+  }
+
+  const auto eventType = failedRestores.empty() ? L"local.admin.reduction.rollback.completed"
+                                                 : L"local.admin.reduction.rollback.partial";
+  QueueTelemetryEvent(eventType, L"local-control",
+                      failedRestores.empty()
+                          ? L"Fenrir restored local admin membership from the last baseline snapshot."
+                          : L"Fenrir attempted local admin rollback but some principals could not be restored.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"restoredCount\":" +
+                          std::to_wstring(restoredSids.size()) + L",\"failedCount\":" +
+                          std::to_wstring(failedRestores.size()) + L",\"baselinePath\":\"" +
+                          Utf8ToWide(EscapeJsonString(baselinePath.wstring())) + L"\"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"baselinePath\":\"" +
+         Utf8ToWide(EscapeJsonString(baselinePath.wstring())) + L"\",\"restoredCount\":" +
+         std::to_wstring(restoredSids.size()) + L",\"failedCount\":" +
+         std::to_wstring(failedRestores.size()) + L",\"restoredSids\":" + BuildJsonStringArray(restoredSids) +
+         L",\"failedRestores\":" + BuildJsonStringArray(failedRestores) + L"}";
 }
 
 std::wstring AgentService::ExecuteRepairCommand(const RemoteCommand& command) {

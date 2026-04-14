@@ -38,7 +38,7 @@ It is still early, but it now includes Windows Service registration, a minifilte
 - A layered scan engine with file-type sniffing, content signatures, ZIP payload inspection, signer-aware reputation hints, and false-positive suppression for trusted system paths
 - Scan exclusion paths so the agent can avoid quarantining its own runtime, evidence, update, and install directories
 - An external signature-bundle path so detection content can ship independently of the core agent binary
-- A real-time verdict broker that can accept minifilter-style file create/open/write/execute requests
+- A real-time verdict broker that can accept minifilter-style file create/open/write/execute/rename/section-map requests
 - Real-time block/quarantine decisions flowing through the same evidence and telemetry pipeline as on-demand scans
 - Context-aware real-time behavior-chain scoring using process image, parent image, command-line, and lure-path signals
 - Cross-event behavior-chain correlation over rolling process-lineage windows to raise confidence on staged attacks
@@ -116,6 +116,10 @@ Local broker command additions:
 - `local.approval.list`
 - `local.breakglass.enable`
 - `local.breakglass.disable`
+- `local.admin.audit`
+- `local.admin.reduction.plan`
+- `local.admin.reduction.apply`
+- `local.admin.reduction.rollback`
 
 Approval request queue files:
 
@@ -146,6 +150,7 @@ Approval request queue files:
 - `ANTIVIRUS_TELEMETRY_BATCH_SIZE`
 - `ANTIVIRUS_REALTIME_PORT_NAME`
 - `ANTIVIRUS_REALTIME_BROKER_RETRY_SECONDS`
+- `ANTIVIRUS_MAX_CPU_LOAD_PERCENT`
 - `ANTIVIRUS_ISOLATION_ALLOW_LOOPBACK`
 - `ANTIVIRUS_ISOLATION_ALLOW_REMOTE`
 - `ANTIVIRUS_ISOLATION_ALLOW_APPLICATIONS`

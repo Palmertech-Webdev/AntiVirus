@@ -820,6 +820,150 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       }
     }
 
+    const auto brokerLoadMaliciousPath = phaseValidationRoot / L"phase1-broker-load-malicious.ps1";
+    const auto brokerLoadBenignPath = phaseValidationRoot / L"phase1-broker-load-benign.txt";
+    if (!WriteSelfTestSample(brokerLoadMaliciousPath, kExecutionBlockingSample) ||
+        !WriteSelfTestSample(brokerLoadBenignPath, kCleanwareDiskSample)) {
+      AddCheck(report, L"phase1_broker_load_failmode", L"Phase 1 broker load/fail-mode proof", SelfTestStatus::Fail,
+               L"Self-test could not stage broker load-validation artifacts under " + phaseValidationRoot.wstring() + L".",
+               L"Ensure runtime/temp roots are writable before running broker load/fail-mode validation.");
+    } else {
+      try {
+        auto realtimeConfig = config;
+        realtimeConfig.runtimeDatabasePath = phaseValidationRoot / L"phase1-broker-load-runtime.db";
+        realtimeConfig.quarantineRootPath = phaseValidationRoot / L"phase1-broker-load-quarantine";
+        realtimeConfig.evidenceRootPath = phaseValidationRoot / L"phase1-broker-load-evidence";
+        realtimeConfig.scanExcludedPaths.clear();
+
+        std::error_code runtimePathError;
+        std::filesystem::create_directories(realtimeConfig.runtimeDatabasePath.parent_path(), runtimePathError);
+        std::filesystem::create_directories(realtimeConfig.quarantineRootPath, runtimePathError);
+        std::filesystem::create_directories(realtimeConfig.evidenceRootPath, runtimePathError);
+        if (runtimePathError) {
+          AddCheck(report, L"phase1_broker_load_failmode", L"Phase 1 broker load/fail-mode proof", SelfTestStatus::Fail,
+                   L"Self-test could not prepare isolated broker load-validation paths under " +
+                       phaseValidationRoot.wstring() + L".",
+                   L"Ensure runtime, quarantine, and evidence roots are writable before running broker load/fail-mode checks.");
+        } else {
+          auto realtimePolicy = CreateDefaultPolicySnapshot();
+          realtimePolicy.cloudLookupEnabled = false;
+          realtimePolicy.quarantineOnMalicious = false;
+
+          RealtimeProtectionBroker broker(realtimeConfig);
+          broker.SetPolicy(realtimePolicy);
+          broker.SetDeviceId(L"self-test-device");
+
+          struct BurstMetrics {
+            int blockCount{0};
+            int allowCount{0};
+            long long p95LatencyMs{0};
+            long long maxLatencyMs{0};
+          };
+
+          const auto processImage = PathExists(servicePath) ? servicePath.wstring() : L"fenrir-agent-service.exe";
+          const auto runBurst = [&broker, &processImage](const std::filesystem::path& path,
+                                                         const RealtimeFileOperation operation,
+                                                         const int iterations,
+                                                         const std::wstring& correlationIdPrefix) {
+            BurstMetrics metrics{};
+            std::vector<long long> latencySamples;
+            latencySamples.reserve(static_cast<std::size_t>(std::max(iterations, 0)));
+
+            std::error_code absolutePathError;
+            auto resolvedPath = std::filesystem::absolute(path, absolutePathError);
+            if (absolutePathError) {
+              resolvedPath = path;
+            }
+
+            for (int index = 0; index < iterations; ++index) {
+              RealtimeFileScanRequest request{};
+              request.protocolVersion = ANTIVIRUS_REALTIME_PROTOCOL_VERSION;
+              request.requestSize = sizeof(request);
+              request.requestId = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                   std::chrono::system_clock::now().time_since_epoch())
+                                                                   .count() + index);
+              request.operation = operation;
+              request.processId = GetCurrentProcessId();
+              request.threadId = GetCurrentThreadId();
+
+              std::error_code fileSizeError;
+              request.fileSizeBytes = std::filesystem::file_size(resolvedPath, fileSizeError);
+              if (fileSizeError) {
+                request.fileSizeBytes = 0;
+              }
+
+              CopyWideField(request.correlationId, correlationIdPrefix + L"-" + std::to_wstring(index));
+              CopyWideField(request.path, resolvedPath.wstring());
+              CopyWideField(request.processImage, processImage);
+              CopyWideField(request.parentImage, processImage);
+              CopyWideField(request.commandLine, L"fenrir-agent-service.exe --self-test --broker-load");
+              CopyWideField(request.userSid, L"S-1-5-18");
+
+              const auto startedAt = std::chrono::steady_clock::now();
+              const auto outcome = broker.InspectFile(request);
+              const auto completedAt = std::chrono::steady_clock::now();
+              const auto latencyMs =
+                  std::chrono::duration_cast<std::chrono::milliseconds>(completedAt - startedAt).count();
+              latencySamples.push_back(latencyMs);
+
+              const auto blocked = outcome.action == ANTIVIRUS_REALTIME_RESPONSE_ACTION_BLOCK ||
+                                   outcome.finding.verdict.disposition == VerdictDisposition::Block ||
+                                   outcome.finding.verdict.disposition == VerdictDisposition::Quarantine;
+              if (blocked) {
+                ++metrics.blockCount;
+              } else {
+                ++metrics.allowCount;
+              }
+            }
+
+            if (!latencySamples.empty()) {
+              std::sort(latencySamples.begin(), latencySamples.end());
+              const auto percentileIndex = (latencySamples.size() * 95) / 100;
+              metrics.p95LatencyMs = latencySamples[std::min(percentileIndex, latencySamples.size() - 1)];
+              metrics.maxLatencyMs = latencySamples.back();
+            }
+
+            return metrics;
+          };
+
+          const auto benignMetrics =
+              runBurst(brokerLoadBenignPath, ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE, 120, L"self-test-phase1-broker-benign");
+          const auto renameMaliciousMetrics = runBurst(brokerLoadMaliciousPath, ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME,
+                                                       24, L"self-test-phase1-broker-rename");
+          const auto sectionMaliciousMetrics = runBurst(
+              brokerLoadMaliciousPath, ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP, 24,
+              L"self-test-phase1-broker-section");
+
+          const auto benignAllowRatio = benignMetrics.allowCount / 120.0;
+          const auto renameBlockRatio = renameMaliciousMetrics.blockCount / 24.0;
+          const auto sectionBlockRatio = sectionMaliciousMetrics.blockCount / 24.0;
+
+          if (benignAllowRatio >= 0.95 && renameBlockRatio >= 0.95 && sectionBlockRatio >= 0.95 &&
+              benignMetrics.p95LatencyMs <= 250) {
+            AddCheck(report, L"phase1_broker_load_failmode", L"Phase 1 broker load/fail-mode proof", SelfTestStatus::Pass,
+                     L"Under burst load, benign write requests remained allow-biased while malicious rename/section requests "
+                     L"stayed fail-closed (benign allow ratio " + std::to_wstring(benignAllowRatio) +
+                         L", rename block ratio " + std::to_wstring(renameBlockRatio) +
+                         L", section block ratio " + std::to_wstring(sectionBlockRatio) +
+                         L", benign p95 latency " + std::to_wstring(benignMetrics.p95LatencyMs) + L" ms)." );
+          } else {
+            AddCheck(report, L"phase1_broker_load_failmode", L"Phase 1 broker load/fail-mode proof", SelfTestStatus::Fail,
+                     L"Broker load/fail-mode validation did not meet thresholds (benign allow ratio " +
+                         std::to_wstring(benignAllowRatio) + L", rename block ratio " +
+                         std::to_wstring(renameBlockRatio) + L", section block ratio " +
+                         std::to_wstring(sectionBlockRatio) + L", benign p95 latency " +
+                         std::to_wstring(benignMetrics.p95LatencyMs) + L" ms, benign max latency " +
+                         std::to_wstring(benignMetrics.maxLatencyMs) + L" ms).",
+                     L"Review realtime broker latency budgets and fail-closed operation mapping for rename/section interception paths.");
+          }
+        }
+      } catch (const std::exception& error) {
+        AddCheck(report, L"phase1_broker_load_failmode", L"Phase 1 broker load/fail-mode proof", SelfTestStatus::Fail,
+                 L"Broker load/fail-mode simulation failed: " + Utf8ToWide(error.what()),
+                 L"Validate isolated runtime/evidence paths and rerun self-test in endpoint service context.");
+      }
+    }
+
     const auto browserDownloadInstallRoot = phaseValidationRoot / L"phase1-browser-download-install-set";
     const std::vector<std::filesystem::path> browserDownloadInstallSamples = {
         browserDownloadInstallRoot / L"downloads" / L"invoice.pdf",
