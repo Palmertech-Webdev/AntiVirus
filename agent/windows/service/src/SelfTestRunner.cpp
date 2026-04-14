@@ -2572,8 +2572,9 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
 
   const auto minifilterInf = installRoot / L"driver" / L"AntivirusMinifilter.inf";
   const auto minifilterSys = installRoot / L"driver" / L"AntivirusMinifilter.sys";
+  const auto minifilterCat = installRoot / L"driver" / L"AntivirusMinifilter.cat";
   const auto minifilterServiceState = QueryServiceState(kMinifilterServiceName);
-  const auto minifilterArtifactsPresent = PathExists(minifilterInf) || PathExists(minifilterSys);
+  const auto minifilterArtifactsPresent = PathExists(minifilterInf) || PathExists(minifilterSys) || PathExists(minifilterCat);
   AddCheck(report, L"minifilter", L"Minifilter package",
            !minifilterServiceState.empty() ? SelfTestStatus::Pass
                                            : (minifilterArtifactsPresent ? SelfTestStatus::Warning : SelfTestStatus::Fail),
@@ -2582,6 +2583,44 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                : (minifilterArtifactsPresent ? L"Driver packaging artifacts are present, but the minifilter service is not installed."
                                             : L"No built minifilter artifacts were found beside the agent binaries."),
            L"Build the driver with the WDK, sign the .sys/.cat, and stage AntivirusMinifilter.inf/.sys into the release package.");
+
+  const auto minifilterInfPresent = PathExists(minifilterInf);
+  const auto minifilterSysPresent = PathExists(minifilterSys);
+  const auto minifilterCatPresent = PathExists(minifilterCat);
+  if (minifilterInfPresent && minifilterSysPresent && minifilterCatPresent) {
+    AddCheck(report, L"minifilter_artifacts", L"Minifilter release artifacts", SelfTestStatus::Pass,
+             L"INF, SYS, and CAT artifacts were found in the release layout.");
+  } else {
+    std::wstring missing;
+    if (!minifilterInfPresent) {
+      missing += L"INF ";
+    }
+    if (!minifilterSysPresent) {
+      missing += L"SYS ";
+    }
+    if (!minifilterCatPresent) {
+      missing += L"CAT ";
+    }
+
+    AddCheck(report, L"minifilter_artifacts", L"Minifilter release artifacts", SelfTestStatus::Fail,
+             L"Minifilter release layout is missing: " + missing,
+             L"Run the release layout build with staged minifilter SYS/CAT payloads before packaging.");
+  }
+
+  if (minifilterSysPresent || minifilterCatPresent) {
+    const auto sysSigned = minifilterSysPresent && VerifyFileAuthenticodeSignature(minifilterSys);
+    const auto catSigned = minifilterCatPresent && VerifyFileAuthenticodeSignature(minifilterCat);
+    const auto sysSigner = minifilterSysPresent ? QueryFileSignerSubject(minifilterSys) : std::wstring();
+    const auto catSigner = minifilterCatPresent ? QueryFileSignerSubject(minifilterCat) : std::wstring();
+
+    const auto signingStatus = (sysSigned && catSigned) ? SelfTestStatus::Pass : SelfTestStatus::Warning;
+    AddCheck(report, L"minifilter_signing", L"Minifilter signing posture", signingStatus,
+             L"SYS signed=" + std::wstring(sysSigned ? L"true" : L"false") +
+                 L" (signer=" + (sysSigner.empty() ? L"(none)" : sysSigner) + L"); CAT signed=" +
+                 std::wstring(catSigned ? L"true" : L"false") +
+                 L" (signer=" + (catSigner.empty() ? L"(none)" : catSigner) + L").",
+             L"Sign both AntivirusMinifilter.sys and AntivirusMinifilter.cat with the release signing chain before production rollout.");
+  }
 
   const auto serviceState = QueryServiceState(L"FenrirAgent");
   AddCheck(report, L"service_registration", L"Windows service registration",

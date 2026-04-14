@@ -39,7 +39,10 @@ Use `RunPhase1ExitCriteria.ps1` to evaluate the four Phase 1 AV exit criteria in
 - remediation consistency across repeated runs
 - false-positive rate against cleanware and UK business corpora
 - scan performance thresholds (average and p95 milliseconds per file)
-- minifilter/realtime edge-case matrix remains stable for long paths, unicode paths, create-on-missing, and safe invalid-input handling
+- minifilter/realtime edge-case matrix remains stable across create/open/write/execute/rename/section-map, ADS,
+  reparse/junction/symlink paths, removable media, network shares, cloud-sync folders, large files,
+  locked image-section handling, and archive-abuse paths
+- minifilter package validation confirms INF/SYS/CAT artifact completeness and Authenticode signing posture
 
 Use `GeneratePhase1HouseholdCorpus.ps1` to produce larger local synthetic corpora for repeatable false-positive and
 performance checks.
@@ -63,6 +66,12 @@ Use `RunMinifilterEdgeCaseHarness.ps1` directly for focused kernel/minifilter ed
 
 ```powershell
 .\RunMinifilterEdgeCaseHarness.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+Use `ValidateMinifilterPackage.ps1` to validate staged minifilter release artifacts and signatures:
+
+```powershell
+.\ValidateMinifilterPackage.ps1 -WorkspaceRoot ..\..\..\.. -DriverRoot ./agent/windows/out/dev/driver
 ```
 
 ## Phase 2 Exit-Criteria Harness

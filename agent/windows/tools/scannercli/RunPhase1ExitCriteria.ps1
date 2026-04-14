@@ -12,7 +12,12 @@ param(
   [double]$PerformanceMaxAvgMsPerFile = 150,
   [double]$PerformanceMaxP95MsPerFile = 250,
   [string]$MinifilterWorkingRoot = "./tmp-phase1-minifilter-edge",
-  [switch]$SkipMinifilterEdgeCases
+  [switch]$RequireFullMinifilterEdgeCoverage,
+  [string]$MinifilterDriverRoot = "./agent/windows/out/dev/driver",
+  [string]$MinifilterPackageWorkingRoot = "./tmp-phase1-minifilter-package",
+  [switch]$SkipMinifilterEdgeCases,
+  [switch]$SkipMinifilterPackageValidation,
+  [switch]$RequireMinifilterServiceInstalled
 )
 
 $ErrorActionPreference = "Stop"
@@ -290,7 +295,13 @@ Add-CriterionResult -Name "False positives are low enough for normal household u
 # Criterion 4: System performance remains acceptable.
 $performancePass = $true
 $performanceDetails = @()
-$performanceTargets = @($cleanwareCorpusAbsolute, $ukCorpusAbsolute) | Select-Object -Unique
+$performanceTargets = [System.Collections.Generic.List[string]]::new()
+$seenPerformanceTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($targetCandidate in @($cleanwareCorpusAbsolute, $ukCorpusAbsolute)) {
+  if ($seenPerformanceTargets.Add([string]$targetCandidate)) {
+    $null = $performanceTargets.Add([string]$targetCandidate)
+  }
+}
 $totalPerformanceFiles = 0
 foreach ($target in $performanceTargets) {
   if (Test-Path -LiteralPath $target) {
@@ -346,45 +357,101 @@ if ($totalPerformanceFiles -eq 0) {
 Add-CriterionResult -Name "System performance remains acceptable" -Pass $performancePass -Details ($performanceDetails -join "; ")
 
 $minifilterEdgeCaseReportPath = ""
+$minifilterPackageReportPath = ""
 if (-not $SkipMinifilterEdgeCases) {
   $minifilterHarnessPath = Join-Path $script:WorkspaceRootAbsolute "agent/windows/tools/scannercli/RunMinifilterEdgeCaseHarness.ps1"
   if (-not (Test-Path -LiteralPath $minifilterHarnessPath)) {
     throw "Minifilter edge-case harness script was not found: $minifilterHarnessPath"
   }
 
-  $minifilterHarnessOutput = @()
+  $minifilterWorkingRootAbsolute = Resolve-AbsolutePath -InputPath $MinifilterWorkingRoot
+  $minifilterEdgeCaseReportPath = Join-Path $minifilterWorkingRootAbsolute "minifilter-edgecase-report.json"
+
   $minifilterHarnessExitCode = 1
-  $savedErrorActionPreference = $ErrorActionPreference
   try {
-    $ErrorActionPreference = "Continue"
-    $minifilterHarnessOutput = & $minifilterHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $MinifilterWorkingRoot 2>&1
+    & $minifilterHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $MinifilterWorkingRoot -RequireFullCoverage:([bool]$RequireFullMinifilterEdgeCoverage)
     $minifilterHarnessExitCode = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $savedErrorActionPreference
+  } catch {
+    $minifilterHarnessExitCode = 1
   }
 
-  $minifilterHarnessLines = [System.Collections.Generic.List[string]]::new()
-  foreach ($entry in @($minifilterHarnessOutput)) {
-    if ($entry -is [System.Management.Automation.ErrorRecord]) {
-      $null = $minifilterHarnessLines.Add($entry.ToString())
-    } else {
-      $null = $minifilterHarnessLines.Add([string]$entry)
+  $minifilterEdgeDetails = "Minifilter edge-case harness completed."
+  if (Test-Path -LiteralPath $minifilterEdgeCaseReportPath) {
+    try {
+      $edgeReport = Get-Content -LiteralPath $minifilterEdgeCaseReportPath -Raw | ConvertFrom-Json
+      $requiredFailures = @($edgeReport.requiredCoverageFailures)
+      $requiredSkipped = @($edgeReport.requiredCoverageSkipped)
+      $minifilterEdgeDetails = ("cases={0}, failedCases={1}, skippedCases={2}, requiredCoverageSatisfied={3}" -f
+          $edgeReport.caseCount,
+          $edgeReport.failedCaseCount,
+          $edgeReport.skippedCaseCount,
+          $edgeReport.requiredCoverageSatisfied)
+
+      if ($requiredFailures.Count -gt 0) {
+        $minifilterEdgeDetails += (", requiredCoverageFailures={0}" -f ($requiredFailures -join ","))
+      }
+      if ($requiredSkipped.Count -gt 0) {
+        $minifilterEdgeDetails += (", requiredCoverageSkipped={0}" -f ($requiredSkipped -join ","))
+      }
+    } catch {
+      $minifilterEdgeDetails = "Minifilter edge-case harness ran, but report parsing failed."
     }
   }
-  $minifilterHarnessText = [string]::Join([Environment]::NewLine, $minifilterHarnessLines).Trim()
 
-  $reportMatch = [regex]::Match($minifilterHarnessText, "REPORT_PATH=([^`r`n]+)")
-  if ($reportMatch.Success) {
-    $minifilterEdgeCaseReportPath = $reportMatch.Groups[1].Value.Trim()
+  Add-CriterionResult -Name "Minifilter edge-case matrix remains stable" -Pass ($minifilterHarnessExitCode -eq 0) -Details $minifilterEdgeDetails
+}
+
+if (-not $SkipMinifilterPackageValidation) {
+  $minifilterPackageValidatorPath = Join-Path $script:WorkspaceRootAbsolute "agent/windows/tools/scannercli/ValidateMinifilterPackage.ps1"
+  if (-not (Test-Path -LiteralPath $minifilterPackageValidatorPath)) {
+    throw "Minifilter package validation script was not found: $minifilterPackageValidatorPath"
   }
 
-  Add-CriterionResult -Name "Minifilter edge-case matrix remains stable" -Pass ($minifilterHarnessExitCode -eq 0) -Details $(
-    if ($minifilterHarnessExitCode -eq 0) {
-      "Minifilter edge-case harness completed successfully."
-    } else {
-      "Minifilter edge-case harness reported failures."
+  $minifilterPackageWorkingRootAbsolute = Resolve-AbsolutePath -InputPath $MinifilterPackageWorkingRoot
+  $minifilterPackageReportPath = Join-Path $minifilterPackageWorkingRootAbsolute "minifilter-package-validation-report.json"
+
+  $packageValidationExitCode = 1
+  try {
+    & $minifilterPackageValidatorPath -WorkspaceRoot $script:WorkspaceRootAbsolute -DriverRoot $MinifilterDriverRoot -WorkingRoot $MinifilterPackageWorkingRoot -RequireSignedArtifacts $true -RequireServiceInstalled:([bool]$RequireMinifilterServiceInstalled)
+    $packageValidationExitCode = $LASTEXITCODE
+  } catch {
+    $packageValidationExitCode = 1
+  }
+
+  $packageDetails = "Minifilter package validation completed."
+  if (Test-Path -LiteralPath $minifilterPackageReportPath) {
+    try {
+      $packageReport = Get-Content -LiteralPath $minifilterPackageReportPath -Raw | ConvertFrom-Json
+      $failedChecks = [System.Collections.Generic.List[string]]::new()
+      $warningChecks = [System.Collections.Generic.List[string]]::new()
+      foreach ($check in @($packageReport.checks)) {
+        if ($check.status -eq "fail") {
+          $null = $failedChecks.Add([string]$check.name)
+          continue
+        }
+
+        if ($check.status -eq "warning") {
+          $null = $warningChecks.Add([string]$check.name)
+        }
+      }
+
+      $packageDetails = ("overallStatus={0}, failedChecks={1}, warningChecks={2}" -f
+          $packageReport.overallStatus,
+          $failedChecks.Count,
+          $warningChecks.Count)
+
+      if ($failedChecks.Count -gt 0) {
+        $packageDetails += (", failed={0}" -f ($failedChecks -join ","))
+      }
+      if ($warningChecks.Count -gt 0) {
+        $packageDetails += (", warnings={0}" -f ($warningChecks -join ","))
+      }
+    } catch {
+      $packageDetails = "Minifilter package validation ran, but report parsing failed."
     }
-  )
+  }
+
+  Add-CriterionResult -Name "Minifilter package build/sign validation passes" -Pass ($packageValidationExitCode -eq 0) -Details $packageDetails
 }
 
 $failedCriteriaCount = 0
@@ -408,8 +475,16 @@ $report = [PSCustomObject]@{
     minUkBusinessFiles = $MinUkBusinessFiles
     cleanwareCorpusPath = $cleanwareCorpusAbsolute
     ukBusinessCorpusPath = $ukCorpusAbsolute
+    minifilterWorkingRoot = Resolve-AbsolutePath -InputPath $MinifilterWorkingRoot
+    minifilterDriverRoot = Resolve-AbsolutePath -InputPath $MinifilterDriverRoot
+    minifilterPackageWorkingRoot = Resolve-AbsolutePath -InputPath $MinifilterPackageWorkingRoot
+    requireFullMinifilterEdgeCoverage = [bool]$RequireFullMinifilterEdgeCoverage
+    requireMinifilterServiceInstalled = [bool]$RequireMinifilterServiceInstalled
+    skipMinifilterEdgeCases = [bool]$SkipMinifilterEdgeCases
+    skipMinifilterPackageValidation = [bool]$SkipMinifilterPackageValidation
   }
   minifilterEdgeCaseReportPath = $minifilterEdgeCaseReportPath
+  minifilterPackageReportPath = $minifilterPackageReportPath
   criteria = $script:CriteriaResults
   allCriteriaPass = $allCriteriaPass
 }
