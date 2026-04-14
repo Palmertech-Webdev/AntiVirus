@@ -152,6 +152,47 @@ int ParsePositiveInt(const std::wstring& rawValue, const int fallback) {
   }
 }
 
+std::uintmax_t MegabytesToBytes(const int megabytes) {
+  return static_cast<std::uintmax_t>(std::max(megabytes, 1)) * 1024ull * 1024ull;
+}
+
+std::uintmax_t ResolveQuarantineQuotaBytes() {
+  const auto quotaMb = ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_STORAGE_QUOTA_QUARANTINE_MB"), 2048);
+  return MegabytesToBytes(quotaMb);
+}
+
+std::uintmax_t ComputePathSizeBytes(const std::filesystem::path& path) {
+  std::error_code error;
+  if (!std::filesystem::exists(path, error) || error) {
+    return 0;
+  }
+
+  if (std::filesystem::is_regular_file(path, error) && !error) {
+    const auto fileSize = std::filesystem::file_size(path, error);
+    return error ? 0 : fileSize;
+  }
+
+  std::uintmax_t total = 0;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(path, error)) {
+    if (error) {
+      error.clear();
+      continue;
+    }
+    if (entry.is_regular_file(error) && !error) {
+      const auto size = entry.file_size(error);
+      if (!error) {
+        total += size;
+      } else {
+        error.clear();
+      }
+    } else {
+      error.clear();
+    }
+  }
+
+  return total;
+}
+
 std::filesystem::path BuildQuarantineFilePath(const std::filesystem::path& rootPath, const std::wstring& recordId,
                                               const std::filesystem::path& originalPath) {
   const auto extension = originalPath.extension().wstring();
@@ -560,6 +601,22 @@ QuarantineResult QuarantineStore::QuarantineFile(const ScanFinding& finding) con
 
   try {
     std::filesystem::create_directories(rootPath_ / L"files");
+    const auto quarantineRoot = rootPath_ / L"files";
+    const auto currentUsageBytes = ComputePathSizeBytes(quarantineRoot);
+    const auto quotaBytes = ResolveQuarantineQuotaBytes();
+    const auto incomingBytes = finding.sizeBytes;
+    const auto wouldExceedQuota = incomingBytes > quotaBytes ||
+                                  (currentUsageBytes > quotaBytes - std::min(quotaBytes, incomingBytes));
+    if (wouldExceedQuota) {
+      result.localStatus = L"quarantine-quota-exceeded";
+      result.errorMessage = L"Fenrir blocked quarantine intake because storage quota would be exceeded.";
+      result.verificationDetail = L"Current bytes=" + std::to_wstring(currentUsageBytes) + L", incoming bytes=" +
+                                  std::to_wstring(incomingBytes) + L", quota bytes=" + std::to_wstring(quotaBytes);
+      AppendQuarantineJournalEntry(rootPath_, L"quarantine", result.recordId, finding.path, {}, result.localStatus,
+                                   false, result.verificationDetail);
+      return result;
+    }
+
     const auto destinationPath = BuildQuarantineFilePath(rootPath_, result.recordId, finding.path);
     auto localStatus = L"quarantined";
 

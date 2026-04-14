@@ -10,7 +10,9 @@ param(
   [int]$RemediationSamplesPerRun = 3,
   [int]$PerformanceRuns = 8,
   [double]$PerformanceMaxAvgMsPerFile = 150,
-  [double]$PerformanceMaxP95MsPerFile = 250
+  [double]$PerformanceMaxP95MsPerFile = 250,
+  [string]$MinifilterWorkingRoot = "./tmp-phase1-minifilter-edge",
+  [switch]$SkipMinifilterEdgeCases
 )
 
 $ErrorActionPreference = "Stop"
@@ -292,6 +294,31 @@ if ($totalPerformanceFiles -eq 0) {
 
 Add-CriterionResult -Name "System performance remains acceptable" -Pass $performancePass -Details ($performanceDetails -join "; ")
 
+$minifilterEdgeCaseReportPath = ""
+if (-not $SkipMinifilterEdgeCases) {
+  $minifilterHarnessPath = Join-Path $script:WorkspaceRootAbsolute "agent/windows/tools/scannercli/RunMinifilterEdgeCaseHarness.ps1"
+  if (-not (Test-Path -LiteralPath $minifilterHarnessPath)) {
+    throw "Minifilter edge-case harness script was not found: $minifilterHarnessPath"
+  }
+
+  $minifilterHarnessOutput = & powershell -ExecutionPolicy Bypass -File $minifilterHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $MinifilterWorkingRoot
+  $minifilterHarnessExitCode = $LASTEXITCODE
+  $minifilterHarnessText = ($minifilterHarnessOutput | Out-String).Trim()
+
+  $reportMatch = [regex]::Match($minifilterHarnessText, "REPORT_PATH=([^`r`n]+)")
+  if ($reportMatch.Success) {
+    $minifilterEdgeCaseReportPath = $reportMatch.Groups[1].Value.Trim()
+  }
+
+  Add-CriterionResult -Name "Minifilter edge-case matrix remains stable" -Pass ($minifilterHarnessExitCode -eq 0) -Details (
+    if ($minifilterHarnessExitCode -eq 0) {
+      "Minifilter edge-case harness completed successfully."
+    } else {
+      "Minifilter edge-case harness reported failures."
+    }
+  )
+}
+
 $allCriteriaPass = @($script:CriteriaResults | Where-Object { $_.Status -ne "pass" }).Count -eq 0
 $reportPath = Join-Path $workingRootAbsolute "phase1-exitcriteria-report.json"
 $report = [PSCustomObject]@{
@@ -308,6 +335,7 @@ $report = [PSCustomObject]@{
     cleanwareCorpusPath = $cleanwareCorpusAbsolute
     ukBusinessCorpusPath = $ukCorpusAbsolute
   }
+  minifilterEdgeCaseReportPath = $minifilterEdgeCaseReportPath
   criteria = $script:CriteriaResults
   allCriteriaPass = $allCriteriaPass
 }

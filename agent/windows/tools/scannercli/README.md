@@ -37,6 +37,7 @@ Use `RunPhase1ExitCriteria.ps1` to evaluate the four Phase 1 AV exit criteria in
 - remediation consistency across repeated runs
 - false-positive rate against cleanware and UK business corpora
 - scan performance thresholds (average and p95 milliseconds per file)
+- minifilter/realtime edge-case matrix remains stable for long paths, unicode paths, create-on-missing, and safe invalid-input handling
 
 Use `GeneratePhase1HouseholdCorpus.ps1` to produce larger local synthetic corpora for repeatable false-positive and
 performance checks.
@@ -55,6 +56,12 @@ Stronger evidence example (minimum corpus size requirements):
 ```
 
 The script writes a JSON report to `tmp-phase1-exitcriteria/phase1-exitcriteria-report.json`.
+
+Use `RunMinifilterEdgeCaseHarness.ps1` directly for focused kernel/minifilter edge-path validation:
+
+```powershell
+.\RunMinifilterEdgeCaseHarness.ps1 -WorkspaceRoot ..\..\..\..
+```
 
 ## Phase 2 Exit-Criteria Harness
 
@@ -98,6 +105,7 @@ Current required checks:
 - AMSI avoids blocking benign administrative script content
 - AMSI blocks the malicious Phase 3 adversarial corpus
 - AMSI allows the benign Phase 3 adversarial corpus
+- hostile-input scanner/parser fuzz harness completes without runtime failures
 
 Example:
 
@@ -108,6 +116,12 @@ Example:
 
 The script writes a JSON report to `tmp-phase3-exitcriteria/phase3-exitcriteria-report.json`.
 The corpus generator writes repeatable test content and a manifest to `tmp-phase3-corpora/`.
+
+Use `RunHostileInputFuzzHarness.ps1` directly for focused malformed-input parser stress:
+
+```powershell
+.\RunHostileInputFuzzHarness.ps1 -WorkspaceRoot ..\..\..\..
+```
 
 ## Phase 4 Exit-Criteria Harness
 
@@ -120,6 +134,7 @@ Current required checks:
 - patch refresh populates local policy, reboot coordination, and patch state inventory surfaces
 - recipe catalog covers the initial high-risk software baseline for the free edition
 - patch snapshot preserves failed, reboot-pending, manual-only, and unsupported states for user-facing reporting
+- release-gate blockers reject promoted updates when pass-rate, risk-budget, hotfix, or ticket metadata requirements are not met
 
 Example:
 

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "EvidenceRecorder.h"
+#include "CryptoUtils.h"
 #include "DeviceInventoryCollector.h"
 #include "FileInventory.h"
 #include "FileSnapshotCollector.h"
@@ -53,6 +54,8 @@ constexpr wchar_t kPamRequestEventName[] = L"Global\\FenrirPamRequestReady";
 constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
 constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
 constexpr wchar_t kPamPolicyFileName[] = L"pam-policy.json";
+constexpr wchar_t kPamPolicyDigestFileName[] = L"pam-policy.sha256";
+constexpr wchar_t kPamPolicyBackupFileName[] = L"pam-policy.backup.json";
 constexpr wchar_t kLocalApprovalQueueFileName[] = L"local-approval-requests.jsonl";
 constexpr wchar_t kLocalApprovalLedgerFileName[] = L"local-approval-ledger.jsonl";
 constexpr wchar_t kLocalAdminBaselineFileName[] = L"local-admin-baseline.jsonl";
@@ -1208,6 +1211,36 @@ std::wstring TrimWhitespace(std::wstring value) {
   return value.substr(first, last - first + 1);
 }
 
+bool ParseBooleanSetting(const std::wstring& value, const bool fallback) {
+  if (value.empty()) {
+    return fallback;
+  }
+
+  const auto lower = ToLowerCopy(TrimWhitespace(value));
+  if (lower == L"1" || lower == L"true" || lower == L"yes" || lower == L"on") {
+    return true;
+  }
+  if (lower == L"0" || lower == L"false" || lower == L"no" || lower == L"off") {
+    return false;
+  }
+
+  return fallback;
+}
+
+int ParseBoundedIntegerSetting(const std::wstring& value, const int fallback, const int minimum,
+                               const int maximum) {
+  if (value.empty()) {
+    return fallback;
+  }
+
+  try {
+    const auto parsed = std::stoi(value);
+    return std::clamp(parsed, minimum, maximum);
+  } catch (...) {
+    return fallback;
+  }
+}
+
 PamPolicySnapshot CreateDefaultPamPolicySnapshot() {
   PamPolicySnapshot policy;
   policy.allowedActions = {
@@ -1229,6 +1262,144 @@ PamPolicySnapshot CreateDefaultPamPolicySnapshot() {
 
 std::filesystem::path ResolvePamPolicyPath(const AgentConfig& config) {
   return ResolveRuntimeRoot(config) / kPamPolicyFileName;
+}
+
+std::filesystem::path ResolvePamPolicyDigestPath(const AgentConfig& config) {
+  return ResolveRuntimeRoot(config) / kPamPolicyDigestFileName;
+}
+
+std::filesystem::path ResolvePamPolicyBackupPath(const AgentConfig& config) {
+  return ResolveRuntimeRoot(config) / kPamPolicyBackupFileName;
+}
+
+bool ReadUtf8TextFile(const std::filesystem::path& path, std::string* content, std::wstring* errorMessage) {
+  if (content == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir did not receive a text-file output buffer.";
+    }
+    return false;
+  }
+
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not open file " + path.wstring() + L".";
+    }
+    return false;
+  }
+
+  const std::string loaded((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  if (!input.good() && !input.eof()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir encountered an I/O error while reading " + path.wstring() + L".";
+    }
+    return false;
+  }
+
+  *content = loaded;
+  return true;
+}
+
+bool WriteUtf8TextFileAtomic(const std::filesystem::path& path, const std::string& content,
+                             std::wstring* errorMessage) {
+  std::error_code directoryError;
+  std::filesystem::create_directories(path.parent_path(), directoryError);
+  if (directoryError) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not create directory for " + path.wstring() + L".";
+    }
+    return false;
+  }
+
+  const auto tempPath =
+      path.parent_path() / (path.filename().wstring() + L".tmp-" + GenerateGuidString());
+  std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not create temporary file " + tempPath.wstring() + L".";
+    }
+    return false;
+  }
+
+  output.write(content.data(), static_cast<std::streamsize>(content.size()));
+  output.flush();
+  if (!output.good()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not persist temporary file " + tempPath.wstring() + L".";
+    }
+    return false;
+  }
+
+  std::error_code renameError;
+  std::filesystem::rename(tempPath, path, renameError);
+  if (!renameError) {
+    return true;
+  }
+
+  renameError.clear();
+  std::filesystem::copy_file(tempPath, path, std::filesystem::copy_options::overwrite_existing, renameError);
+  std::error_code cleanupError;
+  std::filesystem::remove(tempPath, cleanupError);
+  if (renameError) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir could not finalize update for " + path.wstring() + L".";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+std::wstring ComputeUtf8Sha256Lower(const std::string& content) {
+  const auto digest = ComputeBufferSha256(reinterpret_cast<const unsigned char*>(content.data()), content.size());
+  return ToLowerCopy(digest);
+}
+
+bool IsSha256HexString(const std::wstring& value) {
+  if (value.size() != 64) {
+    return false;
+  }
+
+  return std::all_of(value.begin(), value.end(), [](const wchar_t ch) {
+    return (ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'f');
+  });
+}
+
+bool IsPamPolicyIntegrityRequired() {
+  return ParseBooleanSetting(ReadEnvironmentVariable(L"ANTIVIRUS_PAM_POLICY_INTEGRITY_REQUIRED"), true);
+}
+
+bool IsPamTerminationEscalationEnabled() {
+  return ParseBooleanSetting(ReadEnvironmentVariable(L"ANTIVIRUS_PAM_TERMINATION_ESCALATION"), true);
+}
+
+std::size_t ResolveTelemetryQueueMaxRecords() {
+  return static_cast<std::size_t>(
+      ParseBoundedIntegerSetting(ReadEnvironmentVariable(L"ANTIVIRUS_TELEMETRY_QUEUE_MAX_RECORDS"), 10000, 1000,
+                                 250000));
+}
+
+int ResolveDestinationReputationTrustThreshold() {
+  return ParseBoundedIntegerSetting(
+      ReadEnvironmentVariable(L"ANTIVIRUS_DESTINATION_REPUTATION_BLOCK_THRESHOLD"), 30, 0, 100);
+}
+
+bool DestinationReputationEnforcementEnabled() {
+  return ParseBooleanSetting(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_DESTINATION_REPUTATION"), false);
+}
+
+void EnforceTelemetryQueueBudget(std::vector<TelemetryRecord>* pendingTelemetry) {
+  if (pendingTelemetry == nullptr) {
+    return;
+  }
+
+  const auto maxRecords = ResolveTelemetryQueueMaxRecords();
+  if (pendingTelemetry->size() <= maxRecords) {
+    return;
+  }
+
+  const auto dropCount = pendingTelemetry->size() - maxRecords;
+  pendingTelemetry->erase(pendingTelemetry->begin(), pendingTelemetry->begin() + dropCount);
 }
 
 bool IsPamRequesterAllowed(const PamPolicySnapshot& policy, const std::wstring& requester) {
@@ -1277,27 +1448,64 @@ bool TryLoadPamPolicy(const AgentConfig& config, PamPolicySnapshot* policy, std:
 
   *policy = CreateDefaultPamPolicySnapshot();
   const auto policyPath = ResolvePamPolicyPath(config);
+  const auto policyDigestPath = ResolvePamPolicyDigestPath(config);
+  const auto policyBackupPath = ResolvePamPolicyBackupPath(config);
   std::error_code existsError;
   if (!std::filesystem::exists(policyPath, existsError) || existsError) {
     return true;
   }
 
-  std::ifstream input(policyPath, std::ios::binary);
-  if (!input.is_open()) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir PAM policy file could not be opened at " + policyPath.wstring() + L".";
-    }
+  std::string policyUtf8;
+  if (!ReadUtf8TextFile(policyPath, &policyUtf8, errorMessage)) {
     policy->enabled = false;
     return false;
   }
 
-  const std::string policyUtf8((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-  if (!input.good() && !input.eof()) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir PAM policy file could not be read cleanly from " + policyPath.wstring() + L".";
+  if (IsPamPolicyIntegrityRequired()) {
+    std::wstring expectedDigest;
+    std::error_code digestExistsError;
+    if (std::filesystem::exists(policyDigestPath, digestExistsError) && !digestExistsError) {
+      std::string digestUtf8;
+      if (!ReadUtf8TextFile(policyDigestPath, &digestUtf8, errorMessage)) {
+        policy->enabled = false;
+        return false;
+      }
+
+      expectedDigest = ToLowerCopy(TrimWhitespace(Utf8ToWide(digestUtf8)));
+      if (!expectedDigest.empty() && !IsSha256HexString(expectedDigest)) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Fenrir detected invalid PAM policy digest metadata at " +
+                          policyDigestPath.wstring() + L".";
+        }
+        policy->enabled = false;
+        return false;
+      }
     }
-    policy->enabled = false;
-    return false;
+
+    const auto computedDigest = ComputeUtf8Sha256Lower(policyUtf8);
+    if (!expectedDigest.empty() && expectedDigest != computedDigest) {
+      std::string backupUtf8;
+      std::wstring backupError;
+      if (!ReadUtf8TextFile(policyBackupPath, &backupUtf8, &backupError)) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Fenrir detected PAM policy integrity mismatch and backup recovery failed: " +
+                          (backupError.empty() ? L"backup file unavailable" : backupError);
+        }
+        policy->enabled = false;
+        return false;
+      }
+
+      policyUtf8 = backupUtf8;
+      std::wstring persistError;
+      const auto recoveredDigest = ComputeUtf8Sha256Lower(policyUtf8);
+      if (!WriteUtf8TextFileAtomic(policyPath, policyUtf8, &persistError) ||
+          !WriteUtf8TextFileAtomic(policyDigestPath, WideToUtf8(recoveredDigest + L"\n"), &persistError)) {
+        if (errorMessage != nullptr && errorMessage->empty()) {
+          *errorMessage = L"Fenrir recovered PAM policy from backup but could not refresh integrity metadata: " +
+                          persistError;
+        }
+      }
+    }
   }
 
   const auto policyJson = Utf8ToWide(policyUtf8);
@@ -1330,6 +1538,17 @@ bool TryLoadPamPolicy(const AgentConfig& config, PamPolicySnapshot* policy, std:
   }
   if (const auto allowedPrefixes = ExtractPayloadStringArray(policyJson, "allowedPathPrefixes"); !allowedPrefixes.empty()) {
     policy->allowedPathPrefixes = allowedPrefixes;
+  }
+
+  if (IsPamPolicyIntegrityRequired()) {
+    std::wstring persistError;
+    const auto digest = ComputeUtf8Sha256Lower(policyUtf8);
+    if (!WriteUtf8TextFileAtomic(policyDigestPath, WideToUtf8(digest + L"\n"), &persistError) ||
+        !WriteUtf8TextFileAtomic(policyBackupPath, policyUtf8, &persistError)) {
+      if (errorMessage != nullptr && errorMessage->empty()) {
+        *errorMessage = L"Fenrir loaded PAM policy but could not persist integrity metadata: " + persistError;
+      }
+    }
   }
 
   return true;
@@ -1877,6 +2096,40 @@ bool LaunchPamProcessAsSystem(const PamLaunchPlan& launchPlan, DWORD* processId,
   return true;
 }
 
+bool TryEscalatedPamTermination(const DWORD processId, std::wstring* detailMessage) {
+  if (processId == 0) {
+    if (detailMessage != nullptr) {
+      *detailMessage = L"Fenrir did not receive a valid process id for termination escalation.";
+    }
+    return false;
+  }
+
+  try {
+    const auto commandLine = L"cmd.exe /c taskkill /PID " + std::to_wstring(processId) + L" /T /F";
+    const auto result = ExecuteHiddenProcessCapture(commandLine);
+    const auto lowerOutput = ToLowerCopy(result.output);
+    const auto treatedAsSuccess = result.exitCode == 0 || lowerOutput.find(L"not found") != std::wstring::npos ||
+                                  lowerOutput.find(L"no running instance") != std::wstring::npos;
+    if (!treatedAsSuccess) {
+      if (detailMessage != nullptr) {
+        *detailMessage = L"Fenrir escalation command failed with exit code " +
+                         std::to_wstring(result.exitCode) + L": " + result.output;
+      }
+      return false;
+    }
+
+    if (detailMessage != nullptr) {
+      *detailMessage = L"Fenrir used process-tree termination escalation after timeout.";
+    }
+    return true;
+  } catch (const std::exception& error) {
+    if (detailMessage != nullptr) {
+      *detailMessage = L"Fenrir termination escalation command failed: " + Utf8ToWide(error.what());
+    }
+    return false;
+  }
+}
+
 void StartPamTimedProcessGuard(const std::filesystem::path& journalPath, const PamRequestPayload& request,
                                const PamLaunchPlan& launchPlan, const DWORD processId) {
   if (!launchPlan.maxRuntimeSeconds.has_value() || launchPlan.maxRuntimeSeconds.value_or(0) == 0 || processId == 0) {
@@ -1898,11 +2151,29 @@ void StartPamTimedProcessGuard(const std::filesystem::path& journalPath, const P
     const auto waitResult = WaitForSingleObject(processHandle, timeoutSeconds * 1000);
     if (waitResult == WAIT_TIMEOUT) {
       if (TerminateProcess(processHandle, 0xF3) == FALSE) {
-        AppendPamAuditEntry(journalPath, request, launchPlan, L"expired-termination-failed",
-                            L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
-                                L" seconds, but process termination failed: " +
-                                FormatWindowsError(GetLastError()),
-                            L"runtime-guard", L"termination-failed");
+        const auto terminateError = FormatWindowsError(GetLastError());
+        if (IsPamTerminationEscalationEnabled()) {
+          std::wstring escalationDetail;
+          if (TryEscalatedPamTermination(processId, &escalationDetail)) {
+            AppendPamAuditEntry(
+                journalPath, request, launchPlan, L"expired-escalated",
+                L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
+                    L" seconds; direct termination failed but process-tree escalation succeeded.",
+                L"runtime-guard", L"terminated-escalated");
+          } else {
+            AppendPamAuditEntry(journalPath, request, launchPlan, L"expired-termination-failed",
+                                L"Fenrir timed elevation window expired after " +
+                                    std::to_wstring(timeoutSeconds) +
+                                    L" seconds, direct termination failed (" + terminateError +
+                                    L") and escalation failed (" + escalationDetail + L").",
+                                L"runtime-guard", L"termination-escalation-failed");
+          }
+        } else {
+          AppendPamAuditEntry(journalPath, request, launchPlan, L"expired-termination-failed",
+                              L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
+                                  L" seconds, but process termination failed: " + terminateError,
+                              L"runtime-guard", L"termination-failed");
+        }
       } else {
         AppendPamAuditEntry(journalPath, request, launchPlan, L"expired",
                             L"Fenrir timed elevation window expired after " + std::to_wstring(timeoutSeconds) +
@@ -3678,6 +3949,7 @@ void AgentService::LoadLocalPolicyCache() {
   state_.platformVersion = config_.platformVersion;
   policy_ = state_.policy;
   pendingTelemetry_ = telemetryQueueStore_->LoadPending();
+  EnforceTelemetryQueueBudget(&pendingTelemetry_);
 }
 
 void AgentService::StartTelemetrySpool() const {
@@ -3940,6 +4212,10 @@ void AgentService::DrainNetworkTelemetry() {
   }
 
   if (realtimeProtectionBroker_) {
+    const auto enforceDestinationReputation = DestinationReputationEnforcementEnabled();
+    const auto trustBlockThreshold = ResolveDestinationReputationTrustThreshold();
+    bool isolationAttempted = false;
+
     for (const auto& record : telemetry) {
       if (const auto behaviorEvent = BuildBehaviorEventFromNetworkTelemetry(record, state_.deviceId);
           behaviorEvent.has_value()) {
@@ -3964,6 +4240,24 @@ void AgentService::DrainNetworkTelemetry() {
                                 L"\",\"trustScore\":" + std::to_wstring(intel.trustScore) +
                                 L",\"providerWeight\":" + std::to_wstring(intel.providerWeight) +
                                 L",\"localOnly\":" + (intel.localOnly ? L"true" : L"false") + L"}");
+
+        if (!isolationAttempted && enforceDestinationReputation && intel.malicious &&
+            intel.trustScore <= static_cast<std::uint32_t>(trustBlockThreshold)) {
+          isolationAttempted = true;
+          std::wstring isolationError;
+          const auto enforced = networkIsolationManager_->IsolationActive() ||
+                                networkIsolationManager_->ApplyIsolation(true, &isolationError);
+          QueueTelemetryEvent(
+              enforced ? L"network.destination.reputation.enforced"
+                       : L"network.destination.reputation.enforcement_failed",
+              L"network-wfp",
+              enforced ? L"Fenrir enforced host isolation after a malicious destination intelligence hit."
+                       : L"Fenrir attempted destination-based isolation enforcement but the WFP action failed.",
+              std::wstring(L"{\"remoteAddress\":\"") + Utf8ToWide(EscapeJsonString(remoteAddress)) +
+                  L"\",\"trustScore\":" + std::to_wstring(intel.trustScore) +
+                  L",\"threshold\":" + std::to_wstring(trustBlockThreshold) + L",\"error\":\"" +
+                  Utf8ToWide(EscapeJsonString(isolationError)) + L"\"}");
+        }
       }
     }
   }
@@ -4026,11 +4320,13 @@ void AgentService::QueueTelemetryEvent(const std::wstring& eventType, const std:
       .occurredAt = CurrentUtcTimestamp(),
       .payloadJson = payloadJson});
 
+  EnforceTelemetryQueueBudget(&pendingTelemetry_);
   telemetryQueueStore_->SavePending(pendingTelemetry_);
 }
 
 void AgentService::QueueTelemetryRecords(const std::vector<TelemetryRecord>& records) {
   pendingTelemetry_.insert(pendingTelemetry_.end(), records.begin(), records.end());
+  EnforceTelemetryQueueBudget(&pendingTelemetry_);
   telemetryQueueStore_->SavePending(pendingTelemetry_);
 }
 

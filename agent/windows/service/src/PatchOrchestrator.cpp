@@ -40,6 +40,12 @@ struct PatchDebtSignals {
   bool internetFacingLikely{false};
 };
 
+struct SoftwareUpdateCandidate {
+  PatchProviderKind provider{PatchProviderKind::Manual};
+  std::wstring providerId;
+  const PackageRecipeRecord* recipe{nullptr};
+};
+
 constexpr std::size_t kMaxSoftwareUpdatesPerCycle = 24;
 
 bool IsRunningOnBatteryPower() {
@@ -66,6 +72,60 @@ std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
   return value;
+}
+
+std::wstring EscapeWideForJson(const std::wstring& value) {
+  return Utf8ToWide(EscapeJsonString(WideToUtf8(value)));
+}
+
+bool StartsWithCaseInsensitive(const std::wstring& value, const std::wstring& prefix) {
+  if (value.size() < prefix.size()) {
+    return false;
+  }
+
+  return ToLowerCopy(value.substr(0, prefix.size())) == ToLowerCopy(prefix);
+}
+
+bool IsHexLowerSha256(const std::wstring& value) {
+  if (value.size() != 64) {
+    return false;
+  }
+
+  return std::all_of(value.begin(), value.end(), [](const wchar_t ch) {
+    return (ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'f');
+  });
+}
+
+bool RecipeHasTrustMaterial(const PackageRecipeRecord& recipe) {
+  const auto digest = ToLowerCopy(recipe.installerSha256);
+  const auto hasDigest = !digest.empty() && IsHexLowerSha256(digest);
+  const auto hasSigner = !recipe.requiredSigner.empty();
+  return hasDigest || hasSigner;
+}
+
+bool RecipeDefinitionTrusted(const PackageRecipeRecord& recipe, std::wstring* reason) {
+  if (!StartsWithCaseInsensitive(recipe.sourceUrl, L"https://")) {
+    if (reason != nullptr) {
+      *reason = L"Recipe source URL is not HTTPS.";
+    }
+    return false;
+  }
+
+  if (!recipe.installerSha256.empty() && !IsHexLowerSha256(ToLowerCopy(recipe.installerSha256))) {
+    if (reason != nullptr) {
+      *reason = L"Recipe SHA256 metadata is malformed.";
+    }
+    return false;
+  }
+
+  if (!RecipeHasTrustMaterial(recipe)) {
+    if (reason != nullptr) {
+      *reason = L"Recipe must define installer hash or required signer before automatic execution.";
+    }
+    return false;
+  }
+
+  return true;
 }
 
 std::vector<std::wstring> SplitLines(const std::wstring& value) {
@@ -497,6 +557,115 @@ std::optional<PackageRecipeRecord> MatchRecipe(const InstalledSoftwareInventoryI
   return std::nullopt;
 }
 
+const PackageRecipeRecord* FindRecipeForSoftwareRecord(const SoftwarePatchRecord& record,
+                                                       const std::vector<PackageRecipeRecord>& recipes) {
+  if (record.provider == L"recipe" && !record.providerId.empty()) {
+    const auto byId = std::find_if(recipes.begin(), recipes.end(), [&](const PackageRecipeRecord& recipe) {
+      return recipe.enabled && recipe.recipeId == record.providerId;
+    });
+    if (byId != recipes.end()) {
+      return &(*byId);
+    }
+  }
+
+  const auto lowerName = ToLowerCopy(record.displayName);
+  const auto lowerPublisher = ToLowerCopy(record.publisher);
+  for (const auto& recipe : recipes) {
+    if (!recipe.enabled) {
+      continue;
+    }
+
+    if (!recipe.matchPattern.empty() &&
+        lowerName.find(ToLowerCopy(recipe.matchPattern)) != std::wstring::npos) {
+      return &recipe;
+    }
+
+    if (!recipe.publisher.empty() && !lowerPublisher.empty() &&
+        lowerPublisher.find(ToLowerCopy(recipe.publisher)) != std::wstring::npos) {
+      return &recipe;
+    }
+
+    if (!recipe.displayName.empty() && lowerName.find(ToLowerCopy(recipe.displayName)) != std::wstring::npos) {
+      return &recipe;
+    }
+  }
+
+  return nullptr;
+}
+
+void AppendSoftwareUpdateCandidate(std::vector<SoftwareUpdateCandidate>* candidates, const PatchProviderKind provider,
+                                   const std::wstring& providerId, const PackageRecipeRecord* recipe) {
+  if (candidates == nullptr) {
+    return;
+  }
+
+  if (provider == PatchProviderKind::NativeUpdater && providerId.empty()) {
+    return;
+  }
+
+  if (provider == PatchProviderKind::Winget && providerId.empty()) {
+    return;
+  }
+
+  if (provider == PatchProviderKind::Recipe && recipe == nullptr) {
+    return;
+  }
+
+  if (provider == PatchProviderKind::Manual) {
+    return;
+  }
+
+  const auto duplicate = std::find_if(candidates->begin(), candidates->end(),
+                                      [&](const SoftwareUpdateCandidate& existing) {
+                                        return existing.provider == provider &&
+                                               existing.providerId == providerId;
+                                      });
+  if (duplicate != candidates->end()) {
+    return;
+  }
+
+  candidates->push_back(SoftwareUpdateCandidate{
+      .provider = provider,
+      .providerId = providerId,
+      .recipe = recipe});
+}
+
+std::vector<SoftwareUpdateCandidate> BuildSoftwareUpdateCandidates(const SoftwarePatchRecord& record,
+                                                                   const PatchPolicyRecord& policy,
+                                                                   const PackageRecipeRecord* recipe) {
+  std::vector<SoftwareUpdateCandidate> candidates;
+  candidates.reserve(4);
+
+  const auto primaryProvider = PatchProviderKindFromString(record.provider);
+  switch (primaryProvider) {
+    case PatchProviderKind::NativeUpdater:
+      AppendSoftwareUpdateCandidate(&candidates, PatchProviderKind::NativeUpdater, record.providerId, recipe);
+      break;
+    case PatchProviderKind::Winget:
+      AppendSoftwareUpdateCandidate(&candidates, PatchProviderKind::Winget, record.providerId, recipe);
+      break;
+    case PatchProviderKind::Recipe:
+      AppendSoftwareUpdateCandidate(&candidates, PatchProviderKind::Recipe,
+                                    record.providerId.empty() && recipe != nullptr ? recipe->recipeId : record.providerId,
+                                    recipe);
+      break;
+    default:
+      break;
+  }
+
+  if (recipe != nullptr) {
+    if (policy.allowWinget && !recipe->wingetId.empty()) {
+      AppendSoftwareUpdateCandidate(&candidates, PatchProviderKind::Winget, recipe->wingetId, recipe);
+    }
+
+    if (policy.allowRecipes && !recipe->sourceUrl.empty()) {
+      AppendSoftwareUpdateCandidate(&candidates, PatchProviderKind::Recipe, recipe->recipeId, recipe);
+    }
+  }
+
+  return candidates;
+}
+
 std::filesystem::path FindNativeUpdaterExecutable(const InstalledSoftwareInventoryItem& item, const std::wstring& updaterName) {
   const auto localAppData = ReadEnvironmentVariable(L"LOCALAPPDATA");
   const auto programFiles = ReadEnvironmentVariable(L"ProgramFiles");
@@ -782,12 +951,24 @@ SoftwareProviderResolution ResolveProvider(const InstalledSoftwareInventoryItem&
   }
 
   if (policy.allowRecipes && !recipe->sourceUrl.empty()) {
-    resolution.provider = PatchProviderKind::Recipe;
+    std::wstring trustReason;
+    if (RecipeDefinitionTrusted(*recipe, &trustReason)) {
+      resolution.provider = PatchProviderKind::Recipe;
+      resolution.providerId = recipe->recipeId;
+      resolution.supportedSource = L"recipe";
+      resolution.supported = true;
+      resolution.summary = L"Fenrir can patch this application using a maintained package recipe.";
+      resolution.manualOnly = recipe->manualOnly;
+      return resolution;
+    }
+
+    resolution.provider = PatchProviderKind::Manual;
     resolution.providerId = recipe->recipeId;
-    resolution.supportedSource = L"recipe";
-    resolution.supported = true;
-    resolution.summary = L"Fenrir can patch this application using a maintained package recipe.";
-    resolution.manualOnly = recipe->manualOnly;
+    resolution.supportedSource = L"manual";
+    resolution.supported = false;
+    resolution.manualOnly = true;
+    resolution.summary = L"Fenrir found a recipe but blocked automation because trust metadata is incomplete: " +
+                         trustReason;
     return resolution;
   }
 
@@ -1021,6 +1202,196 @@ PatchExecutionResult ExecuteRecipeOperation(const AgentConfig& config, const Pac
       .detailJson = std::wstring(L"{\"output\":\"") + Utf8ToWide(EscapeJsonString(result.output)) + L"\"}"};
 }
 
+std::wstring BuildAuthenticodeValidationScript() {
+  return LR"PATCH(
+param([string]$targetPath, [string]$requiredSigner)
+$ErrorActionPreference = 'Stop'
+if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+  Write-Output "RESULT`tmissing`tpath_missing"
+  exit 2
+}
+$sig = Get-AuthenticodeSignature -FilePath $targetPath
+if (-not $sig.SignerCertificate) {
+  Write-Output ("RESULT`tunsigned`t" + [string]$sig.Status)
+  exit 3
+}
+$subject = [string]$sig.SignerCertificate.Subject
+if ($requiredSigner -and $subject -notlike ("*" + $requiredSigner + "*")) {
+  Write-Output ("RESULT`tsigner_mismatch`t" + $subject)
+  exit 4
+}
+if ([string]$sig.Status -ne 'Valid') {
+  Write-Output ("RESULT`tinvalid_signature`t" + [string]$sig.Status)
+  exit 5
+}
+Write-Output ("RESULT`tok`t" + $subject)
+)PATCH";
+}
+
+bool VerifyAuthenticodeProvider(const AgentConfig& config, const std::wstring& binaryPath,
+                                const std::wstring& requiredSigner, std::wstring* failureReason) {
+  const auto result = ExecutePowerShellScript(config, BuildAuthenticodeValidationScript(), L"provider-signature",
+                                              {binaryPath, requiredSigner});
+  if (result.exitCode == 0) {
+    return true;
+  }
+
+  if (failureReason != nullptr) {
+    std::wstring detail = result.output;
+    if (detail.empty()) {
+      detail = L"signature validation command failed";
+    }
+    *failureReason = detail;
+  }
+  return false;
+}
+
+bool IsPathUnderRoot(const std::filesystem::path& candidatePath, const std::filesystem::path& rootPath) {
+  if (candidatePath.empty() || rootPath.empty()) {
+    return false;
+  }
+
+  std::error_code candidateError;
+  const auto normalizedCandidate = std::filesystem::weakly_canonical(candidatePath, candidateError);
+  if (candidateError) {
+    return false;
+  }
+
+  std::error_code rootError;
+  const auto normalizedRoot = std::filesystem::weakly_canonical(rootPath, rootError);
+  if (rootError) {
+    return false;
+  }
+
+  auto candidateText = ToLowerCopy(normalizedCandidate.wstring());
+  auto rootText = ToLowerCopy(normalizedRoot.wstring());
+  if (candidateText == rootText) {
+    return true;
+  }
+
+  if (rootText.empty()) {
+    return false;
+  }
+
+  if (rootText.back() != L'\\' && rootText.back() != L'/') {
+    rootText.push_back(L'\\');
+  }
+  return candidateText.rfind(rootText, 0) == 0;
+}
+
+bool ValidateNativeProviderPath(const std::wstring& providerId, std::wstring* failureReason) {
+  if (providerId.empty()) {
+    if (failureReason != nullptr) {
+      *failureReason = L"Native updater path is empty.";
+    }
+    return false;
+  }
+
+  const std::filesystem::path providerPath(providerId);
+  if (!providerPath.is_absolute()) {
+    if (failureReason != nullptr) {
+      *failureReason = L"Native updater path must be absolute.";
+    }
+    return false;
+  }
+
+  if (ToLowerCopy(providerPath.extension().wstring()) != L".exe") {
+    if (failureReason != nullptr) {
+      *failureReason = L"Native updater must resolve to a trusted executable.";
+    }
+    return false;
+  }
+
+  std::error_code fileError;
+  if (!std::filesystem::exists(providerPath, fileError) || fileError ||
+      !std::filesystem::is_regular_file(providerPath, fileError)) {
+    if (failureReason != nullptr) {
+      *failureReason = L"Native updater executable is missing or inaccessible.";
+    }
+    return false;
+  }
+
+  std::vector<std::filesystem::path> trustedRoots;
+  const auto programFiles = ReadEnvironmentVariable(L"ProgramFiles");
+  const auto programFilesX86 = ReadEnvironmentVariable(L"ProgramFiles(x86)");
+  const auto localAppData = ReadEnvironmentVariable(L"LOCALAPPDATA");
+  const auto programData = ReadEnvironmentVariable(L"ProgramData");
+  if (!programFiles.empty()) {
+    trustedRoots.emplace_back(programFiles);
+  }
+  if (!programFilesX86.empty()) {
+    trustedRoots.emplace_back(programFilesX86);
+  }
+  if (!localAppData.empty()) {
+    trustedRoots.emplace_back(localAppData);
+  }
+  if (!programData.empty()) {
+    trustedRoots.emplace_back(programData);
+  }
+
+  const auto trusted = std::any_of(trustedRoots.begin(), trustedRoots.end(),
+                                   [&](const std::filesystem::path& root) {
+                                     return IsPathUnderRoot(providerPath, root);
+                                   });
+  if (!trusted) {
+    if (failureReason != nullptr) {
+      *failureReason = L"Native updater path is outside trusted install directories.";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+std::wstring ResolveExpectedNativeSigner(const SoftwarePatchRecord& record, const PackageRecipeRecord* recipe) {
+  if (recipe != nullptr && !recipe->requiredSigner.empty()) {
+    return recipe->requiredSigner;
+  }
+
+  const auto lowerName = ToLowerCopy(record.displayName);
+  const auto lowerPublisher = ToLowerCopy(record.publisher);
+  if (lowerName.find(L"google") != std::wstring::npos || lowerName.find(L"chrome") != std::wstring::npos ||
+      lowerPublisher.find(L"google") != std::wstring::npos) {
+    return L"Google";
+  }
+  if (lowerName.find(L"microsoft") != std::wstring::npos || lowerName.find(L"edge") != std::wstring::npos ||
+      lowerPublisher.find(L"microsoft") != std::wstring::npos) {
+    return L"Microsoft";
+  }
+
+  return {};
+}
+
+std::wstring BuildPatchAttemptTrailJson(const std::vector<PatchExecutionResult>& attempts,
+                                        const std::optional<std::size_t> winnerIndex,
+                                        const std::wstring& providerDetail) {
+  std::wstring json = L"{\"fallbackUsed\":";
+  json += attempts.size() > 1 ? L"true" : L"false";
+  json += L",\"winnerIndex\":";
+  json += winnerIndex.has_value() ? std::to_wstring(*winnerIndex) : L"-1";
+  json += L",\"providerDetail\":\"";
+  json += EscapeWideForJson(providerDetail);
+  json += L"\",\"attempts\":[";
+  for (std::size_t index = 0; index < attempts.size(); ++index) {
+    if (index != 0) {
+      json += L",";
+    }
+
+    const auto& attempt = attempts[index];
+    json += L"{\"provider\":\"";
+    json += EscapeWideForJson(attempt.provider);
+    json += L"\",\"status\":\"";
+    json += EscapeWideForJson(attempt.status);
+    json += L"\",\"errorCode\":\"";
+    json += EscapeWideForJson(attempt.errorCode);
+    json += L"\",\"success\":";
+    json += attempt.success ? L"true" : L"false";
+    json += L"}";
+  }
+  json += L"]}";
+  return json;
+}
+
 }  // namespace
 
 std::wstring PatchProviderKindToString(const PatchProviderKind provider) {
@@ -1211,6 +1582,10 @@ PatchExecutionResult PatchOrchestrator::UpdateSoftware(const std::wstring& softw
     throw std::runtime_error("Requested software patch target was not found");
   }
 
+  const auto recipes = database.ListPackageRecipes(500);
+  const auto matchedRecipe = FindRecipeForSoftwareRecord(*match, recipes);
+  const auto candidates = BuildSoftwareUpdateCandidates(*match, policy, matchedRecipe);
+
   PatchHistoryRecord history{
       .recordId = GenerateGuidString(),
       .targetType = L"software",
@@ -1222,41 +1597,168 @@ PatchExecutionResult PatchOrchestrator::UpdateSoftware(const std::wstring& softw
       .startedAt = CurrentUtcTimestamp()};
   database.UpsertPatchHistoryRecord(history);
 
+  std::vector<PatchExecutionResult> attempts;
+  attempts.reserve(std::max<std::size_t>(1, candidates.size()));
+  std::optional<std::size_t> winnerIndex;
   PatchExecutionResult execution{};
-  switch (PatchProviderKindFromString(match->provider)) {
-    case PatchProviderKind::Winget:
-      execution = ExecuteWingetOperation(match->providerId, searchOnly);
-      break;
-    case PatchProviderKind::NativeUpdater:
-      execution = searchOnly ? PatchExecutionResult{.success = true,
+
+  for (const auto& candidate : candidates) {
+    PatchExecutionResult attempt{};
+    switch (candidate.provider) {
+      case PatchProviderKind::NativeUpdater: {
+        if (!policy.allowNativeUpdaters) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"native-updater",
+              .status = L"policy_blocked",
+              .errorCode = L"NATIVE_UPDATER_DISABLED",
+              .detailJson = L"{\"message\":\"Patch policy disabled native updaters.\"}"};
+          break;
+        }
+
+        std::wstring pathError;
+        if (!ValidateNativeProviderPath(candidate.providerId, &pathError)) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"native-updater",
+              .status = L"provider_untrusted",
+              .errorCode = L"NATIVE_PROVIDER_PATH_UNTRUSTED",
+              .detailJson = std::wstring(L"{\"message\":\"") + EscapeWideForJson(pathError) + L"\"}"};
+          break;
+        }
+
+        const auto expectedSigner = ResolveExpectedNativeSigner(*match, candidate.recipe);
+        if (expectedSigner.empty()) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"native-updater",
+              .status = L"provider_untrusted",
+              .errorCode = L"NATIVE_PROVIDER_SIGNER_UNKNOWN",
+              .detailJson =
+                  L"{\"message\":\"Fenrir could not determine an expected signer for this native updater.\"}"};
+          break;
+        }
+
+        std::wstring signatureError;
+        if (!VerifyAuthenticodeProvider(config_, candidate.providerId, expectedSigner, &signatureError)) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"native-updater",
+              .status = L"provider_untrusted",
+              .errorCode = L"NATIVE_PROVIDER_SIGNATURE_INVALID",
+              .detailJson = std::wstring(L"{\"message\":\"") + EscapeWideForJson(signatureError) + L"\"}"};
+          break;
+        }
+
+        attempt = searchOnly ? PatchExecutionResult{.success = true,
                                                     .action = L"search",
-                                                    .targetId = match->softwareId,
                                                     .provider = L"native-updater",
                                                     .status = L"provider_ready",
-                                                    .detailJson = L"{\"message\":\"Native updater available; search mode is advisory only.\"}"}
-                             : ExecuteNativeOperation(match->providerId);
-      break;
-    case PatchProviderKind::Recipe: {
-      const auto recipes = database.ListPackageRecipes(500);
-      const auto recipe = std::find_if(recipes.begin(), recipes.end(),
-                                       [&](const auto& candidate) { return candidate.recipeId == match->providerId; });
-      execution = recipe == recipes.end()
-                      ? PatchExecutionResult{.success = false,
-                                             .action = searchOnly ? L"search" : L"install",
-                                             .targetId = match->softwareId,
+                                                    .detailJson = L"{\"message\":\"Native updater path and signer are trusted.\"}"}
+                             : ExecuteNativeOperation(candidate.providerId);
+        break;
+      }
+      case PatchProviderKind::Winget:
+        if (!policy.allowWinget) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"winget",
+              .status = L"policy_blocked",
+              .errorCode = L"WINGET_DISABLED",
+              .detailJson = L"{\"message\":\"Patch policy disabled winget.\"}"};
+          break;
+        }
+
+        if (candidate.providerId.empty()) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"winget",
+              .status = L"unsupported",
+              .errorCode = L"WINGET_ID_MISSING",
+              .detailJson = L"{\"message\":\"Winget provider id is missing.\"}"};
+          break;
+        }
+
+        attempt = ExecuteWingetOperation(candidate.providerId, searchOnly);
+        break;
+      case PatchProviderKind::Recipe:
+        if (!policy.allowRecipes) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"recipe",
+              .status = L"policy_blocked",
+              .errorCode = L"RECIPE_DISABLED",
+              .detailJson = L"{\"message\":\"Patch policy disabled package recipes.\"}"};
+          break;
+        }
+
+        if (candidate.recipe == nullptr) {
+          attempt = PatchExecutionResult{
+              .success = false,
+              .action = searchOnly ? L"search" : L"install",
+              .provider = L"recipe",
+              .status = L"missing_recipe",
+              .errorCode = L"RECIPE_NOT_FOUND",
+              .detailJson = L"{\"message\":\"Recipe metadata is unavailable for this software.\"}"};
+          break;
+        }
+
+        {
+          std::wstring trustReason;
+          if (!RecipeDefinitionTrusted(*candidate.recipe, &trustReason)) {
+            attempt = PatchExecutionResult{
+                .success = false,
+                .action = searchOnly ? L"search" : L"install",
+                .provider = L"recipe",
+                .status = L"provider_untrusted",
+                .errorCode = L"RECIPE_TRUST_MISSING",
+                .detailJson = std::wstring(L"{\"message\":\"") + EscapeWideForJson(trustReason) + L"\"}"};
+            break;
+          }
+        }
+
+        attempt = searchOnly
+                      ? PatchExecutionResult{.success = !candidate.recipe->manualOnly,
+                                             .action = L"search",
                                              .provider = L"recipe",
-                                             .status = L"missing_recipe",
-                                             .errorCode = L"RECIPE_NOT_FOUND"}
-                      : (searchOnly ? PatchExecutionResult{.success = true,
-                                                           .action = L"search",
-                                                           .targetId = match->softwareId,
-                                                           .provider = L"recipe",
-                                                           .status = recipe->manualOnly ? L"manual" : L"provider_ready",
-                                                           .detailJson = L"{\"message\":\"Recipe provider is registered for this software.\"}"}
-                                    : ExecuteRecipeOperation(config_, *recipe));
+                                             .status = candidate.recipe->manualOnly ? L"manual" : L"provider_ready",
+                                             .detailJson = L"{\"message\":\"Recipe provider metadata is trusted.\"}"}
+                      : ExecuteRecipeOperation(config_, *candidate.recipe);
+        break;
+      default:
+        attempt = PatchExecutionResult{
+            .success = false,
+            .action = searchOnly ? L"search" : L"install",
+            .provider = L"manual",
+            .status = L"manual",
+            .errorCode = L"MANUAL_ONLY",
+            .detailJson = L"{\"message\":\"This software currently requires a manual update workflow.\"}"};
+        break;
+    }
+
+    attempt.targetId = match->softwareId;
+    attempts.push_back(attempt);
+    if (attempt.success) {
+      winnerIndex = attempts.size() - 1;
+      execution = attempt;
       break;
     }
-    default:
+  }
+
+  if (!winnerIndex.has_value()) {
+    if (!attempts.empty()) {
+      execution = attempts.back();
+      if (execution.errorCode.empty() && attempts.size() > 1) {
+        execution.errorCode = L"ALL_PROVIDERS_FAILED";
+      }
+    } else {
       execution = PatchExecutionResult{
           .success = false,
           .action = searchOnly ? L"search" : L"install",
@@ -1265,10 +1767,13 @@ PatchExecutionResult PatchOrchestrator::UpdateSoftware(const std::wstring& softw
           .status = L"manual",
           .errorCode = L"MANUAL_ONLY",
           .detailJson = L"{\"message\":\"This software currently requires a manual update workflow.\"}"};
-      break;
+      attempts.push_back(execution);
+    }
   }
 
   execution.targetId = match->softwareId;
+  execution.detailJson = BuildPatchAttemptTrailJson(attempts, winnerIndex, execution.detailJson);
+  history.provider = execution.provider.empty() ? match->provider : execution.provider;
   history.status = execution.status;
   history.completedAt = CurrentUtcTimestamp();
   history.errorCode = execution.errorCode;

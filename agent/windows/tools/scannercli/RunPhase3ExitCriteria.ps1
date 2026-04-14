@@ -1,10 +1,13 @@
 param(
   [string]$ServicePath = "./agent/windows/out/dev/fenrir-agent-service.exe",
   [string]$AmsiCliPath = "./agent/windows/out/dev/tools/fenrir-amsitestcli.exe",
+  [string]$ScannerPath = "./agent/windows/out/dev/tools/fenrir-scannercli.exe",
   [string]$WorkspaceRoot = ".",
   [string]$WorkingRoot = "./tmp-phase3-exitcriteria",
   [string]$CorpusRoot = "./tmp-phase3-corpora",
+  [string]$HostileFuzzWorkingRoot = "./tmp-phase3-hostile-fuzz",
   [switch]$SkipCorpus,
+  [switch]$SkipHostileInputFuzz,
   [string[]]$RequiredCheckIds = @(
     "phase3_amsi_script_depth",
     "phase3_amsi_false_positive_benign"
@@ -126,6 +129,7 @@ foreach ($requiredId in $RequiredCheckIds) {
 
 $phase3UnexpectedChecks = @($phase3Checks | Where-Object { $RequiredCheckIds -notcontains "$($_.id)" })
 $corpusResults = [System.Collections.Generic.List[object]]::new()
+$hostileFuzzReportPath = ""
 
 if (-not $SkipCorpus) {
   $generatorPath = Join-Path $script:WorkspaceRootAbsolute "agent/windows/tools/scannercli/GeneratePhase3AdversarialCorpus.ps1"
@@ -227,6 +231,37 @@ if (-not $SkipCorpus) {
     }) | Out-Null
 }
 
+if (-not $SkipHostileInputFuzz) {
+  $hostileHarnessPath = Join-Path $script:WorkspaceRootAbsolute "agent/windows/tools/scannercli/RunHostileInputFuzzHarness.ps1"
+  if (-not (Test-Path -LiteralPath $hostileHarnessPath)) {
+    throw "Hostile input fuzz harness script was not found: $hostileHarnessPath"
+  }
+
+  $hostileHarnessOutput = & powershell -ExecutionPolicy Bypass -File $hostileHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $HostileFuzzWorkingRoot
+  $hostileHarnessExitCode = $LASTEXITCODE
+  $hostileHarnessText = ($hostileHarnessOutput | Out-String).Trim()
+
+  $reportMatch = [regex]::Match($hostileHarnessText, "REPORT_PATH=([^`r`n]+)")
+  if ($reportMatch.Success) {
+    $hostileFuzzReportPath = $reportMatch.Groups[1].Value.Trim()
+  }
+
+  $criteria.Add([PSCustomObject]@{
+      Criterion = "phase3_hostile_input_fuzz_harness"
+      Status = if ($hostileHarnessExitCode -eq 0) { "pass" } else { "fail" }
+      Details = if ($hostileHarnessExitCode -eq 0) {
+        "Hostile-input scanner fuzz harness completed successfully."
+      } else {
+        "Hostile-input scanner fuzz harness reported failures."
+      }
+      Remediation = if ($hostileHarnessExitCode -eq 0) {
+        ""
+      } else {
+        "Review the hostile-input fuzz report and harden parser/realtime paths until all samples complete without harness failures."
+      }
+    }) | Out-Null
+}
+
 $allCriteriaPass = @($criteria | Where-Object { $_.Status -ne "pass" }).Count -eq 0
 $reportPath = Join-Path $workingRootAbsolute "phase3-exitcriteria-report.json"
 $report = [PSCustomObject]@{
@@ -238,6 +273,7 @@ $report = [PSCustomObject]@{
   criteria = $criteria
   corpusRoot = if ($SkipCorpus) { "" } else { $corpusRootAbsolute }
   corpusResults = $corpusResults
+  hostileInputFuzzReportPath = $hostileFuzzReportPath
   additionalPhase3Checks = @($phase3UnexpectedChecks | ForEach-Object {
       [PSCustomObject]@{
         id = "$($_.id)"

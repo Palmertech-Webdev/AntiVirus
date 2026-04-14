@@ -6,7 +6,8 @@ param(
     "phase4_patch_policy_roundtrip",
     "phase4_windows_patch_state_refresh",
     "phase4_software_patch_recipe_coverage",
-    "phase4_patch_visibility_snapshot"
+    "phase4_patch_visibility_snapshot",
+    "phase4_release_gate_blockers"
   )
 )
 
