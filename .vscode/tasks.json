@@ -1,0 +1,137 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "task-marker",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"Set-Content -Path ./tmp-validation-status/task-marker.txt -Value ok -Encoding ASCII"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "task-marker2",
+			"type": "shell",
+			"command": "Set-Content",
+			"args": [
+				"-Path",
+				"./tmp-validation-status/task-marker.txt",
+				"-Value",
+				"ok",
+				"-Encoding",
+				"ascii"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-release-layout",
+			"type": "shell",
+			"command": "./agent/windows/installer/BuildReleaseLayout.ps1",
+			"args": [
+				"-Clean"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-release-layout",
+			"type": "shell",
+			"command": "./agent/windows/installer/BuildReleaseLayout.ps1",
+			"args": [
+				"-Clean"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-installer-bundle",
+			"type": "shell",
+			"command": "./agent/windows/installer/BuildInstallerBundle.ps1",
+			"args": [
+				"-Clean"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "generate-phase1-corpus",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/GeneratePhase1HouseholdCorpus.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				".",
+				"-OutputRoot",
+				"./tmp-phase1-corpora",
+				"-CleanwareCount",
+				"120",
+				"-UkBusinessCount",
+				"120"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "generate-phase1-corpus",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/GeneratePhase1HouseholdCorpus.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				".",
+				"-OutputRoot",
+				"./tmp-phase1-corpora",
+				"-CleanwareCount",
+				"120",
+				"-UkBusinessCount",
+				"120"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase1-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase1ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				".",
+				"-CleanwareCorpusPath",
+				"./tmp-phase1-corpora/cleanware",
+				"-UkBusinessCorpusPath",
+				"./tmp-phase1-corpora/uk-business-software",
+				"-MinCleanwareFiles",
+				"100",
+				"-MinUkBusinessFiles",
+				"100"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase1-exitcriteria-skip-edge",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase1ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				".",
+				"-CleanwareCorpusPath",
+				"./tmp-phase1-corpora/cleanware",
+				"-UkBusinessCorpusPath",
+				"./tmp-phase1-corpora/uk-business-software",
+				"-MinCleanwareFiles",
+				"100",
+				"-MinUkBusinessFiles",
+				"100",
+				"-SkipMinifilterEdgeCases"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase2-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase2ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		}
+	]
+}

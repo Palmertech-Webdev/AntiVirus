@@ -83,6 +83,9 @@ static BOOLEAN
 AntivirusPathHasCloudSyncMarker(_In_z_ const WCHAR* Path);
 
 static BOOLEAN
+AntivirusPathHasTraversalSequence(_In_z_ const WCHAR* Path);
+
+static BOOLEAN
 AntivirusPathContainsInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Needle);
 
 static BOOLEAN
@@ -339,6 +342,10 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
 
   UNREFERENCED_PARAMETER(FltObjects);
 
+  if (Data == NULL || Data->Iopb == NULL) {
+    return AntivirusShouldFailClosed(Operation) ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
+  }
+
   RtlZeroMemory(&request, sizeof(request));
   RtlZeroMemory(&reply, sizeof(reply));
 
@@ -400,6 +407,10 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
 
   UNREFERENCED_PARAMETER(Operation);
 
+  if (Data == NULL || Data->Iopb == NULL || Request == NULL) {
+    return STATUS_INVALID_PARAMETER;
+  }
+
   status = FltGetFileNameInformation(Data, FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT, &fileNameInformation);
   if (!NT_SUCCESS(status)) {
     return status;
@@ -411,8 +422,22 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
     return status;
   }
 
-  RtlStringCchCopyNW(Request->path, ANTIVIRUS_REALTIME_PATH_CAPACITY, fileNameInformation->Name.Buffer,
-                     fileNameInformation->Name.Length / sizeof(WCHAR));
+  if (fileNameInformation->Name.Length == 0 || fileNameInformation->Name.Buffer == NULL) {
+    FltReleaseFileNameInformation(fileNameInformation);
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  if ((fileNameInformation->Name.Length / sizeof(WCHAR)) >= ANTIVIRUS_REALTIME_PATH_CAPACITY) {
+    FltReleaseFileNameInformation(fileNameInformation);
+    return STATUS_NAME_TOO_LONG;
+  }
+
+  status = RtlStringCchCopyNW(Request->path, ANTIVIRUS_REALTIME_PATH_CAPACITY, fileNameInformation->Name.Buffer,
+                              fileNameInformation->Name.Length / sizeof(WCHAR));
+  if (!NT_SUCCESS(status) || Request->path[0] == L'\0') {
+    FltReleaseFileNameInformation(fileNameInformation);
+    return NT_SUCCESS(status) ? STATUS_INVALID_PARAMETER : status;
+  }
 
   RtlStringCchPrintfW(Request->correlationId, ANTIVIRUS_REALTIME_CORRELATION_CAPACITY, L"%p", Data);
 
@@ -428,7 +453,7 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
 static BOOLEAN
 AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME_FILE_OPERATION* Operation) {
   const ACCESS_MASK desiredAccess =
-    Data->Iopb->Parameters.Create.SecurityContext != NULL
+    (Data != NULL && Data->Iopb != NULL && Data->Iopb->Parameters.Create.SecurityContext != NULL)
       ? Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess
       : 0;
   const BOOLEAN executeIntent = FlagOn(desiredAccess, FILE_EXECUTE);
@@ -441,6 +466,10 @@ AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME
       (Data->Iopb->Parameters.Create.Options >> 24) == FILE_SUPERSEDE ||
       (Data->Iopb->Parameters.Create.Options >> 24) == FILE_OVERWRITE ||
       (Data->Iopb->Parameters.Create.Options >> 24) == FILE_OVERWRITE_IF;
+
+  if (Data == NULL || Data->Iopb == NULL || Operation == NULL) {
+    return FALSE;
+  }
 
   if (FlagOn(Data->Iopb->IrpFlags, IRP_PAGING_IO)) {
     return FALSE;
@@ -576,6 +605,10 @@ AntivirusIsHighRiskPath(_In_z_ const WCHAR* Path) {
     return FALSE;
   }
 
+  if (AntivirusPathHasTraversalSequence(Path)) {
+    return TRUE;
+  }
+
   if (AntivirusPathContainsAlternateDataStream(Path)) {
     return TRUE;
   }
@@ -627,6 +660,14 @@ AntivirusPathHasCloudSyncMarker(_In_z_ const WCHAR* Path) {
          AntivirusPathContainsInsensitive(Path, L"\\icloud drive\\") ||
          AntivirusPathContainsInsensitive(Path, L"\\box\\") ||
          AntivirusPathContainsInsensitive(Path, L"\\syncthing\\");
+}
+
+static BOOLEAN
+AntivirusPathHasTraversalSequence(_In_z_ const WCHAR* Path) {
+  return AntivirusPathContainsInsensitive(Path, L"\\..\\") ||
+         AntivirusPathContainsInsensitive(Path, L"/../") ||
+         AntivirusPathContainsInsensitive(Path, L"\\.\\") ||
+         AntivirusPathContainsInsensitive(Path, L"/./");
 }
 
 static BOOLEAN

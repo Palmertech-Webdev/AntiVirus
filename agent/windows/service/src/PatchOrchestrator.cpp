@@ -75,7 +75,7 @@ std::wstring ToLowerCopy(std::wstring value) {
 }
 
 std::wstring EscapeWideForJson(const std::wstring& value) {
-  return Utf8ToWide(EscapeJsonString(WideToUtf8(value)));
+  return Utf8ToWide(EscapeJsonString(value));
 }
 
 bool StartsWithCaseInsensitive(const std::wstring& value, const std::wstring& prefix) {
