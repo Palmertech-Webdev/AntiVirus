@@ -27,6 +27,7 @@
 #include "RuntimeTrustValidator.h"
 #include "ScanEngine.h"
 #include "StringUtils.h"
+#include "UpdaterService.h"
 #include "WscCoexistenceManager.h"
 
 namespace antivirus::agent {
@@ -62,6 +63,20 @@ constexpr std::size_t kDefaultCorpusFileLimit = 400;
 constexpr std::size_t kMaxCorpusFileLimit = 5000;
 
 std::wstring JsonEscape(const std::wstring& value) { return Utf8ToWide(EscapeJsonString(value)); }
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
+}
+
+bool ContainsCaseInsensitive(const std::wstring& text, const std::wstring& needle) {
+  if (needle.empty()) {
+    return true;
+  }
+
+  return ToLowerCopy(text).find(ToLowerCopy(needle)) != std::wstring::npos;
+}
 
 struct SignedSystemBinaryCandidate {
   std::filesystem::path path;
@@ -1592,6 +1607,10 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
         AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot", SelfTestStatus::Fail,
                  L"Self-test could not prepare isolated Phase 4 runtime paths under " + phaseValidationRoot.wstring() + L".",
                  L"Ensure runtime, evidence, and update roots are writable before running Phase 4 patch-orchestration checks.");
+        AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 4 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, evidence, and update roots are writable before running Phase 4 release-gate checks.");
       } else {
         PatchOrchestrator patchOrchestrator(phase4Config);
         auto policy = patchOrchestrator.LoadPolicy();
@@ -1783,6 +1802,192 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                    L"Patch snapshot did not preserve enough state to explain missing, failed, reboot-pending, manual-only, and unsupported patch conditions.",
                    L"Validate patch inventory, reboot coordinator, and history views so dashboard and client surfaces can explain patch posture clearly.");
         }
+
+        const auto releaseGateRoot = phaseValidationRoot / L"phase4-release-gates";
+        const auto releaseGatePackageRoot = releaseGateRoot / L"package";
+        const auto releaseGateInstallRoot = releaseGateRoot / L"install";
+        std::error_code releaseGatePathError;
+        std::filesystem::create_directories(releaseGatePackageRoot / L"payload", releaseGatePathError);
+        std::filesystem::create_directories(releaseGateInstallRoot / L"bin", releaseGatePathError);
+
+        if (releaseGatePathError) {
+          AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                   SelfTestStatus::Fail,
+                   L"Self-test could not prepare isolated updater promotion-gate fixture paths under " +
+                       releaseGateRoot.wstring() + L".",
+                   L"Ensure Phase 4 release-gate fixture paths are writable before rerunning self-test.");
+        } else {
+          const auto payloadPath = releaseGatePackageRoot / L"payload" / L"phase4-release-gate.bin";
+          if (!WriteSelfTestSample(payloadPath,
+                                   "Fenrir updater release-gate validation payload.\n")) {
+            AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                     SelfTestStatus::Fail,
+                     L"Self-test could not stage updater release-gate payload artifacts for Phase 4 validation.",
+                     L"Validate release-gate fixture write permissions before rerunning self-test.");
+          } else {
+            const auto payloadSha256 = ComputeFileSha256(payloadPath);
+            if (payloadSha256.size() != 64) {
+              AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                       SelfTestStatus::Fail,
+                       L"Self-test could not compute a valid SHA-256 hash for Phase 4 updater gate fixtures.",
+                       L"Validate cryptography provider availability before rerunning self-test.");
+            } else {
+              auto releaseGateConfig = phase4Config;
+              releaseGateConfig.runtimeDatabasePath = releaseGateRoot / L"release-gate-runtime.db";
+              releaseGateConfig.updateRootPath = releaseGateRoot / L"updates";
+              releaseGateConfig.platformVersion = L"platform-0.1.0";
+              releaseGateConfig.enforceReleasePromotionGates = true;
+
+              std::filesystem::create_directories(releaseGateConfig.runtimeDatabasePath.parent_path(),
+                                                  releaseGatePathError);
+              std::filesystem::create_directories(releaseGateConfig.updateRootPath, releaseGatePathError);
+              if (releaseGatePathError) {
+                AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                         SelfTestStatus::Fail,
+                         L"Self-test could not prepare isolated updater runtime roots for release-gate validation.",
+                         L"Ensure update/runtime fixture roots are writable before rerunning self-test.");
+              } else {
+                struct ReleaseGateScenario {
+                  std::wstring id;
+                  std::wstring expectedError;
+                  int selfTestPassPercent;
+                  int patchTestPassPercent;
+                  int ransomwareTestPassPercent;
+                  int upgradeRollbackPassPercent;
+                  int crashBudgetPpm;
+                  int falsePositiveBudgetPpm;
+                  int rollbackBudgetPpm;
+                  bool hotfixRequired;
+                  std::wstring promotionGate;
+                  std::wstring approvalTicket;
+                };
+
+                const std::vector<ReleaseGateScenario> scenarios = {
+                    ReleaseGateScenario{
+                        .id = L"pass-rate-threshold",
+                        .expectedError = L"test pass rates do not meet promotion thresholds",
+                        .selfTestPassPercent = 98,
+                        .patchTestPassPercent = 99,
+                        .ransomwareTestPassPercent = 99,
+                        .upgradeRollbackPassPercent = 99,
+                        .crashBudgetPpm = 25,
+                        .falsePositiveBudgetPpm = 10,
+                        .rollbackBudgetPpm = 50,
+                        .hotfixRequired = false,
+                        .promotionGate = L"approved",
+                        .approvalTicket = L"CHG-PHASE4-SELFTEST"},
+                    ReleaseGateScenario{
+                        .id = L"risk-budget-threshold",
+                        .expectedError = L"risk budgets exceed promotion thresholds",
+                        .selfTestPassPercent = 99,
+                        .patchTestPassPercent = 99,
+                        .ransomwareTestPassPercent = 99,
+                        .upgradeRollbackPassPercent = 99,
+                        .crashBudgetPpm = 45,
+                        .falsePositiveBudgetPpm = 10,
+                        .rollbackBudgetPpm = 50,
+                        .hotfixRequired = false,
+                        .promotionGate = L"approved",
+                        .approvalTicket = L"CHG-PHASE4-SELFTEST"},
+                    ReleaseGateScenario{
+                        .id = L"hotfix-required",
+                        .expectedError = L"hotfix-only handling",
+                        .selfTestPassPercent = 99,
+                        .patchTestPassPercent = 99,
+                        .ransomwareTestPassPercent = 99,
+                        .upgradeRollbackPassPercent = 99,
+                        .crashBudgetPpm = 25,
+                        .falsePositiveBudgetPpm = 10,
+                        .rollbackBudgetPpm = 50,
+                        .hotfixRequired = true,
+                        .promotionGate = L"approved",
+                        .approvalTicket = L"CHG-PHASE4-SELFTEST"},
+                    ReleaseGateScenario{
+                        .id = L"missing-approval-ticket",
+                        .expectedError = L"missing an approval ticket",
+                        .selfTestPassPercent = 99,
+                        .patchTestPassPercent = 99,
+                        .ransomwareTestPassPercent = 99,
+                        .upgradeRollbackPassPercent = 99,
+                        .crashBudgetPpm = 25,
+                        .falsePositiveBudgetPpm = 10,
+                        .rollbackBudgetPpm = 50,
+                        .hotfixRequired = false,
+                        .promotionGate = L"approved",
+                        .approvalTicket = L""},
+                };
+
+                const auto BuildManifest =
+                    [&payloadSha256](const ReleaseGateScenario& scenario) {
+                      std::wstring manifest;
+                      manifest += L"package_id=phase4-release-gate-" + scenario.id + L"\n";
+                      manifest += L"package_type=platform\n";
+                      manifest += L"target_version=platform-9.9.9\n";
+                      manifest += L"channel=stable\n";
+                      manifest += L"trust_domain=platform\n";
+                      manifest += L"promotion_track=stable\n";
+                      manifest += L"promotion_gate=" + scenario.promotionGate + L"\n";
+                      manifest += L"approval_ticket=" + scenario.approvalTicket + L"\n";
+                      manifest += L"package_signer=Fenrir Self-Test Signer\n";
+                      manifest += L"signing_key_id=fenrir-platform-prod-2026\n";
+                      manifest += L"crash_budget_ppm=" + std::to_wstring(scenario.crashBudgetPpm) + L"\n";
+                      manifest += L"false_positive_budget_ppm=" + std::to_wstring(scenario.falsePositiveBudgetPpm) +
+                                  L"\n";
+                      manifest += L"rollback_budget_ppm=" + std::to_wstring(scenario.rollbackBudgetPpm) + L"\n";
+                      manifest += L"self_test_pass_percent=" + std::to_wstring(scenario.selfTestPassPercent) + L"\n";
+                      manifest += L"patch_test_pass_percent=" + std::to_wstring(scenario.patchTestPassPercent) + L"\n";
+                      manifest +=
+                          L"ransomware_test_pass_percent=" + std::to_wstring(scenario.ransomwareTestPassPercent) + L"\n";
+                      manifest += L"upgrade_rollback_pass_percent=" +
+                                  std::to_wstring(scenario.upgradeRollbackPassPercent) + L"\n";
+                      manifest += L"hotfix_required=" +
+                                  std::wstring(scenario.hotfixRequired ? L"true" : L"false") + L"\n";
+                      manifest += L"allow_downgrade=false\n";
+                      manifest += L"file=payload/phase4-release-gate.bin|bin/phase4-release-gate.bin|" +
+                                  payloadSha256 + L"||false\n";
+                      return manifest;
+                    };
+
+                UpdaterService updaterService(releaseGateConfig, releaseGateInstallRoot);
+                std::vector<std::wstring> scenarioFailures;
+                for (const auto& scenario : scenarios) {
+                  const auto manifestPath = releaseGatePackageRoot / (L"phase4-release-gate-" + scenario.id + L".manifest");
+                  if (!WriteSelfTestUtf8File(manifestPath, BuildManifest(scenario))) {
+                    scenarioFailures.push_back(scenario.id + L": could not write manifest fixture");
+                    continue;
+                  }
+
+                  const auto result = updaterService.ApplyPackage(manifestPath, UpdateApplyMode::Maintenance);
+                  if (result.success) {
+                    scenarioFailures.push_back(scenario.id + L": manifest unexpectedly applied");
+                    continue;
+                  }
+
+                  if (!ContainsCaseInsensitive(result.errorMessage, scenario.expectedError)) {
+                    scenarioFailures.push_back(scenario.id + L": unexpected error -> " + result.errorMessage);
+                  }
+                }
+
+                if (scenarioFailures.empty()) {
+                  AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                           SelfTestStatus::Pass,
+                           L"Updater promotion-gate checks blocked all staged stable-channel manifests that violated pass-rate, risk-budget, hotfix, or approval-ticket requirements.");
+                } else {
+                  AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+                           SelfTestStatus::Fail,
+                           L"Updater promotion-gate checks did not reject all malformed release manifests. Failures: " +
+                               std::accumulate(std::next(scenarioFailures.begin()), scenarioFailures.end(),
+                                               scenarioFailures.front(),
+                                               [](std::wstring left, const std::wstring& right) {
+                                                 return left + L"; " + right;
+                                               }) +
+                               L".",
+                           L"Validate release-gate enforcement so stable-channel promotion always blocks low pass-rates, risk-budget overruns, hotfix-only manifests, and missing approval tickets.");
+                }
+              }
+            }
+          }
+        }
       }
     } catch (const std::exception& error) {
       AddCheck(report, L"phase4_patch_policy_roundtrip", L"Phase 4 patch-policy roundtrip", SelfTestStatus::Fail,
@@ -1797,6 +2002,9 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       AddCheck(report, L"phase4_patch_visibility_snapshot", L"Phase 4 patch visibility snapshot", SelfTestStatus::Fail,
                L"Phase 4 patch visibility validation failed: " + Utf8ToWide(error.what()),
                L"Validate patch snapshot persistence and reporting surfaces before rerunning self-test.");
+      AddCheck(report, L"phase4_release_gate_blockers", L"Phase 4 release-gate blocker enforcement",
+          SelfTestStatus::Fail, L"Phase 4 release-gate validation failed: " + Utf8ToWide(error.what()),
+          L"Validate updater manifest policy gate enforcement and rerun self-test.");
     }
 
     try {
