@@ -42,6 +42,26 @@ struct PatchDebtSignals {
 
 constexpr std::size_t kMaxSoftwareUpdatesPerCycle = 24;
 
+bool IsRunningOnBatteryPower() {
+  SYSTEM_POWER_STATUS status{};
+  if (GetSystemPowerStatus(&status) == FALSE) {
+    return false;
+  }
+
+  if (status.ACLineStatus == 1) {
+    return false;
+  }
+
+  return status.BatteryFlag != 128;
+}
+
+bool TreatConnectionAsMetered() {
+  auto override = ReadEnvironmentVariable(L"ANTIVIRUS_METERED_CONNECTION");
+  std::transform(override.begin(), override.end(), override.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return override == L"1" || override == L"true" || override == L"yes" || override == L"on";
+}
+
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
@@ -1082,6 +1102,28 @@ PatchExecutionResult PatchOrchestrator::InstallWindowsUpdates(const bool securit
   RuntimeDatabase database(config_.runtimeDatabasePath);
   const auto policy = LoadPolicy();
 
+  if (policy.batteryAware && config_.deferHeavyActionsOnBattery && IsRunningOnBatteryPower()) {
+    return PatchExecutionResult{
+        .success = false,
+        .action = L"install",
+        .targetId = securityOnly ? L"security-only" : L"policy-selected",
+        .provider = L"windows-update-agent",
+        .status = L"deferred_battery",
+        .errorCode = L"BATTERY_DEFERRED",
+        .detailJson = L"{\"message\":\"Windows patch installation was deferred because the device is running on battery power.\"}"};
+  }
+
+  if (policy.respectMeteredConnections && TreatConnectionAsMetered()) {
+    return PatchExecutionResult{
+        .success = false,
+        .action = L"install",
+        .targetId = securityOnly ? L"security-only" : L"policy-selected",
+        .provider = L"windows-update-agent",
+        .status = L"deferred_metered",
+        .errorCode = L"METERED_DEFERRED",
+        .detailJson = L"{\"message\":\"Windows patch installation was deferred because the current connection is treated as metered.\"}"};
+  }
+
   PatchHistoryRecord history{
       .recordId = GenerateGuidString(),
       .targetType = L"windows-update",
@@ -1140,6 +1182,28 @@ PatchExecutionResult PatchOrchestrator::InstallWindowsUpdates(const bool securit
 
 PatchExecutionResult PatchOrchestrator::UpdateSoftware(const std::wstring& softwareId, const bool searchOnly) const {
   RuntimeDatabase database(config_.runtimeDatabasePath);
+  const auto policy = LoadPolicy();
+  if (!searchOnly && policy.batteryAware && config_.deferHeavyActionsOnBattery && IsRunningOnBatteryPower()) {
+    return PatchExecutionResult{
+        .success = false,
+        .action = L"install",
+        .targetId = softwareId,
+        .provider = L"policy",
+        .status = L"deferred_battery",
+        .errorCode = L"BATTERY_DEFERRED",
+        .detailJson = L"{\"message\":\"Software patching was deferred because the device is running on battery power.\"}"};
+  }
+  if (!searchOnly && policy.respectMeteredConnections && TreatConnectionAsMetered()) {
+    return PatchExecutionResult{
+        .success = false,
+        .action = L"install",
+        .targetId = softwareId,
+        .provider = L"policy",
+        .status = L"deferred_metered",
+        .errorCode = L"METERED_DEFERRED",
+        .detailJson = L"{\"message\":\"Software patching was deferred because the current connection is treated as metered.\"}"};
+  }
+
   const auto software = database.ListSoftwarePatchRecords(1000);
   const auto match = std::find_if(software.begin(), software.end(),
                                   [&](const auto& candidate) { return candidate.softwareId == softwareId; });
@@ -1227,6 +1291,26 @@ PatchExecutionResult PatchOrchestrator::RunPatchCycle() const {
         .provider = L"policy",
         .status = L"paused",
         .errorCode = L"PATCH_POLICY_PAUSED"};
+  }
+
+  if (policy.batteryAware && config_.deferHeavyActionsOnBattery && IsRunningOnBatteryPower()) {
+    return PatchExecutionResult{
+        .success = false,
+        .action = L"cycle",
+        .provider = L"policy",
+        .status = L"deferred_battery",
+        .errorCode = L"BATTERY_DEFERRED",
+        .detailJson = L"{\"message\":\"Fenrir deferred the patch cycle because the device is running on battery power.\"}"};
+  }
+
+  if (policy.respectMeteredConnections && TreatConnectionAsMetered()) {
+    return PatchExecutionResult{
+        .success = false,
+        .action = L"cycle",
+        .provider = L"policy",
+        .status = L"deferred_metered",
+        .errorCode = L"METERED_DEFERRED",
+        .detailJson = L"{\"message\":\"Fenrir deferred the patch cycle because the current connection is treated as metered.\"}"};
   }
 
   const auto windowsResult = InstallWindowsUpdates(true);

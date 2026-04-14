@@ -264,6 +264,9 @@ std::wstring BuildSupportBundleManifest(const AgentConfig& config, const AgentSt
   const auto patchHistory = database.ListPatchHistoryRecords(50);
   const auto softwarePatches = database.ListSoftwarePatchRecords(50);
   const auto windowsUpdates = database.ListWindowsUpdateRecords(50);
+  const auto threatIntel = database.ListThreatIntelRecords(50);
+  const auto exclusionPolicy = database.ListExclusionPolicyRecords(50);
+  const auto quarantineApprovals = database.ListQuarantineApprovalRecords(50);
   RebootCoordinatorRecord reboot{};
   database.LoadRebootCoordinator(reboot);
 
@@ -301,6 +304,10 @@ std::wstring BuildSupportBundleManifest(const AgentConfig& config, const AgentSt
   json += L"\"patchHistory\":" + std::to_wstring(patchHistory.size()) + L",";
   json += L"\"softwarePatches\":" + std::to_wstring(softwarePatches.size()) + L",";
   json += L"\"windowsUpdates\":" + std::to_wstring(windowsUpdates.size()) + L"},";
+  json += L"\"governanceCounts\":{";
+  json += L"\"threatIntel\":" + std::to_wstring(threatIntel.size()) + L",";
+  json += L"\"exclusionPolicy\":" + std::to_wstring(exclusionPolicy.size()) + L",";
+  json += L"\"quarantineApprovals\":" + std::to_wstring(quarantineApprovals.size()) + L"},";
   json += L"\"reboot\":{";
   json += L"\"required\":" + JsonBool(reboot.rebootRequired) + L",";
   json += L"\"reasons\":" + JsonString(reboot.rebootReasons) + L",";

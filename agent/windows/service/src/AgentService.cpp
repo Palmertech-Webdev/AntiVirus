@@ -2601,6 +2601,14 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
     return ExecuteStorageMaintenanceCommand(command);
   }
 
+  if (command.type == L"intel.lookup") {
+    return ExecuteThreatIntelLookupCommand(command);
+  }
+
+  if (command.type == L"intel.pack.ingest") {
+    return ExecuteThreatIntelPackIngestCommand(command);
+  }
+
   if (command.type == L"local.breakglass.enable") {
     return ExecuteBreakGlassCommand(command, true);
   }
@@ -2927,6 +2935,55 @@ std::wstring AgentService::ExecuteStorageMaintenanceCommand(const RemoteCommand&
          std::to_wstring(result.deletedEntries) + L",\"reclaimedBytes\":" +
          std::to_wstring(result.reclaimedBytes) + L",\"summary\":\"" +
          Utf8ToWide(EscapeJsonString(result.summary)) + L"\"}";
+}
+
+std::wstring AgentService::ExecuteThreatIntelLookupCommand(const RemoteCommand& command) {
+  const auto indicator = ExtractPayloadString(command.payloadJson, "indicator").value_or(command.targetPath);
+  if (indicator.empty()) {
+    throw std::runtime_error("intel.lookup command is missing indicator");
+  }
+
+  const auto result = LookupDestinationReputation(indicator, config_.runtimeDatabasePath);
+  QueueTelemetryEvent(L"intel.lookup.completed", L"threat-intelligence",
+                      L"Fenrir completed a local threat-intelligence lookup.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"indicator\":\"" +
+                          Utf8ToWide(EscapeJsonString(indicator)) + L"\",\"provider\":\"" +
+                          Utf8ToWide(EscapeJsonString(result.provider)) + L"\",\"verdict\":\"" +
+                          Utf8ToWide(EscapeJsonString(result.verdict)) + L"\",\"trustScore\":" +
+                          std::to_wstring(result.trustScore) + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"indicator\":\"" +
+         Utf8ToWide(EscapeJsonString(indicator)) + L"\",\"provider\":\"" +
+         Utf8ToWide(EscapeJsonString(result.provider)) + L"\",\"verdict\":\"" +
+         Utf8ToWide(EscapeJsonString(result.verdict)) + L"\",\"trustScore\":" +
+         std::to_wstring(result.trustScore) + L",\"providerWeight\":" +
+         std::to_wstring(result.providerWeight) + L",\"localOnly\":" +
+         (result.localOnly ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
+}
+
+std::wstring AgentService::ExecuteThreatIntelPackIngestCommand(const RemoteCommand& command) {
+  const auto packPath = ExtractPayloadString(command.payloadJson, "packPath").value_or(command.targetPath);
+  if (packPath.empty()) {
+    throw std::runtime_error("intel.pack.ingest command is missing packPath");
+  }
+
+  const auto ingest = IngestSignedThreatIntelPack(packPath, config_.runtimeDatabasePath);
+  if (!ingest.success) {
+    throw std::runtime_error(WideToUtf8(ingest.errorMessage.empty() ? L"Threat intelligence pack ingest failed"
+                                                                   : ingest.errorMessage));
+  }
+
+  QueueTelemetryEvent(L"intel.pack.ingested", L"threat-intelligence",
+                      L"Fenrir ingested a signed local threat-intelligence pack.",
+                      std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"packPath\":\"" +
+                          Utf8ToWide(EscapeJsonString(packPath)) + L"\",\"recordsLoaded\":" +
+                          std::to_wstring(ingest.recordsLoaded) + L",\"recordsRejected\":" +
+                          std::to_wstring(ingest.recordsRejected) + L"}");
+
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"packPath\":\"" +
+         Utf8ToWide(EscapeJsonString(packPath)) + L"\",\"recordsLoaded\":" + std::to_wstring(ingest.recordsLoaded) +
+         L",\"recordsRejected\":" + std::to_wstring(ingest.recordsRejected) + L",\"signatureVerified\":" +
+         (ingest.signatureVerified ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
 }
 
 std::wstring AgentService::ExecuteBreakGlassCommand(const RemoteCommand& command, const bool enable) {
