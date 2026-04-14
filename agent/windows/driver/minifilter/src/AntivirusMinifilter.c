@@ -29,6 +29,15 @@ FLT_PREOP_CALLBACK_STATUS
 AntivirusPreWrite(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
                   _Flt_CompletionContext_Outptr_ PVOID* CompletionContext);
 
+FLT_PREOP_CALLBACK_STATUS
+AntivirusPreSetInformation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                           _Flt_CompletionContext_Outptr_ PVOID* CompletionContext);
+
+FLT_PREOP_CALLBACK_STATUS
+AntivirusPreAcquireForSectionSynchronization(_Inout_ PFLT_CALLBACK_DATA Data,
+                                             _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                                             _Flt_CompletionContext_Outptr_ PVOID* CompletionContext);
+
 NTSTATUS
 AntivirusPortConnect(_In_ PFLT_PORT ClientPort, _In_opt_ PVOID ServerPortCookie, _In_reads_bytes_opt_(SizeOfContext) PVOID ConnectionContext,
                      _In_ ULONG SizeOfContext, _Outptr_result_maybenull_ PVOID* ConnectionPortCookie);
@@ -55,10 +64,26 @@ AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation);
 
 static BOOLEAN
 AntivirusShouldFailClosedForContext(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
-                                    _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
+                                    _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request,
+                                    _In_ PCFLT_RELATED_OBJECTS FltObjects);
 
 static BOOLEAN
 AntivirusIsHighRiskPath(_In_z_ const WCHAR* Path);
+
+static BOOLEAN
+AntivirusIsSensitiveSetInformationClass(_In_ FILE_INFORMATION_CLASS informationClass);
+
+static BOOLEAN
+AntivirusIsSectionSyncHighRisk(_Inout_ PFLT_CALLBACK_DATA Data);
+
+static BOOLEAN
+AntivirusVolumeIsRemoteOrRemovable(_In_ PCFLT_RELATED_OBJECTS FltObjects);
+
+static BOOLEAN
+AntivirusPathHasCloudSyncMarker(_In_z_ const WCHAR* Path);
+
+static BOOLEAN
+AntivirusPathContainsInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Needle);
 
 static BOOLEAN
 AntivirusPathContainsAlternateDataStream(_In_z_ const WCHAR* Path);
@@ -69,6 +94,8 @@ AntivirusPathHasPrefixInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* 
 const FLT_OPERATION_REGISTRATION gCallbacks[] = {
     {IRP_MJ_CREATE, 0, AntivirusPreCreate, NULL},
     {IRP_MJ_WRITE, 0, AntivirusPreWrite, NULL},
+  {IRP_MJ_SET_INFORMATION, 0, AntivirusPreSetInformation, NULL},
+  {IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION, 0, AntivirusPreAcquireForSectionSynchronization, NULL},
     {IRP_MJ_OPERATION_END}};
 
 const FLT_REGISTRATION gRegistration = {
@@ -217,6 +244,60 @@ AntivirusPreWrite(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS Fl
   return FLT_PREOP_SUCCESS_NO_CALLBACK;
 }
 
+FLT_PREOP_CALLBACK_STATUS
+AntivirusPreSetInformation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                           _Flt_CompletionContext_Outptr_ PVOID* CompletionContext) {
+  NTSTATUS status;
+
+  UNREFERENCED_PARAMETER(CompletionContext);
+
+  if (Data->Iopb == NULL ||
+      !AntivirusIsSensitiveSetInformationClass(Data->Iopb->Parameters.SetFileInformation.FileInformationClass)) {
+    return FLT_PREOP_SUCCESS_NO_CALLBACK;
+  }
+
+  status = AntivirusInspectFileOperation(Data, FltObjects, ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME);
+  if (status == STATUS_ACCESS_DENIED) {
+    Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+    Data->IoStatus.Information = 0;
+    return FLT_PREOP_COMPLETE;
+  }
+
+  return FLT_PREOP_SUCCESS_NO_CALLBACK;
+}
+
+FLT_PREOP_CALLBACK_STATUS
+AntivirusPreAcquireForSectionSynchronization(_Inout_ PFLT_CALLBACK_DATA Data,
+                                             _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                                             _Flt_CompletionContext_Outptr_ PVOID* CompletionContext) {
+  NTSTATUS status;
+  ANTIVIRUS_REALTIME_FILE_OPERATION operation;
+
+  UNREFERENCED_PARAMETER(CompletionContext);
+
+  if (!AntivirusIsSectionSyncHighRisk(Data)) {
+    return FLT_PREOP_SUCCESS_NO_CALLBACK;
+  }
+
+  operation = ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP;
+  if (Data->Iopb != NULL) {
+    const ULONG pageProtection = Data->Iopb->Parameters.AcquireForSectionSynchronization.PageProtection;
+    const ULONG executeMask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!FlagOn(pageProtection, executeMask)) {
+      operation = ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE;
+    }
+  }
+
+  status = AntivirusInspectFileOperation(Data, FltObjects, operation);
+  if (status == STATUS_ACCESS_DENIED) {
+    Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+    Data->IoStatus.Information = 0;
+    return FLT_PREOP_COMPLETE;
+  }
+
+  return FLT_PREOP_SUCCESS_NO_CALLBACK;
+}
+
 NTSTATUS
 AntivirusPortConnect(_In_ PFLT_PORT ClientPort, _In_opt_ PVOID ServerPortCookie,
                      _In_reads_bytes_opt_(SizeOfContext) PVOID ConnectionContext, _In_ ULONG SizeOfContext,
@@ -262,7 +343,8 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   RtlZeroMemory(&reply, sizeof(reply));
 
   status = AntivirusBuildRequest(Data, Operation, &request);
-  strictFailClosed = AntivirusShouldFailClosedForContext(Data, Operation, NT_SUCCESS(status) ? &request : NULL);
+  strictFailClosed = AntivirusShouldFailClosedForContext(Data, Operation, NT_SUCCESS(status) ? &request : NULL,
+                                                         FltObjects);
   if (!NT_SUCCESS(status)) {
     return strictFailClosed ? STATUS_ACCESS_DENIED : STATUS_SUCCESS;
   }
@@ -286,7 +368,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   request.processId = HandleToULong(PsGetCurrentProcessId());
   request.threadId = HandleToULong(PsGetCurrentThreadId());
 
-  timeout.QuadPart = -(10 * 1000 * 1000);
+  timeout.QuadPart = -((strictFailClosed ? 2500 : 1000) * 10 * 1000);
   replyLength = sizeof(reply);
 
   status = FltSendMessage(gFilterHandle, &clientPort, &request, sizeof(request), &reply, &replyLength, &timeout);
@@ -345,8 +427,15 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
 
 static BOOLEAN
 AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME_FILE_OPERATION* Operation) {
-  const BOOLEAN executeIntent =
-      FlagOn(Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess, FILE_EXECUTE);
+  const ACCESS_MASK desiredAccess =
+    Data->Iopb->Parameters.Create.SecurityContext != NULL
+      ? Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess
+      : 0;
+  const BOOLEAN executeIntent = FlagOn(desiredAccess, FILE_EXECUTE);
+  const BOOLEAN writeIntent =
+    FlagOn(desiredAccess,
+       FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC |
+         WRITE_OWNER);
   const BOOLEAN createDisposition =
       (Data->Iopb->Parameters.Create.Options >> 24) == FILE_CREATE ||
       (Data->Iopb->Parameters.Create.Options >> 24) == FILE_SUPERSEDE ||
@@ -364,6 +453,11 @@ AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME
 
   if (createDisposition) {
     *Operation = ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
+    return TRUE;
+  }
+
+  if (writeIntent) {
+    *Operation = ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE;
     return TRUE;
   }
 
@@ -386,27 +480,94 @@ static BOOLEAN
 AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation) {
   return Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
          Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
-         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE;
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP;
 }
 
 static BOOLEAN
 AntivirusShouldFailClosedForContext(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
-                                    _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
+                                    _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request,
+                                    _In_ PCFLT_RELATED_OBJECTS FltObjects) {
   BOOLEAN isCreateReparseOpen = FALSE;
+  BOOLEAN isSensitiveSetInformation = FALSE;
+  BOOLEAN isSectionSyncHighRisk = FALSE;
 
   if (Data->Iopb != NULL && Data->Iopb->MajorFunction == IRP_MJ_CREATE) {
     isCreateReparseOpen = FlagOn(Data->Iopb->Parameters.Create.Options, FILE_OPEN_REPARSE_POINT);
   }
 
-  if (AntivirusShouldFailClosed(Operation) || isCreateReparseOpen) {
+  if (Data->Iopb != NULL && Data->Iopb->MajorFunction == IRP_MJ_SET_INFORMATION) {
+    isSensitiveSetInformation = AntivirusIsSensitiveSetInformationClass(
+        Data->Iopb->Parameters.SetFileInformation.FileInformationClass);
+  }
+
+  if (Data->Iopb != NULL && Data->Iopb->MajorFunction == IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION) {
+    isSectionSyncHighRisk = AntivirusIsSectionSyncHighRisk(Data);
+  }
+
+  if (AntivirusShouldFailClosed(Operation) || isCreateReparseOpen || isSensitiveSetInformation ||
+      isSectionSyncHighRisk || AntivirusVolumeIsRemoteOrRemovable(FltObjects)) {
     return TRUE;
   }
 
-  if (Request != NULL && AntivirusIsHighRiskPath(Request->path)) {
+  if (Request != NULL &&
+      (AntivirusIsHighRiskPath(Request->path) || AntivirusPathHasCloudSyncMarker(Request->path))) {
     return TRUE;
   }
 
   return FALSE;
+}
+
+static BOOLEAN
+AntivirusIsSensitiveSetInformationClass(_In_ FILE_INFORMATION_CLASS informationClass) {
+  if (informationClass == FileRenameInformation || informationClass == FileLinkInformation ||
+      informationClass == FileDispositionInformation || informationClass == FileAllocationInformation ||
+      informationClass == FileEndOfFileInformation) {
+    return TRUE;
+  }
+
+#ifdef FileRenameInformationEx
+  if (informationClass == FileRenameInformationEx) {
+    return TRUE;
+  }
+#endif
+
+#ifdef FileLinkInformationEx
+  if (informationClass == FileLinkInformationEx) {
+    return TRUE;
+  }
+#endif
+
+#ifdef FileDispositionInformationEx
+  if (informationClass == FileDispositionInformationEx) {
+    return TRUE;
+  }
+#endif
+
+  return FALSE;
+}
+
+static BOOLEAN
+AntivirusIsSectionSyncHighRisk(_Inout_ PFLT_CALLBACK_DATA Data) {
+  ULONG pageProtection;
+  ULONG executeMask;
+  ULONG writableMask;
+
+  if (Data == NULL || Data->Iopb == NULL ||
+      Data->Iopb->MajorFunction != IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION) {
+    return FALSE;
+  }
+
+  if (Data->Iopb->Parameters.AcquireForSectionSynchronization.SyncType != SyncTypeCreateSection) {
+    return FALSE;
+  }
+
+  pageProtection = Data->Iopb->Parameters.AcquireForSectionSynchronization.PageProtection;
+  executeMask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+  writableMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+  return FlagOn(pageProtection, executeMask) || FlagOn(pageProtection, writableMask);
 }
 
 static BOOLEAN
@@ -421,8 +582,80 @@ AntivirusIsHighRiskPath(_In_z_ const WCHAR* Path) {
 
   if (AntivirusPathHasPrefixInsensitive(Path, L"\\Device\\Mup\\") ||
       AntivirusPathHasPrefixInsensitive(Path, L"\\Device\\LanmanRedirector\\") ||
-      AntivirusPathHasPrefixInsensitive(Path, L"\\??\\UNC\\")) {
+      AntivirusPathHasPrefixInsensitive(Path, L"\\Device\\WebDavRedirector\\") ||
+      AntivirusPathHasPrefixInsensitive(Path, L"\\??\\UNC\\") ||
+      AntivirusPathHasPrefixInsensitive(Path, L"\\??\\GLOBALROOT\\Device\\Mup\\") ||
+      AntivirusPathHasPrefixInsensitive(Path, L"\\Device\\CdRom")) {
     return TRUE;
+  }
+
+  if (AntivirusPathHasCloudSyncMarker(Path)) {
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+static BOOLEAN
+AntivirusVolumeIsRemoteOrRemovable(_In_ PCFLT_RELATED_OBJECTS FltObjects) {
+  NTSTATUS status;
+  ULONG bytesReturned = 0;
+  UCHAR volumePropertiesBuffer[sizeof(FLT_VOLUME_PROPERTIES) + 512] = {0};
+  PFLT_VOLUME_PROPERTIES volumeProperties;
+
+  if (FltObjects == NULL || FltObjects->Volume == NULL) {
+    return FALSE;
+  }
+
+  volumeProperties = (PFLT_VOLUME_PROPERTIES)volumePropertiesBuffer;
+  status = FltGetVolumeProperties(FltObjects->Volume, volumeProperties, sizeof(volumePropertiesBuffer),
+                                  &bytesReturned);
+  if (!NT_SUCCESS(status) && status != STATUS_BUFFER_OVERFLOW) {
+    return FALSE;
+  }
+
+  return FlagOn(volumeProperties->DeviceCharacteristics, FILE_REMOTE_DEVICE) ||
+         FlagOn(volumeProperties->DeviceCharacteristics, FILE_REMOVABLE_MEDIA);
+}
+
+static BOOLEAN
+AntivirusPathHasCloudSyncMarker(_In_z_ const WCHAR* Path) {
+  return AntivirusPathContainsInsensitive(Path, L"\\onedrive\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\dropbox\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\google drive\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\googledrive\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\icloud drive\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\box\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\syncthing\\");
+}
+
+static BOOLEAN
+AntivirusPathContainsInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Needle) {
+  SIZE_T pathIndex;
+  SIZE_T needleLength = 0;
+
+  if (Path == NULL || Needle == NULL || Needle[0] == L'\0') {
+    return FALSE;
+  }
+
+  while (Needle[needleLength] != L'\0') {
+    ++needleLength;
+  }
+
+  for (pathIndex = 0; Path[pathIndex] != L'\0'; ++pathIndex) {
+    SIZE_T offset = 0;
+    while (offset < needleLength && Path[pathIndex + offset] != L'\0' &&
+           RtlDowncaseUnicodeChar(Path[pathIndex + offset]) == RtlDowncaseUnicodeChar(Needle[offset])) {
+      ++offset;
+    }
+
+    if (offset == needleLength) {
+      return TRUE;
+    }
+
+    if (Path[pathIndex + offset] == L'\0') {
+      break;
+    }
   }
 
   return FALSE;

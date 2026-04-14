@@ -538,6 +538,10 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
                        config.realtimeBrokerRetrySeconds);
   config.enforceOperationalGates = ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_OPERATIONAL_GATES"),
                                                      config.enforceOperationalGates);
+    config.maxCpuLoadPercent =
+      std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_MAX_CPU_LOAD_PERCENT"),
+                    config.maxCpuLoadPercent),
+           1, 100);
   config.maxMemoryLoadPercent =
       std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_MAX_MEMORY_LOAD_PERCENT"),
                                   config.maxMemoryLoadPercent),

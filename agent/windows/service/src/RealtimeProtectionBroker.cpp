@@ -383,6 +383,10 @@ std::wstring OperationToString(const RealtimeFileOperation operation) {
       return L"write";
     case ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE:
       return L"execute";
+    case ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME:
+      return L"rename";
+    case ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP:
+      return L"section-map";
     default:
       return L"unknown";
   }
@@ -434,8 +438,10 @@ EventKind OperationToEventKind(const RealtimeFileOperation operation) {
     case ANTIVIRUS_REALTIME_FILE_OPERATION_OPEN:
       return EventKind::FileOpen;
     case ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE:
+    case ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME:
       return EventKind::FileWrite;
     case ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE:
+    case ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP:
     default:
       return EventKind::FileExecute;
   }
@@ -508,7 +514,8 @@ bool IsLikelyBenignBulkIoProcess(std::wstring_view imageLower) {
 
 bool IsWriteLikeOperation(const RealtimeFileOperation operation) {
   return operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
-         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
+         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
+         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME;
 }
 
 bool IsUserDataExtension(const std::wstring& extension) {
@@ -527,7 +534,9 @@ bool IsSuspiciousEncryptedExtension(const std::wstring& extension) {
 }
 
 bool IsExecuteLikeOperation(const RealtimeFileOperation operation) {
-  return operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE || operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
+  return operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
+         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP;
 }
 
 bool LooksLikeDoubleExtensionLure(const std::wstring& fileNameLower) {

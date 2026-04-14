@@ -337,6 +337,10 @@ std::wstring QueryCurrentUserSid() {
   return sid;
 }
 
+std::wstring QueryConfiguredDeviceOwnerSid() {
+  return ReadDeviceOwnerSid();
+}
+
 std::wstring LocalUserRoleToString(const LocalUserRole role) {
   switch (role) {
     case LocalUserRole::DeviceOwnerAdmin:

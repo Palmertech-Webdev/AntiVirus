@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -32,6 +33,14 @@ struct UpdateManifest {
   std::wstring approvalTicket;
   std::wstring packageSigner;
   std::wstring signingKeyId;
+  std::int32_t crashBudgetPpm{0};
+  std::int32_t falsePositiveBudgetPpm{0};
+  std::int32_t rollbackBudgetPpm{0};
+  std::int32_t selfTestPassPercent{0};
+  std::int32_t patchTestPassPercent{0};
+  std::int32_t ransomwareTestPassPercent{0};
+  std::int32_t upgradeRollbackPassPercent{0};
+  bool hotfixRequired{false};
   bool allowDowngrade{false};
   bool breakGlass{false};
   std::filesystem::path manifestPath;

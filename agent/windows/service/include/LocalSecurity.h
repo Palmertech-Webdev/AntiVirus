@@ -36,6 +36,7 @@ LocalUserRole QueryCurrentLocalUserRole();
 bool IsCurrentUserElevatedAdmin();
 bool IsCurrentTokenElevated();
 std::wstring QueryCurrentUserSid();
+std::wstring QueryConfiguredDeviceOwnerSid();
 std::wstring LocalUserRoleToString(LocalUserRole role);
 LocalActionAuthorization AuthorizeCurrentUser(LocalAction action);
 bool QueryBreakGlassModeEnabled();

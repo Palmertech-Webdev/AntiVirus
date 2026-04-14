@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <cwctype>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_set>
 
 #include "CryptoUtils.h"
 #include "RuntimeDatabase.h"
@@ -56,6 +58,10 @@ bool ParseBoolText(const std::wstring& value) {
 
 constexpr std::size_t kMaxManifestLineChars = 4096;
 constexpr std::size_t kMaxManifestFiles = 512;
+constexpr std::size_t kMaxManifestLines = 2048;
+constexpr std::uintmax_t kMaxManifestBytes = 256ull * 1024ull;
+
+bool IsPathWithinRoot(const std::filesystem::path& candidate, const std::filesystem::path& root);
 
 void EnsureManifestFieldLength(const std::wstring& value, const std::size_t maxChars, const char* fieldName) {
   if (value.size() <= maxChars) {
@@ -63,6 +69,36 @@ void EnsureManifestFieldLength(const std::wstring& value, const std::size_t maxC
   }
 
   throw std::runtime_error(std::string("Update manifest field exceeded allowed length: ") + fieldName);
+}
+
+std::optional<std::int32_t> ParseManifestInt(const std::wstring& value) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+
+  try {
+    const auto parsed = std::stoll(value);
+    if (parsed < static_cast<long long>(std::numeric_limits<std::int32_t>::min()) ||
+        parsed > static_cast<long long>(std::numeric_limits<std::int32_t>::max())) {
+      return std::nullopt;
+    }
+    return static_cast<std::int32_t>(parsed);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+bool ContainsForbiddenControlCharacters(const std::wstring& value) {
+  return std::any_of(value.begin(), value.end(), [](const wchar_t ch) {
+    return ch < 0x20 && ch != L'\t';
+  });
+}
+
+void EnsureSourcePathWithinManifestRoot(const std::filesystem::path& sourcePath,
+                                        const std::filesystem::path& manifestDirectory) {
+  if (!IsPathWithinRoot(sourcePath, manifestDirectory)) {
+    throw std::runtime_error("Update source path escaped the trusted manifest package root");
+  }
 }
 
 bool IsSha256HexString(const std::wstring& value) {
@@ -225,6 +261,18 @@ std::filesystem::path ResolveTargetPath(const std::filesystem::path& targetPath,
 }
 
 UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const std::filesystem::path& installRoot) {
+  std::error_code manifestError;
+  if (!std::filesystem::exists(manifestPath, manifestError) || manifestError ||
+      !std::filesystem::is_regular_file(manifestPath, manifestError)) {
+    throw std::runtime_error("Update manifest path is missing or not a regular file");
+  }
+
+  manifestError.clear();
+  const auto manifestSize = std::filesystem::file_size(manifestPath, manifestError);
+  if (manifestError || manifestSize == 0 || manifestSize > kMaxManifestBytes) {
+    throw std::runtime_error("Update manifest file size exceeded the allowed safety budget");
+  }
+
   std::wifstream input(manifestPath);
   if (!input.is_open()) {
     throw std::runtime_error("Could not open the update manifest");
@@ -233,8 +281,15 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
   UpdateManifest manifest;
   manifest.manifestPath = std::filesystem::absolute(manifestPath);
   const auto manifestDirectory = manifest.manifestPath.parent_path();
+  std::unordered_set<std::wstring> singletonKeysSeen;
+  std::size_t manifestLineCount = 0;
   std::wstring line;
   while (std::getline(input, line)) {
+    ++manifestLineCount;
+    if (manifestLineCount > kMaxManifestLines) {
+      throw std::runtime_error("Update manifest exceeded the allowed line-count safety budget");
+    }
+
     if (line.size() > kMaxManifestLineChars) {
       throw std::runtime_error("Update manifest line exceeded the safety size limit");
     }
@@ -251,6 +306,21 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
 
     const auto key = ToLowerCopy(TrimWide(trimmed.substr(0, separator)));
     const auto value = TrimWide(trimmed.substr(separator + 1));
+    if (key.empty()) {
+      throw std::runtime_error("Update manifest contains an empty key");
+    }
+
+    if (ContainsForbiddenControlCharacters(value)) {
+      throw std::runtime_error("Update manifest contains unsupported control characters");
+    }
+
+    if (key != L"file") {
+      if (singletonKeysSeen.find(key) != singletonKeysSeen.end()) {
+        throw std::runtime_error("Update manifest repeated a singleton field");
+      }
+      singletonKeysSeen.insert(key);
+    }
+
     if (key == L"package_id") {
       EnsureManifestFieldLength(value, 128, "package_id");
       manifest.packageId = value;
@@ -311,6 +381,74 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
       continue;
     }
 
+    if (key == L"crash_budget_ppm") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 1'000'000) {
+        throw std::runtime_error("Update manifest crash_budget_ppm is invalid");
+      }
+      manifest.crashBudgetPpm = *parsed;
+      continue;
+    }
+
+    if (key == L"false_positive_budget_ppm") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 1'000'000) {
+        throw std::runtime_error("Update manifest false_positive_budget_ppm is invalid");
+      }
+      manifest.falsePositiveBudgetPpm = *parsed;
+      continue;
+    }
+
+    if (key == L"rollback_budget_ppm") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 1'000'000) {
+        throw std::runtime_error("Update manifest rollback_budget_ppm is invalid");
+      }
+      manifest.rollbackBudgetPpm = *parsed;
+      continue;
+    }
+
+    if (key == L"self_test_pass_percent") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 100) {
+        throw std::runtime_error("Update manifest self_test_pass_percent is invalid");
+      }
+      manifest.selfTestPassPercent = *parsed;
+      continue;
+    }
+
+    if (key == L"patch_test_pass_percent") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 100) {
+        throw std::runtime_error("Update manifest patch_test_pass_percent is invalid");
+      }
+      manifest.patchTestPassPercent = *parsed;
+      continue;
+    }
+
+    if (key == L"ransomware_test_pass_percent") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 100) {
+        throw std::runtime_error("Update manifest ransomware_test_pass_percent is invalid");
+      }
+      manifest.ransomwareTestPassPercent = *parsed;
+      continue;
+    }
+
+    if (key == L"upgrade_rollback_pass_percent") {
+      const auto parsed = ParseManifestInt(value);
+      if (!parsed.has_value() || *parsed < 0 || *parsed > 100) {
+        throw std::runtime_error("Update manifest upgrade_rollback_pass_percent is invalid");
+      }
+      manifest.upgradeRollbackPassPercent = *parsed;
+      continue;
+    }
+
+    if (key == L"hotfix_required") {
+      manifest.hotfixRequired = ParseBoolText(value);
+      continue;
+    }
+
     if (key == L"allow_downgrade") {
       manifest.allowDowngrade = ParseBoolText(value);
       continue;
@@ -323,7 +461,7 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
 
     if (key == L"file") {
       const auto parts = SplitWide(value, L'|');
-      if (parts.size() < 3) {
+      if (parts.size() < 3 || parts.size() > 5) {
         throw std::runtime_error("Update manifest file entries require source|target|sha256");
       }
 
@@ -335,7 +473,14 @@ UpdateManifest LoadManifestFile(const std::filesystem::path& manifestPath, const
       EnsureManifestFieldLength(parts[0], 1024, "file.source");
       EnsureManifestFieldLength(parts[1], 1024, "file.target");
       EnsureManifestFieldLength(parts[2], 128, "file.sha256");
-      filePlan.sourcePath = std::filesystem::absolute(manifestDirectory / parts[0]).lexically_normal();
+
+      const std::filesystem::path sourceRelative(parts[0]);
+      if (sourceRelative.is_absolute()) {
+        throw std::runtime_error("Update manifest file source path must be relative to the manifest package root");
+      }
+
+      filePlan.sourcePath = std::filesystem::absolute(manifestDirectory / sourceRelative).lexically_normal();
+      EnsureSourcePathWithinManifestRoot(filePlan.sourcePath, manifestDirectory);
       filePlan.targetPath = ResolveTargetPath(parts[1], installRoot);
       filePlan.sha256 = ToLowerCopy(parts[2]);
       filePlan.requiredSigner = parts.size() >= 4 ? parts[3] : manifest.packageSigner;
@@ -418,6 +563,28 @@ void VerifyManifestPolicy(const UpdateManifest& manifest, const AgentConfig& con
     }
     if (manifest.promotionTrack.empty()) {
       throw std::runtime_error("Update manifest is missing a promotion track");
+    }
+
+    const auto promotedChannel = lowerChannel == L"stable" || lowerChannel == L"beta";
+    if (promotedChannel) {
+      const auto minPassRate = lowerChannel == L"stable" ? 99 : 95;
+      const auto maxCrashBudget = lowerChannel == L"stable" ? 25 : 100;
+      const auto maxFalsePositiveBudget = lowerChannel == L"stable" ? 10 : 50;
+      const auto maxRollbackBudget = lowerChannel == L"stable" ? 50 : 200;
+
+      if (manifest.selfTestPassPercent < minPassRate || manifest.patchTestPassPercent < minPassRate ||
+          manifest.ransomwareTestPassPercent < minPassRate || manifest.upgradeRollbackPassPercent < minPassRate) {
+        throw std::runtime_error("Update manifest test pass rates do not meet promotion thresholds");
+      }
+
+      if (manifest.crashBudgetPpm > maxCrashBudget || manifest.falsePositiveBudgetPpm > maxFalsePositiveBudget ||
+          manifest.rollbackBudgetPpm > maxRollbackBudget) {
+        throw std::runtime_error("Update manifest risk budgets exceed promotion thresholds");
+      }
+
+      if (manifest.hotfixRequired) {
+        throw std::runtime_error("Update manifest requests hotfix-only handling and cannot promote on this channel");
+      }
     }
   }
 

@@ -27,6 +27,7 @@ struct AgentConfig {
   int telemetryBatchSize{25};
   int realtimeBrokerRetrySeconds{5};
   bool enforceOperationalGates{true};
+  int maxCpuLoadPercent{85};
   int maxMemoryLoadPercent{90};
   int minFreeDiskMb{1024};
   bool deferHeavyActionsOnBattery{true};

@@ -25,6 +25,9 @@ namespace antivirus::agent {
 namespace {
 
 constexpr std::size_t kReadLimit = 1024 * 1024;
+constexpr std::uint32_t kMaxArchiveEntryCount = 5000;
+constexpr std::size_t kMaxZipEntryNameOutputChars = 64 * 1024;
+constexpr std::size_t kMaxDecodedTextChars = 512 * 1024;
 constexpr int kDetectThreshold = 45;
 constexpr int kQuarantineThreshold = 70;
 
@@ -59,12 +62,16 @@ struct FileData {
   std::wstring asciiLower;
   std::wstring zipEntryNamesLower;
   std::vector<unsigned char> bytes;
+  bool readLimitHit{false};
   bool userPath{false};
   bool trustedPath{false};
   bool pe{false};
   bool zip{false};
   bool ole{false};
   bool lnk{false};
+  bool zipMalformed{false};
+  bool zipEntryLimitExceeded{false};
+  bool zipEntryNamesTruncated{false};
   double entropy{0.0};
   std::uint32_t archiveEntryCount{0};
 };
@@ -308,32 +315,42 @@ std::wstring DecodeText(const std::vector<unsigned char>& bytes) {
   }
   if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
     std::wstring text;
+    text.reserve(std::min(bytes.size() / 2, kMaxDecodedTextChars));
     for (std::size_t i = 2; i + 1 < bytes.size(); i += 2) {
       const auto ch = static_cast<wchar_t>(bytes[i] | (bytes[i + 1] << 8));
       if (ch != L'\0') {
         text.push_back(ch);
+        if (text.size() >= kMaxDecodedTextChars) {
+          break;
+        }
       }
     }
     return text;
   }
   const auto utf8 = Utf8ToWide(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
   if (!utf8.empty()) {
-    return utf8;
+    return utf8.size() > kMaxDecodedTextChars ? utf8.substr(0, kMaxDecodedTextChars) : utf8;
   }
   std::wstring text;
-  text.reserve(bytes.size());
+  text.reserve(std::min(bytes.size(), kMaxDecodedTextChars));
   for (const auto byte : bytes) {
     text.push_back(byte >= 0x20 && byte <= 0x7E ? static_cast<wchar_t>(byte) : L' ');
+    if (text.size() >= kMaxDecodedTextChars) {
+      break;
+    }
   }
   return text;
 }
 
 std::wstring ExtractAsciiLower(const std::vector<unsigned char>& bytes) {
   std::wstring text;
-  text.reserve(bytes.size());
+  text.reserve(std::min(bytes.size(), kMaxDecodedTextChars));
   for (const auto byte : bytes) {
     text.push_back(byte >= 0x20 && byte <= 0x7E ? static_cast<wchar_t>(std::towlower(static_cast<wchar_t>(byte)))
                                                 : L' ');
+    if (text.size() >= kMaxDecodedTextChars) {
+      break;
+    }
   }
   return text;
 }
@@ -358,17 +375,35 @@ double Entropy(const std::vector<unsigned char>& bytes) {
   return entropy;
 }
 
-std::uint32_t CountZipEntries(const std::vector<unsigned char>& bytes) {
+std::uint32_t CountZipEntries(const std::vector<unsigned char>& bytes, bool* entryLimitExceeded) {
   std::uint32_t count = 0;
+  if (entryLimitExceeded != nullptr) {
+    *entryLimitExceeded = false;
+  }
+
   for (std::size_t index = 0; index + 3 < bytes.size(); ++index) {
     if (bytes[index] == 'P' && bytes[index + 1] == 'K' && bytes[index + 2] == 0x03 && bytes[index + 3] == 0x04) {
+      if (count >= kMaxArchiveEntryCount) {
+        if (entryLimitExceeded != nullptr) {
+          *entryLimitExceeded = true;
+        }
+        return kMaxArchiveEntryCount;
+      }
       ++count;
     }
   }
   return count;
 }
 
-std::wstring ExtractZipEntryNamesLower(const std::vector<unsigned char>& bytes) {
+std::wstring ExtractZipEntryNamesLower(const std::vector<unsigned char>& bytes, bool* malformed,
+                                       bool* outputTruncated) {
+  if (malformed != nullptr) {
+    *malformed = false;
+  }
+  if (outputTruncated != nullptr) {
+    *outputTruncated = false;
+  }
+
   std::wstring entryNames;
   for (std::size_t index = 0; index + 46 <= bytes.size(); ++index) {
     if (bytes[index] != 'P' || bytes[index + 1] != 'K' || bytes[index + 2] != 0x01 || bytes[index + 3] != 0x02) {
@@ -382,7 +417,10 @@ std::wstring ExtractZipEntryNamesLower(const std::vector<unsigned char>& bytes) 
     const auto fileNameOffset = index + 46;
     const auto fileNameEnd = fileNameOffset + fileNameLength;
     if (fileNameEnd > bytes.size()) {
-      continue;
+      if (malformed != nullptr) {
+        *malformed = true;
+      }
+      break;
     }
 
     const auto decodedName = Utf8ToWide(std::string(reinterpret_cast<const char*>(bytes.data() + fileNameOffset),
@@ -396,7 +434,22 @@ std::wstring ExtractZipEntryNamesLower(const std::vector<unsigned char>& bytes) 
     }
     entryNames += ToLowerCopy(decodedName);
 
+    if (entryNames.size() >= kMaxZipEntryNameOutputChars) {
+      entryNames.resize(kMaxZipEntryNameOutputChars);
+      if (outputTruncated != nullptr) {
+        *outputTruncated = true;
+      }
+      break;
+    }
+
     const auto skipTo = fileNameEnd + extraFieldLength + commentLength;
+    if (skipTo < fileNameEnd || skipTo > bytes.size()) {
+      if (malformed != nullptr) {
+        *malformed = true;
+      }
+      break;
+    }
+
     if (skipTo > index) {
       index = skipTo > 0 ? skipTo - 1 : index;
     }
@@ -644,6 +697,7 @@ std::optional<FileData> LoadFileData(const std::filesystem::path& path) {
   file.extension = ToLowerCopy(path.extension().wstring());
   file.fileNameLower = ToLowerCopy(path.filename().wstring());
   file.bytes = ReadBytes(path);
+  file.readLimitHit = file.sizeBytes > file.bytes.size();
   file.pe = file.bytes.size() >= 2 && file.bytes[0] == 'M' && file.bytes[1] == 'Z';
   file.zip = file.bytes.size() >= 4 && file.bytes[0] == 'P' && file.bytes[1] == 'K';
   file.ole = file.bytes.size() >= 8 && file.bytes[0] == 0xD0 && file.bytes[1] == 0xCF;
@@ -652,9 +706,11 @@ std::optional<FileData> LoadFileData(const std::filesystem::path& path) {
   file.trustedPath = TrustedPath(path);
   file.textLower = ToLowerCopy(DecodeText(file.bytes));
   file.asciiLower = ExtractAsciiLower(file.bytes);
-  file.zipEntryNamesLower = file.zip ? ExtractZipEntryNamesLower(file.bytes) : std::wstring{};
+  file.zipEntryNamesLower =
+      file.zip ? ExtractZipEntryNamesLower(file.bytes, &file.zipMalformed, &file.zipEntryNamesTruncated)
+               : std::wstring{};
   file.entropy = Entropy(file.bytes);
-  file.archiveEntryCount = file.zip ? CountZipEntries(file.bytes) : 0;
+  file.archiveEntryCount = file.zip ? CountZipEntries(file.bytes, &file.zipEntryLimitExceeded) : 0;
   file.contentType = file.pe ? L"portable-executable" : file.zip ? L"zip-archive" : file.ole ? L"ole-document"
                               : file.lnk ? L"windows-shortcut" : ScriptExt(file.extension) ? L"script" : L"binary";
   if (file.pe || ExecutableExt(file.extension)) {
@@ -821,6 +877,42 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   if (file.zip && file.userPath) {
     AddHit(hits, Hit{L"USER_PATH_ARCHIVE", L"Archive content in a user-controlled path can stage payload delivery.",
                      L"TA0002", L"T1204.002", 12});
+  }
+
+  if (file.zip && file.zipMalformed) {
+    AddHit(hits, Hit{L"ARCHIVE_MALFORMED_STRUCTURE",
+                     L"Archive parsing detected malformed structures and fail-safe handling was applied.",
+                     L"TA0005", L"T1562.001", 74});
+  }
+
+  if (file.zip && file.zipEntryLimitExceeded) {
+    AddHit(hits, Hit{L"ARCHIVE_ENTRY_LIMIT_EXCEEDED",
+                     L"Archive entry count exceeded parser safety limits and was treated as high risk.",
+                     L"TA0005", L"T1027", 58});
+  }
+
+  if (file.zip && file.zipEntryNamesTruncated) {
+    AddHit(hits, Hit{L"ARCHIVE_NAME_LIST_TRUNCATED",
+                     L"Archive entry metadata exceeded parser output limits and was truncated safely.",
+                     L"TA0005", L"T1027", 18});
+  }
+
+  if (file.ole && file.bytes.size() < 512) {
+    AddHit(hits, Hit{L"OLE_MALFORMED_HEADER",
+                     L"OLE content is shorter than the minimum structured-storage header size.",
+                     L"TA0005", L"T1562.001", 62});
+  }
+
+  if ((file.lnk || file.extension == L".lnk") && file.bytes.size() < 76) {
+    AddHit(hits, Hit{L"LNK_MALFORMED_HEADER",
+                     L"Shortcut content is malformed and shorter than the minimum shell-link header.",
+                     L"TA0005", L"T1562.001", 62});
+  }
+
+  if (file.readLimitHit && (ScriptExt(file.extension) || file.zip || file.ole || file.lnk)) {
+    AddHit(hits, Hit{L"PARSER_READ_LIMIT_REACHED",
+                     L"Parser read limits were reached while inspecting a high-risk content type.",
+                     L"TA0005", L"T1027", 24});
   }
 
   if (Contains(file.textLower, L"amsiutils")) {

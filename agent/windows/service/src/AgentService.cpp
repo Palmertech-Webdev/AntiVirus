@@ -1,6 +1,8 @@
 #include "AgentService.h"
 
 #include <WtsApi32.h>
+#include <lm.h>
+#include <sddl.h>
 #include <userenv.h>
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <regex>
 #include <set>
@@ -51,6 +54,7 @@ constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
 constexpr wchar_t kPamPolicyFileName[] = L"pam-policy.json";
 constexpr wchar_t kLocalApprovalQueueFileName[] = L"local-approval-requests.jsonl";
 constexpr wchar_t kLocalApprovalLedgerFileName[] = L"local-approval-ledger.jsonl";
+constexpr wchar_t kLocalAdminBaselineFileName[] = L"local-admin-baseline.jsonl";
 constexpr std::size_t kMaxCommandPayloadChars = 64 * 1024;
 
 struct PamRequestPayload {
@@ -92,6 +96,11 @@ struct QueuedLocalApprovalRequest {
   std::wstring recordId;
   std::wstring targetPath;
   std::wstring payloadJson;
+};
+
+struct LocalAdminMember {
+  std::wstring accountName;
+  std::wstring sid;
 };
 
 std::string EscapeRegex(const std::string& value) {
@@ -493,9 +502,68 @@ void EnsureRuntimeLayoutReady(const AgentConfig& config, const RuntimePathValida
   EnsureDirectoryExists(config.evidenceRootPath, L"evidence root");
 }
 
+std::optional<int> QueryCpuLoadPercent() {
+  FILETIME idleTime{};
+  FILETIME kernelTime{};
+  FILETIME userTime{};
+  if (GetSystemTimes(&idleTime, &kernelTime, &userTime) == FALSE) {
+    return std::nullopt;
+  }
+
+  const auto toUInt64 = [](const FILETIME& value) {
+    ULARGE_INTEGER merged{};
+    merged.LowPart = value.dwLowDateTime;
+    merged.HighPart = value.dwHighDateTime;
+    return merged.QuadPart;
+  };
+
+  const auto idle = toUInt64(idleTime);
+  const auto kernel = toUInt64(kernelTime);
+  const auto user = toUInt64(userTime);
+
+  static std::mutex sampleLock;
+  static ULONGLONG previousIdle = 0;
+  static ULONGLONG previousKernel = 0;
+  static ULONGLONG previousUser = 0;
+  static bool hasPreviousSample = false;
+
+  const std::lock_guard guard(sampleLock);
+  if (!hasPreviousSample) {
+    previousIdle = idle;
+    previousKernel = kernel;
+    previousUser = user;
+    hasPreviousSample = true;
+    return std::nullopt;
+  }
+
+  const auto idleDelta = idle - previousIdle;
+  const auto kernelDelta = kernel - previousKernel;
+  const auto userDelta = user - previousUser;
+
+  previousIdle = idle;
+  previousKernel = kernel;
+  previousUser = user;
+
+  const auto totalDelta = kernelDelta + userDelta;
+  if (totalDelta == 0) {
+    return std::nullopt;
+  }
+
+  const auto busyDelta = totalDelta > idleDelta ? totalDelta - idleDelta : 0;
+  const auto cpuPercent = static_cast<int>((busyDelta * 100ull) / totalDelta);
+  return std::clamp(cpuPercent, 0, 100);
+}
+
 std::optional<std::wstring> EvaluateHeavyOperationGate(const AgentConfig& config, const std::wstring& operationName) {
   if (!config.enforceOperationalGates) {
     return std::nullopt;
+  }
+
+  if (const auto cpuLoad = QueryCpuLoadPercent();
+      cpuLoad.has_value() && *cpuLoad > config.maxCpuLoadPercent) {
+    return std::wstring(L"Fenrir deferred ") + operationName +
+           L" because CPU pressure exceeded policy budget (" + std::to_wstring(*cpuLoad) + L"% > " +
+           std::to_wstring(config.maxCpuLoadPercent) + L"%).";
   }
 
   MEMORYSTATUSEX memoryStatus{};
