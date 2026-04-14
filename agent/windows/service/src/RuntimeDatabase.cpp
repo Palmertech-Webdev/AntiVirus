@@ -17,7 +17,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
-constexpr int kRuntimeDatabaseSchemaVersion = 3;
+constexpr int kRuntimeDatabaseSchemaVersion = 4;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -200,6 +200,26 @@ void EnsureBaseSchema(sqlite3* db) {
        " reboot_reasons TEXT, detected_at TEXT, deferred_until TEXT,"
        " grace_period_minutes INTEGER NOT NULL DEFAULT 0, status TEXT"
        ");"
+       "CREATE TABLE IF NOT EXISTS threat_intelligence_cache ("
+       " indicator_type TEXT NOT NULL, indicator_key TEXT NOT NULL,"
+       " provider TEXT NOT NULL, source TEXT, verdict TEXT NOT NULL,"
+       " trust_score INTEGER NOT NULL DEFAULT 0, provider_weight INTEGER NOT NULL DEFAULT 0,"
+       " summary TEXT, details TEXT, metadata_json TEXT,"
+       " first_seen_at TEXT, last_seen_at TEXT, expires_at TEXT,"
+       " signed_pack INTEGER NOT NULL DEFAULT 0, local_only INTEGER NOT NULL DEFAULT 0,"
+       " PRIMARY KEY(indicator_type, indicator_key, provider)"
+       ");"
+       "CREATE TABLE IF NOT EXISTS exclusion_policy ("
+       " rule_id TEXT PRIMARY KEY, path TEXT NOT NULL, scope TEXT,"
+       " created_by TEXT, reason TEXT, created_at TEXT NOT NULL, expires_at TEXT,"
+       " warning_state TEXT, risk_level TEXT, state TEXT NOT NULL,"
+       " dangerous INTEGER NOT NULL DEFAULT 0, approved INTEGER NOT NULL DEFAULT 0"
+       ");"
+       "CREATE TABLE IF NOT EXISTS quarantine_approvals ("
+       " record_id TEXT NOT NULL, action TEXT NOT NULL, requested_by TEXT, approved_by TEXT,"
+       " restore_path TEXT, requested_at TEXT NOT NULL, decided_at TEXT, decision TEXT NOT NULL, reason TEXT,"
+       " PRIMARY KEY(record_id, action, requested_at)"
+       ");"
        "CREATE INDEX IF NOT EXISTS idx_telemetry_queue_queue_id ON telemetry_queue(queue_id);"
        "CREATE INDEX IF NOT EXISTS idx_command_journal_status ON command_journal(status, updated_at);"
        "CREATE INDEX IF NOT EXISTS idx_quarantine_index_status ON quarantine_index(local_status);"
@@ -210,7 +230,10 @@ void EnsureBaseSchema(sqlite3* db) {
        "CREATE INDEX IF NOT EXISTS idx_windows_update_status ON windows_update_inventory(status, classification);"
        "CREATE INDEX IF NOT EXISTS idx_software_patch_state ON software_patch_inventory(update_state, provider);"
        "CREATE INDEX IF NOT EXISTS idx_patch_history_started_at ON patch_history(started_at DESC);"
-       "CREATE INDEX IF NOT EXISTS idx_patch_recipes_name ON patch_recipes(display_name, priority);");
+       "CREATE INDEX IF NOT EXISTS idx_patch_recipes_name ON patch_recipes(display_name, priority);"
+       "CREATE INDEX IF NOT EXISTS idx_threat_intel_lookup ON threat_intelligence_cache(indicator_type, indicator_key, expires_at);"
+       "CREATE INDEX IF NOT EXISTS idx_exclusion_policy_state ON exclusion_policy(state, expires_at);"
+       "CREATE INDEX IF NOT EXISTS idx_quarantine_approvals_decision ON quarantine_approvals(decision, requested_at DESC);");
 }
 
 void RunSchemaMigrations(sqlite3* db) {
@@ -229,6 +252,10 @@ void RunSchemaMigrations(sqlite3* db) {
     }
 
     if (currentVersion < 3) {
+      EnsureBaseSchema(db);
+    }
+
+    if (currentVersion < 4) {
       EnsureBaseSchema(db);
     }
 
@@ -1390,6 +1417,234 @@ bool RuntimeDatabase::LoadRebootCoordinator(RebootCoordinatorRecord& record) con
   record.gracePeriodMinutes = sqlite3_column_int(statement.get(), 8);
   record.status = ColumnText(statement.get(), 9);
   return true;
+}
+
+void RuntimeDatabase::UpsertThreatIntelRecord(const ThreatIntelRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO threat_intelligence_cache("
+      " indicator_type, indicator_key, provider, source, verdict, trust_score, provider_weight, summary, details,"
+      " metadata_json, first_seen_at, last_seen_at, expires_at, signed_pack, local_only)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(indicator_type, indicator_key, provider) DO UPDATE SET"
+      " source=excluded.source, verdict=excluded.verdict, trust_score=excluded.trust_score,"
+      " provider_weight=excluded.provider_weight, summary=excluded.summary, details=excluded.details,"
+      " metadata_json=excluded.metadata_json, first_seen_at=COALESCE(threat_intelligence_cache.first_seen_at, excluded.first_seen_at),"
+      " last_seen_at=excluded.last_seen_at, expires_at=excluded.expires_at,"
+      " signed_pack=excluded.signed_pack, local_only=excluded.local_only;");
+  BindText(statement.get(), 1, ThreatIndicatorTypeToString(record.indicatorType));
+  BindText(statement.get(), 2, record.indicatorKey);
+  BindText(statement.get(), 3, record.provider);
+  BindText(statement.get(), 4, record.source);
+  BindText(statement.get(), 5, record.verdict);
+  sqlite3_bind_int(statement.get(), 6, static_cast<int>(record.trustScore));
+  sqlite3_bind_int(statement.get(), 7, static_cast<int>(record.providerWeight));
+  BindText(statement.get(), 8, record.summary);
+  BindText(statement.get(), 9, record.details);
+  BindText(statement.get(), 10, record.metadataJson);
+  BindText(statement.get(), 11, record.firstSeenAt);
+  BindText(statement.get(), 12, record.lastSeenAt);
+  BindText(statement.get(), 13, record.expiresAt);
+  sqlite3_bind_int(statement.get(), 14, record.signedPack ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 15, record.localOnly ? 1 : 0);
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::TryGetThreatIntelRecord(const ThreatIndicatorType indicatorType, const std::wstring& indicatorKey,
+                                              ThreatIntelRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT indicator_type, indicator_key, provider, source, verdict, trust_score, provider_weight, summary, details,"
+      " metadata_json, first_seen_at, last_seen_at, expires_at, signed_pack, local_only"
+      " FROM threat_intelligence_cache WHERE indicator_type=? AND indicator_key=?"
+      " ORDER BY provider_weight DESC, trust_score DESC, last_seen_at DESC LIMIT 1;");
+  BindText(statement.get(), 1, ThreatIndicatorTypeToString(indicatorType));
+  BindText(statement.get(), 2, indicatorKey);
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading threat intelligence cache failed");
+  }
+
+  record.indicatorType = ThreatIndicatorTypeFromString(ColumnText(statement.get(), 0));
+  record.indicatorKey = ColumnText(statement.get(), 1);
+  record.provider = ColumnText(statement.get(), 2);
+  record.source = ColumnText(statement.get(), 3);
+  record.verdict = ColumnText(statement.get(), 4);
+  record.trustScore = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 5));
+  record.providerWeight = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 6));
+  record.summary = ColumnText(statement.get(), 7);
+  record.details = ColumnText(statement.get(), 8);
+  record.metadataJson = ColumnText(statement.get(), 9);
+  record.firstSeenAt = ColumnText(statement.get(), 10);
+  record.lastSeenAt = ColumnText(statement.get(), 11);
+  record.expiresAt = ColumnText(statement.get(), 12);
+  record.signedPack = sqlite3_column_int(statement.get(), 13) != 0;
+  record.localOnly = sqlite3_column_int(statement.get(), 14) != 0;
+  return true;
+}
+
+std::vector<ThreatIntelRecord> RuntimeDatabase::ListThreatIntelRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT indicator_type, indicator_key, provider, source, verdict, trust_score, provider_weight, summary, details,"
+      " metadata_json, first_seen_at, last_seen_at, expires_at, signed_pack, local_only"
+      " FROM threat_intelligence_cache ORDER BY last_seen_at DESC, provider_weight DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<ThreatIntelRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing threat intelligence cache failed");
+    }
+    records.push_back(ThreatIntelRecord{
+        .indicatorType = ThreatIndicatorTypeFromString(ColumnText(statement.get(), 0)),
+        .indicatorKey = ColumnText(statement.get(), 1),
+        .provider = ColumnText(statement.get(), 2),
+        .source = ColumnText(statement.get(), 3),
+        .verdict = ColumnText(statement.get(), 4),
+        .trustScore = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 5)),
+        .providerWeight = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 6)),
+        .summary = ColumnText(statement.get(), 7),
+        .details = ColumnText(statement.get(), 8),
+        .metadataJson = ColumnText(statement.get(), 9),
+        .firstSeenAt = ColumnText(statement.get(), 10),
+        .lastSeenAt = ColumnText(statement.get(), 11),
+        .expiresAt = ColumnText(statement.get(), 12),
+        .signedPack = sqlite3_column_int(statement.get(), 13) != 0,
+        .localOnly = sqlite3_column_int(statement.get(), 14) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::PurgeExpiredThreatIntelRecords(const std::wstring& referenceTimestamp) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "DELETE FROM threat_intelligence_cache WHERE expires_at <> '' AND expires_at <= ?;");
+  BindText(statement.get(), 1, referenceTimestamp);
+  StepDone(db.get(), statement.get());
+}
+
+void RuntimeDatabase::UpsertExclusionPolicyRecord(const ExclusionPolicyRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO exclusion_policy("
+      " rule_id, path, scope, created_by, reason, created_at, expires_at, warning_state, risk_level, state, dangerous, approved)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(rule_id) DO UPDATE SET"
+      " path=excluded.path, scope=excluded.scope, created_by=excluded.created_by, reason=excluded.reason,"
+      " created_at=excluded.created_at, expires_at=excluded.expires_at, warning_state=excluded.warning_state,"
+      " risk_level=excluded.risk_level, state=excluded.state, dangerous=excluded.dangerous, approved=excluded.approved;");
+  BindText(statement.get(), 1, record.ruleId);
+  BindText(statement.get(), 2, record.path);
+  BindText(statement.get(), 3, record.scope);
+  BindText(statement.get(), 4, record.createdBy);
+  BindText(statement.get(), 5, record.reason);
+  BindText(statement.get(), 6, record.createdAt);
+  BindText(statement.get(), 7, record.expiresAt);
+  BindText(statement.get(), 8, record.warningState);
+  BindText(statement.get(), 9, record.riskLevel);
+  BindText(statement.get(), 10, record.state);
+  sqlite3_bind_int(statement.get(), 11, record.dangerous ? 1 : 0);
+  sqlite3_bind_int(statement.get(), 12, record.approved ? 1 : 0);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<ExclusionPolicyRecord> RuntimeDatabase::ListExclusionPolicyRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT rule_id, path, scope, created_by, reason, created_at, expires_at, warning_state, risk_level, state,"
+      " dangerous, approved FROM exclusion_policy ORDER BY created_at DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<ExclusionPolicyRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing exclusion policy records failed");
+    }
+    records.push_back(ExclusionPolicyRecord{
+        .ruleId = ColumnText(statement.get(), 0),
+        .path = ColumnText(statement.get(), 1),
+        .scope = ColumnText(statement.get(), 2),
+        .createdBy = ColumnText(statement.get(), 3),
+        .reason = ColumnText(statement.get(), 4),
+        .createdAt = ColumnText(statement.get(), 5),
+        .expiresAt = ColumnText(statement.get(), 6),
+        .warningState = ColumnText(statement.get(), 7),
+        .riskLevel = ColumnText(statement.get(), 8),
+        .state = ColumnText(statement.get(), 9),
+        .dangerous = sqlite3_column_int(statement.get(), 10) != 0,
+        .approved = sqlite3_column_int(statement.get(), 11) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::UpsertQuarantineApprovalRecord(const QuarantineApprovalRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO quarantine_approvals("
+      " record_id, action, requested_by, approved_by, restore_path, requested_at, decided_at, decision, reason)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(record_id, action, requested_at) DO UPDATE SET"
+      " requested_by=excluded.requested_by, approved_by=excluded.approved_by, restore_path=excluded.restore_path,"
+      " decided_at=excluded.decided_at, decision=excluded.decision, reason=excluded.reason;");
+  BindText(statement.get(), 1, record.recordId);
+  BindText(statement.get(), 2, record.action);
+  BindText(statement.get(), 3, record.requestedBy);
+  BindText(statement.get(), 4, record.approvedBy);
+  BindText(statement.get(), 5, record.restorePath);
+  BindText(statement.get(), 6, record.requestedAt);
+  BindText(statement.get(), 7, record.decidedAt);
+  BindText(statement.get(), 8, record.decision);
+  BindText(statement.get(), 9, record.reason);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<QuarantineApprovalRecord> RuntimeDatabase::ListQuarantineApprovalRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT record_id, action, requested_by, approved_by, restore_path, requested_at, decided_at, decision, reason"
+      " FROM quarantine_approvals ORDER BY requested_at DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<QuarantineApprovalRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing quarantine approvals failed");
+    }
+    records.push_back(QuarantineApprovalRecord{
+        .recordId = ColumnText(statement.get(), 0),
+        .action = ColumnText(statement.get(), 1),
+        .requestedBy = ColumnText(statement.get(), 2),
+        .approvedBy = ColumnText(statement.get(), 3),
+        .restorePath = ColumnText(statement.get(), 4),
+        .requestedAt = ColumnText(statement.get(), 5),
+        .decidedAt = ColumnText(statement.get(), 6),
+        .decision = ColumnText(statement.get(), 7),
+        .reason = ColumnText(statement.get(), 8)});
+  }
+  return records;
 }
 
 }  // namespace antivirus::agent

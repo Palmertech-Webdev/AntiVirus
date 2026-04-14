@@ -743,7 +743,8 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
     entry.originalPath = restoreTargetPath;
     entry.localStatus = L"restored-verified";
     WriteMetadata(rootPath_, entry);
-    RuntimeDatabase(databasePath_).UpsertQuarantineRecord(QuarantineIndexRecord{
+    RuntimeDatabase database(databasePath_);
+    database.UpsertQuarantineRecord(QuarantineIndexRecord{
         .recordId = entry.recordId,
         .capturedAt = CurrentUtcTimestamp(),
         .originalPath = entry.originalPath,
@@ -752,6 +753,16 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
         .sizeBytes = entry.sizeBytes,
         .techniqueId = entry.techniqueId,
         .localStatus = entry.localStatus});
+    database.UpsertQuarantineApprovalRecord(QuarantineApprovalRecord{
+        .recordId = entry.recordId,
+        .action = L"restore",
+        .requestedBy = ReadEnvironmentVariable(L"USERNAME"),
+        .approvedBy = ReadEnvironmentVariable(L"USERNAME"),
+        .restorePath = entry.originalPath.wstring(),
+        .requestedAt = CurrentUtcTimestamp(),
+        .decidedAt = CurrentUtcTimestamp(),
+        .decision = L"approved",
+        .reason = L"Local quarantine restore executed after mandatory re-scan and destination validation."});
     result.success = true;
     result.originalPath = restoreTargetPath;
     result.quarantinedPath = entry.quarantinedPath;
@@ -761,6 +772,16 @@ QuarantineActionResult QuarantineStore::RestoreFile(const std::wstring& recordId
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());
+    RuntimeDatabase(databasePath_).UpsertQuarantineApprovalRecord(QuarantineApprovalRecord{
+        .recordId = result.recordId,
+        .action = L"restore",
+        .requestedBy = ReadEnvironmentVariable(L"USERNAME"),
+        .approvedBy = {},
+        .restorePath = result.originalPath.wstring(),
+        .requestedAt = CurrentUtcTimestamp(),
+        .decidedAt = CurrentUtcTimestamp(),
+        .decision = L"denied",
+        .reason = result.errorMessage});
     AppendQuarantineJournalEntry(rootPath_, L"restore", result.recordId, result.originalPath, result.quarantinedPath,
                                  L"restore-failed", false, result.errorMessage);
     return result;
@@ -804,7 +825,8 @@ QuarantineActionResult QuarantineStore::DeleteRecord(const std::wstring& recordI
     }
 
     WriteMetadata(rootPath_, entry);
-    RuntimeDatabase(databasePath_).UpsertQuarantineRecord(QuarantineIndexRecord{
+    RuntimeDatabase database(databasePath_);
+    database.UpsertQuarantineRecord(QuarantineIndexRecord{
         .recordId = entry.recordId,
         .capturedAt = CurrentUtcTimestamp(),
         .originalPath = entry.originalPath,
@@ -813,6 +835,17 @@ QuarantineActionResult QuarantineStore::DeleteRecord(const std::wstring& recordI
         .sizeBytes = entry.sizeBytes,
         .techniqueId = entry.techniqueId,
         .localStatus = entry.localStatus});
+    database.UpsertQuarantineApprovalRecord(QuarantineApprovalRecord{
+        .recordId = entry.recordId,
+        .action = L"delete",
+        .requestedBy = ReadEnvironmentVariable(L"USERNAME"),
+        .approvedBy = ReadEnvironmentVariable(L"USERNAME"),
+        .restorePath = {},
+        .requestedAt = CurrentUtcTimestamp(),
+        .decidedAt = CurrentUtcTimestamp(),
+        .decision = L"approved",
+        .reason = secureDeleteEnabled ? L"Secure quarantine delete approved and completed."
+                                      : L"Quarantine delete approved and completed."});
     result.success = true;
     result.quarantinedPath = entry.quarantinedPath;
     AppendQuarantineJournalEntry(rootPath_, L"delete", entry.recordId, entry.originalPath, result.quarantinedPath,
@@ -823,6 +856,16 @@ QuarantineActionResult QuarantineStore::DeleteRecord(const std::wstring& recordI
     return result;
   } catch (const std::exception& error) {
     result.errorMessage = Utf8ToWide(error.what());
+    RuntimeDatabase(databasePath_).UpsertQuarantineApprovalRecord(QuarantineApprovalRecord{
+        .recordId = result.recordId,
+        .action = L"delete",
+        .requestedBy = ReadEnvironmentVariable(L"USERNAME"),
+        .approvedBy = {},
+        .restorePath = {},
+        .requestedAt = CurrentUtcTimestamp(),
+        .decidedAt = CurrentUtcTimestamp(),
+        .decision = L"denied",
+        .reason = result.errorMessage});
     AppendQuarantineJournalEntry(rootPath_, L"delete", result.recordId, result.originalPath, result.quarantinedPath,
                                  L"delete-failed", false, result.errorMessage);
     return result;

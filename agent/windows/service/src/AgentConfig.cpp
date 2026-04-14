@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <fstream>
 #include <optional>
+#include <regex>
 #include <set>
 #include <system_error>
 
@@ -21,6 +23,7 @@ constexpr wchar_t kRuntimeRootValueName[] = L"RuntimeRoot";
 constexpr wchar_t kRuntimeDatabasePathValueName[] = L"RuntimeDatabasePath";
 constexpr wchar_t kInstallRootValueName[] = L"InstallRoot";
 constexpr wchar_t kLastSeenAtValueName[] = L"LastSeenAt";
+constexpr wchar_t kExclusionPolicyRelativePath[] = LR"(policy\scan-exclusions.jsonl)";
 
 int ParsePositiveInt(const std::wstring& rawValue, const int fallback) {
   if (rawValue.empty()) {
@@ -174,6 +177,131 @@ std::wstring NormalizeRegistryPathText(const std::wstring& value) {
   return normalized;
 }
 
+std::optional<std::filesystem::path> ReadRegisteredRuntimeRoot();
+std::filesystem::path BuildDefaultSharedRuntimeRoot();
+std::filesystem::path GetModuleDirectory(HMODULE moduleHandle);
+
+std::string EscapeRegex(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size() * 2);
+  for (const auto ch : value) {
+    switch (ch) {
+      case '\\':
+      case '^':
+      case '$':
+      case '.':
+      case '|':
+      case '?':
+      case '*':
+      case '+':
+      case '(':
+      case ')':
+      case '[':
+      case ']':
+      case '{':
+      case '}':
+        escaped.push_back('\\');
+        break;
+      default:
+        break;
+    }
+    escaped.push_back(ch);
+  }
+  return escaped;
+}
+
+std::string UnescapeJsonString(const std::string& value) {
+  std::string result;
+  result.reserve(value.size());
+  bool escaping = false;
+  for (const auto ch : value) {
+    if (!escaping) {
+      if (ch == '\\') {
+        escaping = true;
+      } else {
+        result.push_back(ch);
+      }
+      continue;
+    }
+
+    switch (ch) {
+      case '\\':
+        result.push_back('\\');
+        break;
+      case '"':
+        result.push_back('"');
+        break;
+      case 'n':
+        result.push_back('\n');
+        break;
+      case 'r':
+        result.push_back('\r');
+        break;
+      case 't':
+        result.push_back('\t');
+        break;
+      default:
+        result.push_back(ch);
+        break;
+    }
+    escaping = false;
+  }
+  if (escaping) {
+    result.push_back('\\');
+  }
+  return result;
+}
+
+std::optional<std::wstring> ExtractJsonString(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"");
+  std::smatch match;
+  if (!std::regex_search(utf8Json, match, pattern)) {
+    return std::nullopt;
+  }
+  return Utf8ToWide(UnescapeJsonString(match[1].str()));
+}
+
+std::optional<bool> ExtractJsonBool(const std::wstring& json, const std::string& key) {
+  const auto utf8Json = WideToUtf8(json);
+  const std::regex pattern("\"" + EscapeRegex(key) + "\"\\s*:\\s*(true|false|1|0)");
+  std::smatch match;
+  if (!std::regex_search(utf8Json, match, pattern)) {
+    return std::nullopt;
+  }
+  const auto token = match[1].str();
+  return token == "true" || token == "1";
+}
+
+std::filesystem::path ResolveExclusionPolicyPath() {
+  if (const auto runtimeRoot = ReadRegisteredRuntimeRoot(); runtimeRoot.has_value()) {
+    return *runtimeRoot / kExclusionPolicyRelativePath;
+  }
+
+  const auto sharedRuntimeRoot = BuildDefaultSharedRuntimeRoot();
+  if (!sharedRuntimeRoot.empty()) {
+    return sharedRuntimeRoot / kExclusionPolicyRelativePath;
+  }
+
+  return GetModuleDirectory(nullptr) / L"runtime" / kExclusionPolicyRelativePath;
+}
+
+bool ExclusionEntryExpired(const ScanExclusionEntry& entry) {
+  return !entry.expiresAt.empty() && entry.expiresAt <= CurrentUtcTimestamp();
+}
+
+std::wstring EscapeJsonValue(const std::wstring& value) {
+  return Utf8ToWide(EscapeJsonString(value));
+}
+
+std::wstring JsonBool(const bool value) {
+  return value ? L"true" : L"false";
+}
+
+std::wstring NormalizeExclusionCompareKey(const std::filesystem::path& path) {
+  return NormalizeRegistryPathText(NormalizeAbsolutePath(path).wstring());
+}
+
 std::filesystem::path GetModuleDirectory(HMODULE moduleHandle) {
   std::wstring buffer(MAX_PATH, L'\0');
   const auto written = GetModuleFileNameW(moduleHandle, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -269,6 +397,70 @@ std::vector<std::filesystem::path> LoadConfiguredScanExclusionsFromRegistry() {
     AppendRegistryExclusionsFromRoot(hive, kLegacyRegistryRoot, exclusions, seen);
   }
   return exclusions;
+}
+
+std::vector<ScanExclusionEntry> LoadConfiguredScanExclusionEntriesFromFile() {
+  std::vector<ScanExclusionEntry> entries;
+  const auto path = ResolveExclusionPolicyPath();
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    return entries;
+  }
+
+  std::string utf8Line;
+  while (std::getline(input, utf8Line)) {
+    if (utf8Line.empty()) {
+      continue;
+    }
+
+    const auto line = Utf8ToWide(utf8Line);
+    ScanExclusionEntry entry{
+        .path = std::filesystem::path(ExtractJsonString(line, "path").value_or(L"")),
+        .createdAt = ExtractJsonString(line, "createdAt").value_or(L""),
+        .expiresAt = ExtractJsonString(line, "expiresAt").value_or(L""),
+        .createdBy = ExtractJsonString(line, "createdBy").value_or(L""),
+        .reason = ExtractJsonString(line, "reason").value_or(L""),
+        .riskLevel = ExtractJsonString(line, "riskLevel").value_or(L""),
+        .dangerous = ExtractJsonBool(line, "dangerous").value_or(false)};
+    if (entry.path.empty() || ExclusionEntryExpired(entry)) {
+      continue;
+    }
+    entries.push_back(std::move(entry));
+  }
+
+  return entries;
+}
+
+bool SaveConfiguredScanExclusionEntriesToFile(const std::vector<ScanExclusionEntry>& exclusions) {
+  const auto path = ResolveExclusionPolicyPath();
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  if (error) {
+    return false;
+  }
+
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    return false;
+  }
+
+  for (const auto& exclusion : exclusions) {
+    if (exclusion.path.empty()) {
+      continue;
+    }
+    const std::wstring line = L"{\"path\":\"" + EscapeJsonValue(exclusion.path.wstring()) + L"\",\"createdAt\":\"" +
+                              EscapeJsonValue(exclusion.createdAt) + L"\",\"expiresAt\":\"" +
+                              EscapeJsonValue(exclusion.expiresAt) + L"\",\"createdBy\":\"" +
+                              EscapeJsonValue(exclusion.createdBy) + L"\",\"reason\":\"" +
+                              EscapeJsonValue(exclusion.reason) + L"\",\"riskLevel\":\"" +
+                              EscapeJsonValue(exclusion.riskLevel) + L"\",\"dangerous\":" +
+                              JsonBool(exclusion.dangerous) + L"}\n";
+    const auto utf8Line = WideToUtf8(line);
+    output.write(utf8Line.data(), static_cast<std::streamsize>(utf8Line.size()));
+  }
+
+  output.flush();
+  return output.good();
 }
 
 std::optional<std::filesystem::path> ReadRegisteredRuntimeRoot() {
@@ -394,7 +586,21 @@ void PersistRuntimeRootMarker(const std::filesystem::path& runtimeRoot, const st
 }  // namespace
 
 std::vector<std::filesystem::path> LoadConfiguredScanExclusions() {
-  return LoadConfiguredScanExclusionsFromRegistry();
+  std::vector<std::filesystem::path> exclusions = LoadConfiguredScanExclusionsFromRegistry();
+  std::set<std::wstring> seen;
+  for (const auto& exclusion : exclusions) {
+    seen.insert(NormalizeExclusionCompareKey(exclusion));
+  }
+
+  for (const auto& entry : LoadConfiguredScanExclusionEntriesFromFile()) {
+    if (entry.path.empty()) {
+      continue;
+    }
+    if (seen.insert(NormalizeExclusionCompareKey(entry.path)).second) {
+      exclusions.push_back(entry.path);
+    }
+  }
+  return exclusions;
 }
 
 bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& exclusions) {
@@ -405,7 +611,86 @@ bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& excl
       saved = true;
     }
   }
+  std::vector<ScanExclusionEntry> entries;
+  entries.reserve(exclusions.size());
+  for (const auto& exclusion : exclusions) {
+    entries.push_back(ScanExclusionEntry{
+        .path = exclusion,
+        .createdAt = CurrentUtcTimestamp(),
+        .expiresAt = {},
+        .createdBy = ReadEnvironmentVariable(L"USERNAME"),
+        .reason = L"Persisted by Fenrir exclusion editor",
+        .riskLevel = DescribeExclusionRisk(exclusion),
+        .dangerous = IsDangerousExclusionPath(exclusion)});
+  }
+  saved = SaveConfiguredScanExclusionEntriesToFile(entries) || saved;
   return saved;
+}
+
+std::vector<ScanExclusionEntry> LoadConfiguredScanExclusionEntries() {
+  return LoadConfiguredScanExclusionEntriesFromFile();
+}
+
+bool SaveConfiguredScanExclusionEntries(const std::vector<ScanExclusionEntry>& exclusions) {
+  std::vector<std::filesystem::path> activePaths;
+  activePaths.reserve(exclusions.size());
+  for (const auto& exclusion : exclusions) {
+    if (!exclusion.path.empty() && !ExclusionEntryExpired(exclusion)) {
+      activePaths.push_back(exclusion.path);
+    }
+  }
+
+  const auto joined = JoinWideList(activePaths);
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    WriteRegistryStringToRoot(hive, kRegistryRoot, kScanExcludePathsValueName, joined);
+  }
+  return SaveConfiguredScanExclusionEntriesToFile(exclusions);
+}
+
+bool IsDangerousExclusionPath(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return false;
+  }
+
+  const auto normalized = NormalizeAbsolutePath(path);
+  const auto lower = NormalizeRegistryPathText(normalized.wstring());
+  if (lower.empty()) {
+    return false;
+  }
+
+  if (normalized == normalized.root_path()) {
+    return true;
+  }
+
+  const auto windowsRoot = NormalizeRegistryPathText(ReadEnvironmentVariable(L"WINDIR"));
+  const auto programFiles = NormalizeRegistryPathText(ReadEnvironmentVariable(L"ProgramFiles"));
+  const auto programFilesX86 = NormalizeRegistryPathText(ReadEnvironmentVariable(L"ProgramFiles(x86)"));
+  const auto programData = NormalizeRegistryPathText(ReadEnvironmentVariable(L"PROGRAMDATA"));
+  const auto userProfile = NormalizeRegistryPathText(ReadEnvironmentVariable(L"USERPROFILE"));
+
+  return (!windowsRoot.empty() && lower.starts_with(windowsRoot)) ||
+         (!programFiles.empty() && lower.starts_with(programFiles)) ||
+         (!programFilesX86.empty() && lower.starts_with(programFilesX86)) ||
+         (!programData.empty() && lower.starts_with(programData)) ||
+         (!userProfile.empty() &&
+          (lower == userProfile || lower.starts_with(userProfile + L"\\documents") || lower.starts_with(userProfile + L"\\desktop")));
+}
+
+std::wstring DescribeExclusionRisk(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return L"unknown";
+  }
+  const auto normalized = NormalizeAbsolutePath(path);
+  if (normalized == normalized.root_path()) {
+    return L"critical";
+  }
+  if (IsDangerousExclusionPath(normalized)) {
+    return L"high";
+  }
+  if (normalized.has_filename() && normalized.filename().wstring().find(L"*") != std::wstring::npos) {
+    return L"high";
+  }
+  return L"moderate";
 }
 
 std::filesystem::path ResolveConfiguredPathWithinRuntimeRoot(const std::filesystem::path& configuredPath,

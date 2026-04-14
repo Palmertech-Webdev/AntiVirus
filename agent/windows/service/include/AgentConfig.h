@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -45,10 +46,24 @@ struct RuntimePathValidation {
   std::wstring message;
 };
 
+struct ScanExclusionEntry {
+  std::filesystem::path path;
+  std::wstring createdAt;
+  std::wstring expiresAt;
+  std::wstring createdBy;
+  std::wstring reason;
+  std::wstring riskLevel;
+  bool dangerous{false};
+};
+
 AgentConfig LoadAgentConfig();
 AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle);
 RuntimePathValidation ValidateRuntimePaths(const AgentConfig& config);
 std::vector<std::filesystem::path> LoadConfiguredScanExclusions();
 bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& exclusions);
+std::vector<ScanExclusionEntry> LoadConfiguredScanExclusionEntries();
+bool SaveConfiguredScanExclusionEntries(const std::vector<ScanExclusionEntry>& exclusions);
+std::wstring DescribeExclusionRisk(const std::filesystem::path& path);
+bool IsDangerousExclusionPath(const std::filesystem::path& path);
 
 }  // namespace antivirus::agent

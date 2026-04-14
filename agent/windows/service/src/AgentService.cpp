@@ -31,6 +31,7 @@
 #include "ProcessSnapshotCollector.h"
 #include "ServiceSnapshotCollector.h"
 #include "QuarantineStore.h"
+#include "ReputationLookup.h"
 #include "RemediationEngine.h"
 #include "RuntimeDatabase.h"
 #include "RuntimeTrustValidator.h"
@@ -3886,6 +3887,26 @@ void AgentService::DrainNetworkTelemetry() {
       if (const auto behaviorEvent = BuildBehaviorEventFromNetworkTelemetry(record, state_.deviceId);
           behaviorEvent.has_value()) {
         realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
+      }
+
+      const auto remoteAddress = ExtractPayloadString(record.payloadJson, "remoteAddress").value_or(L"");
+      if (remoteAddress.empty()) {
+        continue;
+      }
+
+      const auto intel = LookupDestinationReputation(remoteAddress, config_.runtimeDatabasePath);
+      if (intel.attempted && (intel.malicious || intel.localOnly || intel.verdict == L"unknown")) {
+        QueueTelemetryEvent(intel.malicious ? L"network.destination.reputation.hit"
+                                            : L"network.destination.reputation.observed",
+                            L"threat-intelligence",
+                            intel.malicious ? L"Fenrir correlated a network destination with threat intelligence."
+                                            : L"Fenrir enriched a network destination with local intelligence context.",
+                            std::wstring(L"{\"remoteAddress\":\"") + Utf8ToWide(EscapeJsonString(remoteAddress)) +
+                                L"\",\"provider\":\"" + Utf8ToWide(EscapeJsonString(intel.provider)) +
+                                L"\",\"verdict\":\"" + Utf8ToWide(EscapeJsonString(intel.verdict)) +
+                                L"\",\"trustScore\":" + std::to_wstring(intel.trustScore) +
+                                L",\"providerWeight\":" + std::to_wstring(intel.providerWeight) +
+                                L",\"localOnly\":" + (intel.localOnly ? L"true" : L"false") + L"}");
       }
     }
   }

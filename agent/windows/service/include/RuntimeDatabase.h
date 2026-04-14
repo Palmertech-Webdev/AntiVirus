@@ -8,6 +8,7 @@
 #include "ControlPlaneClient.h"
 #include "PatchOrchestrator.h"
 #include "TelemetryRecord.h"
+#include "ThreatIntelligence.h"
 
 namespace antivirus::agent {
 
@@ -117,6 +118,15 @@ class RuntimeDatabase {
   std::vector<PackageRecipeRecord> ListPackageRecipes(std::size_t limit = 500) const;
   void SaveRebootCoordinator(const RebootCoordinatorRecord& record) const;
   bool LoadRebootCoordinator(RebootCoordinatorRecord& record) const;
+  void UpsertThreatIntelRecord(const ThreatIntelRecord& record) const;
+  bool TryGetThreatIntelRecord(ThreatIndicatorType indicatorType, const std::wstring& indicatorKey,
+                               ThreatIntelRecord& record) const;
+  std::vector<ThreatIntelRecord> ListThreatIntelRecords(std::size_t limit = 200) const;
+  void PurgeExpiredThreatIntelRecords(const std::wstring& referenceTimestamp) const;
+  void UpsertExclusionPolicyRecord(const ExclusionPolicyRecord& record) const;
+  std::vector<ExclusionPolicyRecord> ListExclusionPolicyRecords(std::size_t limit = 200) const;
+  void UpsertQuarantineApprovalRecord(const QuarantineApprovalRecord& record) const;
+  std::vector<QuarantineApprovalRecord> ListQuarantineApprovalRecords(std::size_t limit = 200) const;
 
  private:
   std::filesystem::path databasePath_;
