@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <regex>
