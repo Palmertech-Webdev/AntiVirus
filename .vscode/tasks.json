@@ -223,6 +223,13 @@
 				"."
 			],
 			"isBackground": false
+		},
+		{
+			"label": "build-release-layout-incremental",
+			"type": "shell",
+			"command": "./agent/windows/installer/BuildReleaseLayout.ps1",
+			"args": [],
+			"isBackground": false
 		}
 	]
 }

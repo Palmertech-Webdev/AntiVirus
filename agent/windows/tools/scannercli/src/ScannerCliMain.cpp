@@ -339,6 +339,15 @@ void PrintText(const std::vector<antivirus::agent::ScanFinding>& findings, const
   }
 }
 
+void PrintFailClosedJson(const CliOptions& options, const std::wstring& errorMessage) {
+  const std::wstring targetPath = options.targets.empty() ? std::wstring{} : options.targets.front().wstring();
+  std::wcout << L"{\"findings\":[{\"path\":\""
+             << antivirus::agent::Utf8ToWide(antivirus::agent::EscapeJsonString(targetPath))
+             << L"\",\"disposition\":\"block\",\"remediationStatus\":\"failed\",\"remediationError\":\""
+             << antivirus::agent::Utf8ToWide(antivirus::agent::EscapeJsonString(errorMessage))
+             << L"\"}]}" << std::endl;
+}
+
 int RunRealtimeMode(const antivirus::agent::AgentConfig& config, const antivirus::agent::AgentState& state,
                     const CliOptions& options, const std::filesystem::path& targetPath) {
   antivirus::agent::RealtimeProtectionBroker broker(config);
@@ -390,59 +399,77 @@ int RunRealtimeMode(const antivirus::agent::AgentConfig& config, const antivirus
 
 int wmain(int argc, wchar_t* argv[]) {
   CliOptions options;
-  if (!ParseOptions(argc, argv, options)) {
-    return options.helpRequested ? 0 : 1;
-  }
+  try {
+    if (!ParseOptions(argc, argv, options)) {
+      return options.helpRequested ? 0 : 1;
+    }
 
-  const auto resolvedTargets =
-      ResolveTargets(options.targets, options.realtimeMode &&
-                                         options.realtimeOperation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE);
-  if (resolvedTargets.empty()) {
-    std::wcerr << L"No valid targets remain after validation." << std::endl;
-    return 1;
-  }
-
-  const auto config = antivirus::agent::LoadAgentConfig();
-  auto effectiveConfig = config;
-  effectiveConfig.scanExcludedPaths.insert(effectiveConfig.scanExcludedPaths.end(), options.exclusions.begin(),
-                                          options.exclusions.end());
-  antivirus::agent::LocalStateStore stateStore(config.runtimeDatabasePath, config.stateFilePath);
-  const auto state = stateStore.LoadOrCreate();
-
-  if (options.realtimeMode) {
-    if (resolvedTargets.size() != 1 || std::filesystem::is_directory(resolvedTargets.front())) {
-      std::wcerr << L"Real-time simulation requires exactly one file path target." << std::endl;
+    const auto resolvedTargets =
+        ResolveTargets(options.targets, options.realtimeMode &&
+                                           options.realtimeOperation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE);
+    if (resolvedTargets.empty()) {
+      std::wcerr << L"No valid targets remain after validation." << std::endl;
       return 1;
     }
 
-    return RunRealtimeMode(effectiveConfig, state, options, resolvedTargets.front());
+    const auto config = antivirus::agent::LoadAgentConfig();
+    auto effectiveConfig = config;
+    effectiveConfig.scanExcludedPaths.insert(effectiveConfig.scanExcludedPaths.end(), options.exclusions.begin(),
+                                            options.exclusions.end());
+    antivirus::agent::LocalStateStore stateStore(config.runtimeDatabasePath, config.stateFilePath);
+    const auto state = stateStore.LoadOrCreate();
+
+    if (options.realtimeMode) {
+      if (resolvedTargets.size() != 1 || std::filesystem::is_directory(resolvedTargets.front())) {
+        std::wcerr << L"Real-time simulation requires exactly one file path target." << std::endl;
+        return 1;
+      }
+
+      return RunRealtimeMode(effectiveConfig, state, options, resolvedTargets.front());
+    }
+
+    auto findings = antivirus::agent::ScanTargets(resolvedTargets, state.policy,
+                                                  antivirus::agent::ScanProgressCallback{}, effectiveConfig.scanExcludedPaths);
+
+    ApplyLocalRemediation(effectiveConfig, findings, options.noRemediation);
+    RecordEvidence(effectiveConfig, state.policy, findings);
+
+    if (!options.noTelemetry) {
+      QueueTelemetry(effectiveConfig, state.policy, findings, resolvedTargets.size());
+    }
+
+    if (options.json) {
+      PrintJson(findings);
+    } else {
+      PrintText(findings, resolvedTargets.size());
+    }
+
+    const auto remediationFailed = std::any_of(findings.begin(), findings.end(),
+                                               [](const antivirus::agent::ScanFinding& finding) {
+                                                 return finding.remediationStatus ==
+                                                        antivirus::agent::RemediationStatus::Failed;
+                                               });
+
+    if (findings.empty()) {
+      return 0;
+    }
+
+    return remediationFailed ? 3 : 2;
+  } catch (const std::exception& error) {
+    const auto errorWide = antivirus::agent::Utf8ToWide(error.what());
+    if (options.json) {
+      PrintFailClosedJson(options, errorWide);
+    } else {
+      std::wcerr << L"Scanner execution failed closed: " << errorWide << std::endl;
+    }
+    return 3;
+  } catch (...) {
+    const auto fallback = std::wstring(L"Unknown scanner failure");
+    if (options.json) {
+      PrintFailClosedJson(options, fallback);
+    } else {
+      std::wcerr << L"Scanner execution failed closed: " << fallback << std::endl;
+    }
+    return 3;
   }
-
-  auto findings = antivirus::agent::ScanTargets(resolvedTargets, state.policy,
-                                                antivirus::agent::ScanProgressCallback{}, effectiveConfig.scanExcludedPaths);
-
-  ApplyLocalRemediation(effectiveConfig, findings, options.noRemediation);
-  RecordEvidence(effectiveConfig, state.policy, findings);
-
-  if (!options.noTelemetry) {
-    QueueTelemetry(effectiveConfig, state.policy, findings, resolvedTargets.size());
-  }
-
-  if (options.json) {
-    PrintJson(findings);
-  } else {
-    PrintText(findings, resolvedTargets.size());
-  }
-
-  const auto remediationFailed = std::any_of(findings.begin(), findings.end(),
-                                             [](const antivirus::agent::ScanFinding& finding) {
-                                               return finding.remediationStatus ==
-                                                      antivirus::agent::RemediationStatus::Failed;
-                                             });
-
-  if (findings.empty()) {
-    return 0;
-  }
-
-  return remediationFailed ? 3 : 2;
 }

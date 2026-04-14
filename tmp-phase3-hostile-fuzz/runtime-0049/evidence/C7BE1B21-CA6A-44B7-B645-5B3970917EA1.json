@@ -1,0 +1,30 @@
+{
+  "evidenceId": "C7BE1B21-CA6A-44B7-B645-5B3970917EA1",
+  "recordedAt": "2026-04-14T09:03:29.275Z",
+  "source": "scannercli",
+  "policyRevision": "local-bootstrap",
+  "path": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0043.lnk",
+  "sizeBytes": 2023,
+  "sha256": "a2024e9b474cbc27f13885aa15e6d1823561d91db263b13d3492d760bacbe88b",
+  "contentType": "binary",
+  "reputation": "user-writable-unsigned;intel-unknown",
+  "signer": "",
+  "heuristicScore": 58,
+  "archiveEntryCount": 0,
+  "disposition": "block",
+  "tacticId": "TA0002",
+  "techniqueId": "T1204.001",
+  "remediationStatus": "none",
+  "quarantineRecordId": "",
+  "quarantinedPath": "",
+  "remediationError": "",
+  "reasons": [
+    {"code": "REPUTATION_LOOKUP", "message": "No public hashlookup match was found."},
+    {"code": "USER_PATH_SHORTCUT", "message": "Shortcut content in a user-controlled path often serves as an execution lure."},
+    {"code": "SCRIPT_OBFUSCATION", "message": "Content uses common obfuscation markers."}
+  ],
+  "timeline": [
+    {"phase": "detection", "recordedAt": "2026-04-14T09:03:29.275Z", "summary": "block"},
+    {"phase": "remediation", "recordedAt": "2026-04-14T09:03:29.275Z", "summary": "none"}
+  ]
+}
