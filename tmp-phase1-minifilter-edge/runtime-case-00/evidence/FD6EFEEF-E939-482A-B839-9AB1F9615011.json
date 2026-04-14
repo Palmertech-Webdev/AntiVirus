@@ -1,0 +1,30 @@
+{
+  "evidenceId": "FD6EFEEF-E939-482A-B839-9AB1F9615011",
+  "recordedAt": "2026-04-14T10:33:29.484Z",
+  "source": "realtime-protection",
+  "policyRevision": "local-bootstrap",
+  "path": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase1-minifilter-edge\\samples\\missing-create-target.exe",
+  "sizeBytes": 0,
+  "sha256": "",
+  "contentType": "",
+  "reputation": "",
+  "signer": "",
+  "heuristicScore": 0,
+  "archiveEntryCount": 0,
+  "disposition": "block",
+  "tacticId": "TA0002",
+  "techniqueId": "T1204.002",
+  "remediationStatus": "failed",
+  "quarantineRecordId": "FA6F3738-CE21-4736-A7C4-5DF76E4515B5",
+  "quarantinedPath": "",
+  "remediationError": "Copy to quarantine failed",
+  "reasons": [
+    {"code": "REALTIME_EXECUTABLE_DROP", "message": "Executable content in a user-controlled path was intercepted by real-time protection."},
+    {"code": "QUARANTINE_STATUS", "message": "Quarantine status: quarantine-failed."},
+    {"code": "QUARANTINE_FAILED", "message": "Copy to quarantine failed"}
+  ],
+  "timeline": [
+    {"phase": "detection", "recordedAt": "2026-04-14T10:33:29.484Z", "summary": "block"},
+    {"phase": "remediation", "recordedAt": "2026-04-14T10:33:29.484Z", "summary": "failed"}
+  ]
+}

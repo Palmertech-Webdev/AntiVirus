@@ -16,6 +16,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 function Resolve-AbsolutePath {
   param(
@@ -161,11 +162,61 @@ for ($run = 1; $run -le $RemediationRuns; $run++) {
     $expectedSamples += $samplePath
   }
 
-  $scanResult = Invoke-ScannerJson -Arguments @("--json", "--path", $runRoot)
-  $findings = @($scanResult.Findings)
-  $blockedCount = @($findings | Where-Object { $_.disposition -in @("block", "quarantine") }).Count
-  $quarantinedCount = @($findings | Where-Object { $_.remediationStatus -eq "quarantined" }).Count
-  $errorCount = @($findings | Where-Object { -not [string]::IsNullOrWhiteSpace($_.remediationError) }).Count
+  $findingsCount = 0
+  $blockedCount = 0
+  $quarantinedCount = 0
+  $errorCount = 0
+
+  foreach ($samplePath in $expectedSamples) {
+    $sampleScanResult = Invoke-ScannerJson -Arguments @("--json", "--path", $samplePath)
+    $sampleFindings = @($sampleScanResult.Findings)
+    $findingsCount += $sampleFindings.Count
+
+    foreach ($finding in $sampleFindings) {
+      $dispositionText = ""
+      try {
+        $dispositionText = [string]$finding.disposition
+      } catch {
+        $dispositionText = ""
+      }
+      if ($dispositionText -in @("block", "quarantine")) {
+        $blockedCount++
+      }
+
+      $remediationStatusText = ""
+      try {
+        $remediationStatusText = [string]$finding.remediationStatus
+      } catch {
+        $remediationStatusText = ""
+      }
+      if ($remediationStatusText -eq "quarantined") {
+        $quarantinedCount++
+      }
+
+      $rawRemediationError = $null
+      try {
+        $rawRemediationError = $finding.remediationError
+      } catch {
+        $rawRemediationError = $null
+      }
+
+      if ($null -eq $rawRemediationError) {
+        continue
+      }
+
+      $remediationErrorText = ""
+      try {
+        $remediationErrorText = [string]$rawRemediationError
+      } catch {
+        $errorCount++
+        continue
+      }
+
+      if (-not [string]::IsNullOrWhiteSpace($remediationErrorText)) {
+        $errorCount++
+      }
+    }
+  }
 
   $originalMissingCount = 0
   foreach ($path in $expectedSamples) {
@@ -175,7 +226,7 @@ for ($run = 1; $run -le $RemediationRuns; $run++) {
   }
 
   $runPass =
-    $findings.Count -eq $RemediationSamplesPerRun -and
+    $findingsCount -eq $RemediationSamplesPerRun -and
     $blockedCount -eq $RemediationSamplesPerRun -and
     $quarantinedCount -eq $RemediationSamplesPerRun -and
     $errorCount -eq 0 -and
@@ -187,7 +238,7 @@ for ($run = 1; $run -le $RemediationRuns; $run++) {
 
   $remediationRunSummaries += ("run{0}: findings={1}, blocked={2}, quarantined={3}, missingOriginals={4}, pass={5}" -f
       $run,
-      $findings.Count,
+      $findingsCount,
       $blockedCount,
       $quarantinedCount,
       $originalMissingCount,
@@ -301,16 +352,31 @@ if (-not $SkipMinifilterEdgeCases) {
     throw "Minifilter edge-case harness script was not found: $minifilterHarnessPath"
   }
 
-  $minifilterHarnessOutput = & powershell -ExecutionPolicy Bypass -File $minifilterHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $MinifilterWorkingRoot
-  $minifilterHarnessExitCode = $LASTEXITCODE
-  $minifilterHarnessText = ($minifilterHarnessOutput | Out-String).Trim()
+  $minifilterHarnessOutput = @()
+  $minifilterHarnessExitCode = 1
+  $savedErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $minifilterHarnessOutput = & $minifilterHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $MinifilterWorkingRoot 2>&1
+    $minifilterHarnessExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+
+  $minifilterHarnessText = ((@($minifilterHarnessOutput) | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+          $_.ToString()
+        } else {
+          [string]$_
+        }
+      }) | Out-String).Trim()
 
   $reportMatch = [regex]::Match($minifilterHarnessText, "REPORT_PATH=([^`r`n]+)")
   if ($reportMatch.Success) {
     $minifilterEdgeCaseReportPath = $reportMatch.Groups[1].Value.Trim()
   }
 
-  Add-CriterionResult -Name "Minifilter edge-case matrix remains stable" -Pass ($minifilterHarnessExitCode -eq 0) -Details (
+  Add-CriterionResult -Name "Minifilter edge-case matrix remains stable" -Pass ($minifilterHarnessExitCode -eq 0) -Details $(
     if ($minifilterHarnessExitCode -eq 0) {
       "Minifilter edge-case harness completed successfully."
     } else {

@@ -1,0 +1,30 @@
+{
+  "evidenceId": "0E705D48-46E5-406E-8A64-DAEA485204DC",
+  "recordedAt": "2026-04-14T09:07:29.587Z",
+  "source": "scannercli",
+  "policyRevision": "local-bootstrap",
+  "path": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0028.hta",
+  "sizeBytes": 1670,
+  "sha256": "f0e51abf3ec702ba6d696c5c439f8ad6c2ffa0feebf8fdc4a8a969aaa5ebde2b",
+  "contentType": "script",
+  "reputation": "user-writable-unsigned;intel-unknown-cache",
+  "signer": "",
+  "heuristicScore": 72,
+  "archiveEntryCount": 0,
+  "disposition": "block",
+  "tacticId": "TA0005",
+  "techniqueId": "T1218.005",
+  "remediationStatus": "none",
+  "quarantineRecordId": "",
+  "quarantinedPath": "",
+  "remediationError": "",
+  "reasons": [
+    {"code": "REPUTATION_LOOKUP", "message": "No public hashlookup match was found."},
+    {"code": "HTA_EXECUTION_SURFACE", "message": "HTA content is a high-risk execution surface on Windows."},
+    {"code": "BLOCK_FIRST", "message": "Fenrir blocked this item immediately and can quarantine it during remediation."}
+  ],
+  "timeline": [
+    {"phase": "detection", "recordedAt": "2026-04-14T09:07:29.587Z", "summary": "block"},
+    {"phase": "remediation", "recordedAt": "2026-04-14T09:07:29.587Z", "summary": "none"}
+  ]
+}

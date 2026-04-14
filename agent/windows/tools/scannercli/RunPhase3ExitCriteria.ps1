@@ -15,6 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 function Resolve-AbsolutePath {
   param(
@@ -138,7 +139,7 @@ if (-not $SkipCorpus) {
       throw "Phase 3 corpus root does not exist and corpus generator was not found: $generatorPath"
     }
 
-    & powershell -ExecutionPolicy Bypass -File $generatorPath -WorkspaceRoot $script:WorkspaceRootAbsolute -OutputRoot $corpusRootAbsolute
+    & $generatorPath -WorkspaceRoot $script:WorkspaceRootAbsolute -OutputRoot $corpusRootAbsolute
     if ($LASTEXITCODE -ne 0) {
       throw "Phase 3 corpus generator failed with exit code $LASTEXITCODE"
     }
@@ -237,9 +238,24 @@ if (-not $SkipHostileInputFuzz) {
     throw "Hostile input fuzz harness script was not found: $hostileHarnessPath"
   }
 
-  $hostileHarnessOutput = & powershell -ExecutionPolicy Bypass -File $hostileHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $HostileFuzzWorkingRoot
-  $hostileHarnessExitCode = $LASTEXITCODE
-  $hostileHarnessText = ($hostileHarnessOutput | Out-String).Trim()
+  $hostileHarnessOutput = @()
+  $hostileHarnessExitCode = 1
+  $savedErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $hostileHarnessOutput = & $hostileHarnessPath -WorkspaceRoot $script:WorkspaceRootAbsolute -ScannerPath $ScannerPath -WorkingRoot $HostileFuzzWorkingRoot 2>&1
+    $hostileHarnessExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+
+  $hostileHarnessText = ((@($hostileHarnessOutput) | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+          $_.ToString()
+        } else {
+          [string]$_
+        }
+      }) | Out-String).Trim()
 
   $reportMatch = [regex]::Match($hostileHarnessText, "REPORT_PATH=([^`r`n]+)")
   if ($reportMatch.Success) {

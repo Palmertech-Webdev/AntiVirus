@@ -1,659 +1,388 @@
 {
-  "generatedAtUtc": "2026-04-14T09:03:43.0246435Z",
+  "generatedAtUtc": "2026-04-14T09:09:40.0494711Z",
   "scannerPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\tools\\fenrir-scannercli.exe",
   "sampleCount": 54,
   "mutationCount": 48,
-  "allPass": false,
-  "failures": [
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\truncated-central-directory.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\oversized-entry-count.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\broken-shell-link.lnk",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\malformed\\\\broken-shell-link.lnk\",\"sizeBytes\":12,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1562.001\",\"confidence\":92,\"sha256\":\"5a97fccc5d17252054cc21a585bac9586cf329031e7e7e94b6d92adcda2f3eec\",\"contentType\":\"windows-shortcut\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":92,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"750F92B0-01B6-4BC0-AC75-50C34EA789AB\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\ole-header-only.doc",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\malformed\\\\ole-header-only.doc\",\"sizeBytes\":12,\"disposition\":\"allow\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1562.001\",\"confidence\":62,\"sha256\":\"c0d2a8c0e4c4874399a7a787f8a40eb7416f9935c8f14f58f947f4e2291cb477\",\"contentType\":\"ole-document\",\"reputation\":\"user-writable-unsigned;intel-known-good\",\"signer\":\"\",\"heuristicScore\":62,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"96C01D93-86DE-41C7-A8EA-92B8CC75BCAB\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\invalid-js-utf16.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\null-heavy-hta.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\malformed\\\\null-heavy-hta.hta\",\"sizeBytes\":16,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"f67ee817404a653288b514b2ebd2300c92a21903cdcf393328bf85327def09cf\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"F4055AC4-C1FB-4E22-A274-15670B8F75B2\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0000.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0001.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0002.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0003.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0004.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0005.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0006.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0007.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0008.lnk",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0008.lnk\",\"sizeBytes\":4135,\"disposition\":\"block\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.001\",\"confidence\":58,\"sha256\":\"a7f2e6d5989bf59fd6f62bf51fa2d4a2927fccd496d04ba2fa782655f388f0c0\",\"contentType\":\"binary\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":58,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"6B87127B-4888-479F-910B-6D31A5D45630\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0009.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0009.hta\",\"sizeBytes\":1980,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"f9126d498421f0923fa0d61268055ba4fe67b449ccee74518800ddc3981ab3da\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"BBD4EFE1-B686-4C46-8BA7-C28E859A3218\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0010.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0011.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0012.lnk",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0013.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0014.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0015.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0015.hta\",\"sizeBytes\":594,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"bb296e5df3144f3060ebe4180379897e82d73215b9cbf63f4bb0c4a79a0f80bb\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"A50A8E1C-20A4-47AA-A89D-8E5DF80D4A21\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0016.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0017.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0017.hta\",\"sizeBytes\":657,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"c29f882739e53eb4f87eea1e342c105fbf1fc4bbe82a7cc0ad88b9bc15be54d0\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"98CCCB03-675D-40DD-90F8-981E7117FC07\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0018.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0019.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0019.hta\",\"sizeBytes\":139,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"69a1f88d689a1d60d9480d1620acbe6cdae1e25cbc80f99a35641656ab98e997\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"94F168A5-2566-429E-9360-8D1C6DEB4768\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0020.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0020.hta\",\"sizeBytes\":1054,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"20710077e6dd04e458841dc7b0e5244c576e1a831edd9e449e70893e540c1ba8\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"FB795E6B-7424-4837-ADB6-2B5C4E914027\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0021.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0022.lnk",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0022.lnk\",\"sizeBytes\":3023,\"disposition\":\"block\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.001\",\"confidence\":58,\"sha256\":\"1552a14b049155c600d5a5da6e36b50e0dd375856694ca6033913199ce57e744\",\"contentType\":\"binary\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":58,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"25C4FE8F-C701-44D9-B265-792D1A0BD28E\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0023.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0024.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0025.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0026.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0027.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0027.hta\",\"sizeBytes\":293,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"c1ae52a2539f1f1b03f6ec1d37ca6bc0c3bdb87affca694bbd57f694007e345e\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"8D0D6F2A-60F0-40BF-B7B7-5D64677EB5D7\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0028.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0028.hta\",\"sizeBytes\":1670,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"f0e51abf3ec702ba6d696c5c439f8ad6c2ffa0feebf8fdc4a8a969aaa5ebde2b\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"4663209A-C1E3-4F32-9CAD-4AB6432B655C\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0029.doc",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0030.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0030.hta\",\"sizeBytes\":2425,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":72,\"sha256\":\"a23c1848b451125a149ac1a9768a4097ffc27f2171af87dd2cf082c254c62383\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":72,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"56D01B33-7570-4E33-A0B0-E24A717DD98D\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0031.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0032.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0033.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0034.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0035.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0036.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0037.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0038.lnk",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0039.hta",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0039.hta\",\"sizeBytes\":3806,\"disposition\":\"block\",\"tacticId\":\"TA0005\",\"techniqueId\":\"T1218.005\",\"confidence\":99,\"sha256\":\"e130aa90abed0fd97a184db59da559177f433b170ed1bc4587137fc22ce810c6\",\"contentType\":\"script\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":99,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"6618E594-8CEC-40DF-9759-4822F608BE01\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0040.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0041.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0042.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0043.lnk",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0043.lnk\",\"sizeBytes\":2023,\"disposition\":\"block\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.001\",\"confidence\":58,\"sha256\":\"a2024e9b474cbc27f13885aa15e6d1823561d91db263b13d3492d760bacbe88b\",\"contentType\":\"binary\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":58,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"C7BE1B21-CA6A-44B7-B645-5B3970917EA1\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0044.zip",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0045.lnk",
-      "exitCode": 2,
-      "output": "{\"findings\":[{\"path\":\"C:\\\\Users\\\\matt_admin\\\\Documents\\\\GitHub\\\\AntiVirus\\\\tmp-phase3-hostile-fuzz\\\\samples\\\\mutated\\\\fuzz-0045.lnk\",\"sizeBytes\":2561,\"disposition\":\"block\",\"tacticId\":\"TA0002\",\"techniqueId\":\"T1204.001\",\"confidence\":58,\"sha256\":\"b97ff203a021e222152f2e77e82dc2f87cb623e28e45c55bad01de1cebd9eee2\",\"contentType\":\"binary\",\"reputation\":\"user-writable-unsigned;intel-unknown\",\"signer\":\"\",\"heuristicScore\":58,\"archiveEntryCount\":0,\"remediationStatus\":\"none\",\"quarantineRecordId\":\"\",\"evidenceRecordId\":\"4689930B-78D6-4A83-8E56-F7B2E64C8B67\",\"quarantinedPath\":\"\",\"remediationError\":\"\"}]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0046.js",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    },
-    {
-      "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0047.pdf",
-      "exitCode": 0,
-      "output": "{\"findings\":[]}"
-    }
-  ],
+  "allPass": true,
+  "failures": [],
   "results": [
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\truncated-central-directory.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\oversized-entry-count.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\broken-shell-link.lnk",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\ole-header-only.doc",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\invalid-js-utf16.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\malformed\\null-heavy-hta.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0000.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0001.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0002.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0003.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0004.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0005.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0006.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0007.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0008.lnk",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0009.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0010.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0011.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0012.lnk",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0013.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0014.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0015.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0016.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0017.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0018.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0019.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0020.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0021.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0022.lnk",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0023.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0024.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0025.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0026.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0027.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0028.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0029.doc",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0030.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0031.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0032.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0033.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0034.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0035.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0036.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0037.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0038.lnk",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0039.hta",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0040.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0041.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0042.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0043.lnk",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0044.zip",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0045.lnk",
       "exitCode": 2,
       "jsonParsed": true,
       "findingCount": 1,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0046.js",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     },
     {
       "samplePath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\tmp-phase3-hostile-fuzz\\samples\\mutated\\fuzz-0047.pdf",
       "exitCode": 0,
       "jsonParsed": true,
       "findingCount": 0,
-      "status": "fail"
+      "status": "pass"
     }
   ]
 }

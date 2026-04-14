@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 function Resolve-AbsolutePath {
   param(
@@ -131,7 +132,7 @@ for ($sampleIndex = 0; $sampleIndex -lt $samplePaths.Count; $sampleIndex++) {
     }
   }
 
-  $exitOk = @($exitCode -eq 0, $exitCode -eq 2, $exitCode -eq 3) -contains $true
+  $exitOk = ($exitCode -eq 0 -or $exitCode -eq 2 -or $exitCode -eq 3)
   $status = if ($exitOk -and $parseOk) { "pass" } else { "fail" }
 
   $result = [PSCustomObject]@{
