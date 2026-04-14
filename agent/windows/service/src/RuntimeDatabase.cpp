@@ -17,7 +17,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
-constexpr int kRuntimeDatabaseSchemaVersion = 5;
+constexpr int kRuntimeDatabaseSchemaVersion = 6;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -268,6 +268,10 @@ void RunSchemaMigrations(sqlite3* db) {
     }
 
     if (currentVersion < 5) {
+      EnsureBaseSchema(db);
+    }
+
+    if (currentVersion < 6) {
       EnsureBaseSchema(db);
     }
 

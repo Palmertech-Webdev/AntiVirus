@@ -6,10 +6,13 @@
 #include <chrono>
 #include <cwctype>
 #include <fstream>
+#include <set>
 #include <system_error>
 #include <vector>
 
+#include "LocalSecurity.h"
 #include "RuntimeDatabase.h"
+#include "RuntimeTrustValidator.h"
 #include "StringUtils.h"
 #include "WscCoexistenceManager.h"
 
@@ -21,6 +24,10 @@ constexpr int kEvidenceRetentionDays = 30;
 constexpr int kUpdateArtifactRetentionDays = 30;
 constexpr int kQuarantineRetentionDays = 60;
 constexpr int kJournalRetentionDays = 30;
+constexpr wchar_t kPamRequestFileName[] = L"pam-request.json";
+constexpr wchar_t kPamAuditFileName[] = L"privilege-requests.jsonl";
+constexpr wchar_t kLocalApprovalQueueFileName[] = L"local-approval-requests.jsonl";
+constexpr wchar_t kLocalApprovalLedgerFileName[] = L"local-approval-ledger.jsonl";
 
 struct StorageGovernancePolicy {
   int supportRetentionDays{kSupportBundleRetentionDays};
@@ -67,6 +74,111 @@ bool ParseBooleanValue(const std::wstring& rawValue, const bool fallback) {
   }
 
   return fallback;
+}
+
+std::filesystem::path ResolveRuntimeRoot(const AgentConfig& config) {
+  auto runtimeRoot = config.runtimeDatabasePath.parent_path();
+  if (runtimeRoot.empty()) {
+    runtimeRoot = config.runtimeDatabasePath;
+  }
+
+  if (!runtimeRoot.empty()) {
+    return runtimeRoot;
+  }
+
+  return std::filesystem::current_path() / L"runtime";
+}
+
+std::filesystem::path ResolveInstallRootForConfig(const AgentConfig& config) {
+  if (!config.installRootPath.empty()) {
+    return config.installRootPath;
+  }
+
+  const auto runtimeRoot = ResolveRuntimeRoot(config);
+  return runtimeRoot.has_parent_path() ? runtimeRoot.parent_path() : std::filesystem::current_path();
+}
+
+std::filesystem::path ResolvePamRequestPath(const AgentConfig& config) {
+  return ResolveRuntimeRoot(config) / kPamRequestFileName;
+}
+
+std::filesystem::path ResolvePamAuditPath(const AgentConfig& config) {
+  auto journalRoot = config.journalRootPath;
+  if (journalRoot.empty()) {
+    journalRoot = ResolveRuntimeRoot(config);
+  }
+  return journalRoot / kPamAuditFileName;
+}
+
+std::filesystem::path ResolveLocalApprovalRuntimeRoot() {
+  const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
+  if (!programData.empty()) {
+    return std::filesystem::path(programData) / L"FenrirAgent" / L"runtime";
+  }
+
+  return std::filesystem::current_path() / L"runtime";
+}
+
+std::filesystem::path ResolveLocalApprovalQueuePath() {
+  return ResolveLocalApprovalRuntimeRoot() / kLocalApprovalQueueFileName;
+}
+
+std::filesystem::path ResolveLocalApprovalLedgerPath() {
+  return ResolveLocalApprovalRuntimeRoot() / kLocalApprovalLedgerFileName;
+}
+
+std::size_t CountToken(const std::string& value, const std::string& token) {
+  if (token.empty() || value.empty()) {
+    return 0;
+  }
+
+  std::size_t count = 0;
+  std::size_t position = 0;
+  while ((position = value.find(token, position)) != std::string::npos) {
+    ++count;
+    position += token.size();
+  }
+
+  return count;
+}
+
+std::size_t CountTokenInFile(const std::filesystem::path& path, const std::string& token) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    return 0;
+  }
+
+  const std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  return CountToken(content, token);
+}
+
+std::size_t CountLinesInFile(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    return 0;
+  }
+
+  std::size_t count = 0;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!line.empty()) {
+      ++count;
+    }
+  }
+
+  return count;
+}
+
+bool ContainsInsensitive(std::wstring value, std::wstring token) {
+  if (value.empty() || token.empty()) {
+    return false;
+  }
+
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  std::transform(token.begin(), token.end(), token.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value.find(token) != std::wstring::npos;
 }
 
 std::uintmax_t MegabytesToBytes(const int megabytes) {
@@ -261,17 +373,192 @@ std::wstring BuildSupportBundleManifest(const AgentConfig& config, const AgentSt
   const auto evidence = database.ListEvidenceRecords(50);
   const auto scans = database.ListScanHistory(50);
   const auto updates = database.ListUpdateJournal(20);
+  const auto updateHistory = database.ListUpdateJournal(200);
   const auto patchHistory = database.ListPatchHistoryRecords(50);
   const auto softwarePatches = database.ListSoftwarePatchRecords(50);
   const auto windowsUpdates = database.ListWindowsUpdateRecords(50);
   const auto threatIntel = database.ListThreatIntelRecords(50);
   const auto exclusionPolicy = database.ListExclusionPolicyRecords(50);
   const auto quarantineApprovals = database.ListQuarantineApprovalRecords(50);
+  PatchPolicyRecord patchPolicy{};
+  const auto patchPolicyLoaded = database.LoadPatchPolicy(patchPolicy);
+  const auto localAdminBaseline = database.ListLatestLocalAdminBaselineSnapshot(512);
+  const auto householdRolePolicy = QueryHouseholdRolePolicySnapshot();
+  std::wstring householdRoleValidationError;
+  const auto householdRolePolicyValid =
+      ValidateHouseholdRolePolicySnapshot(householdRolePolicy, &householdRoleValidationError);
+  const auto breakGlassEnabled = QueryBreakGlassModeEnabled();
+  const auto runtimePathValidation = ValidateRuntimePaths(config);
+  const auto runtimeTrustValidation = ValidateRuntimeTrust(config, ResolveInstallRootForConfig(config));
+  const auto referenceTimestamp = CurrentUtcTimestamp();
+
+  const auto pamRequestPath = ResolvePamRequestPath(config);
+  const auto pamAuditPath = ResolvePamAuditPath(config);
+  std::error_code postureError;
+  const auto pamRequestRootReady =
+      std::filesystem::exists(pamRequestPath.parent_path(), postureError) && !postureError;
+  postureError.clear();
+  const auto pamAuditRootReady =
+      std::filesystem::exists(pamAuditPath.parent_path(), postureError) && !postureError;
+  postureError.clear();
+  const auto pendingPamRequestCount =
+      std::filesystem::exists(pamRequestPath, postureError) && !postureError ? 1u : 0u;
+  const auto pamApprovedCount = CountTokenInFile(pamAuditPath, "\"decision\":\"approved\"");
+  const auto pamDeniedCount = CountTokenInFile(pamAuditPath, "\"decision\":\"denied\"");
+
+  const auto localApprovalQueuePath = ResolveLocalApprovalQueuePath();
+  const auto localApprovalLedgerPath = ResolveLocalApprovalLedgerPath();
+  const auto pendingLocalApprovalRequestCount =
+      CountTokenInFile(localApprovalQueuePath, "\"status\":\"pending\"");
+  const auto localApprovalLedgerEntries = CountLinesInFile(localApprovalLedgerPath);
+  const auto localApprovalApprovedCount =
+      CountTokenInFile(localApprovalLedgerPath, "\"decision\":\"approved");
+  const auto localApprovalRejectedCount =
+      CountTokenInFile(localApprovalLedgerPath, "\"decision\":\"rejected");
+
+  std::size_t localAdminProtectedMemberCount = 0;
+  std::size_t localAdminManagedCandidateCount = 0;
+  for (const auto& member : localAdminBaseline) {
+    if (member.protectedMember) {
+      ++localAdminProtectedMemberCount;
+    }
+    if (member.managedCandidate) {
+      ++localAdminManagedCandidateCount;
+    }
+  }
+
+  std::set<std::wstring> threatIntelProviders;
+  std::size_t threatIntelSignedPackCount = 0;
+  std::size_t threatIntelLocalOnlyCount = 0;
+  std::size_t threatIntelExpiredCount = 0;
+  for (const auto& record : threatIntel) {
+    if (record.signedPack) {
+      ++threatIntelSignedPackCount;
+    }
+    if (record.localOnly) {
+      ++threatIntelLocalOnlyCount;
+    }
+    if (!record.expiresAt.empty() && record.expiresAt <= referenceTimestamp) {
+      ++threatIntelExpiredCount;
+    }
+
+    if (!record.provider.empty()) {
+      auto providerKey = record.provider;
+      std::transform(providerKey.begin(), providerKey.end(), providerKey.begin(),
+                     [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+      threatIntelProviders.insert(std::move(providerKey));
+    }
+  }
+
+  std::size_t windowsPendingCount = 0;
+  std::size_t windowsFailureCount = 0;
+  for (const auto& record : windowsUpdates) {
+    if (!record.installed || ContainsInsensitive(record.status, L"pending")) {
+      ++windowsPendingCount;
+    }
+
+    if (!record.failureCode.empty() || ContainsInsensitive(record.status, L"fail")) {
+      ++windowsFailureCount;
+    }
+  }
+
+  std::size_t softwareHighRiskCount = 0;
+  std::size_t softwareManualOnlyCount = 0;
+  std::size_t softwareUnsupportedCount = 0;
+  std::size_t softwareRebootRequiredCount = 0;
+  for (const auto& record : softwarePatches) {
+    if (record.highRisk) {
+      ++softwareHighRiskCount;
+    }
+    if (record.manualOnly) {
+      ++softwareManualOnlyCount;
+    }
+    if (!record.supported) {
+      ++softwareUnsupportedCount;
+    }
+    if (record.rebootRequired) {
+      ++softwareRebootRequiredCount;
+    }
+  }
+
+  std::size_t patchFailureCount = 0;
+  std::size_t patchRebootRequiredCount = 0;
+  for (const auto& record : patchHistory) {
+    if (!record.errorCode.empty() || ContainsInsensitive(record.status, L"fail")) {
+      ++patchFailureCount;
+    }
+    if (record.rebootRequired) {
+      ++patchRebootRequiredCount;
+    }
+  }
+
+  std::size_t exclusionActiveCount = 0;
+  std::size_t exclusionDangerousCount = 0;
+  std::size_t exclusionApprovedCount = 0;
+  std::size_t exclusionPendingApprovalCount = 0;
+  std::size_t exclusionExpiredCount = 0;
+  for (const auto& record : exclusionPolicy) {
+    if (record.dangerous) {
+      ++exclusionDangerousCount;
+    }
+    if (record.approved) {
+      ++exclusionApprovedCount;
+    } else {
+      ++exclusionPendingApprovalCount;
+    }
+    if (!record.expiresAt.empty() && record.expiresAt <= referenceTimestamp) {
+      ++exclusionExpiredCount;
+    }
+    if (!ContainsInsensitive(record.state, L"removed") && !ContainsInsensitive(record.state, L"revoked") &&
+        !ContainsInsensitive(record.state, L"expired")) {
+      ++exclusionActiveCount;
+    }
+  }
+
+  std::size_t quarantineApprovalApprovedCount = 0;
+  std::size_t quarantineApprovalDeniedCount = 0;
+  std::size_t quarantineApprovalPendingCount = 0;
+  for (const auto& record : quarantineApprovals) {
+    if (ContainsInsensitive(record.decision, L"approved") || ContainsInsensitive(record.decision, L"allow")) {
+      ++quarantineApprovalApprovedCount;
+      continue;
+    }
+
+    if (ContainsInsensitive(record.decision, L"denied") || ContainsInsensitive(record.decision, L"rejected")) {
+      ++quarantineApprovalDeniedCount;
+      continue;
+    }
+
+    ++quarantineApprovalPendingCount;
+  }
+
+  std::size_t updateFailureCount = 0;
+  std::size_t updateRollbackCount = 0;
+  std::size_t updatePendingRestartCount = 0;
+  std::size_t releaseGateBlockCount = 0;
+  for (const auto& record : updateHistory) {
+    if (ContainsInsensitive(record.status, L"failed")) {
+      ++updateFailureCount;
+    }
+    if (ContainsInsensitive(record.status, L"rolled_back")) {
+      ++updateRollbackCount;
+    }
+    if (ContainsInsensitive(record.status, L"pending_restart")) {
+      ++updatePendingRestartCount;
+    }
+    if (ContainsInsensitive(record.resultJson, L"promotion gate") ||
+        ContainsInsensitive(record.resultJson, L"promotion threshold")) {
+      ++releaseGateBlockCount;
+    }
+  }
+
   RebootCoordinatorRecord reboot{};
   database.LoadRebootCoordinator(reboot);
 
   const WscCoexistenceManager wscManager;
   const auto wsc = wscManager.CaptureSnapshot();
+  const auto latestUpdateStatus = updateHistory.empty() ? std::wstring() : updateHistory.front().status;
+  const auto latestUpdateTargetVersion = updateHistory.empty() ? std::wstring() : updateHistory.front().targetVersion;
 
   std::wstring json = L"{";
   json += L"\"formatVersion\":\"fenrir-support-bundle-v1\",";
@@ -308,6 +595,82 @@ std::wstring BuildSupportBundleManifest(const AgentConfig& config, const AgentSt
   json += L"\"threatIntel\":" + std::to_wstring(threatIntel.size()) + L",";
   json += L"\"exclusionPolicy\":" + std::to_wstring(exclusionPolicy.size()) + L",";
   json += L"\"quarantineApprovals\":" + std::to_wstring(quarantineApprovals.size()) + L"},";
+  json += L"\"posture\":{";
+  json += L"\"pamAdmin\":{";
+  json += L"\"pamHealthState\":" + JsonString(pamRequestRootReady && pamAuditRootReady ? L"healthy" : L"degraded") + L",";
+  json += L"\"pendingPamRequestCount\":" + std::to_wstring(pendingPamRequestCount) + L",";
+  json += L"\"pamApprovedCount\":" + std::to_wstring(pamApprovedCount) + L",";
+  json += L"\"pamDeniedCount\":" + std::to_wstring(pamDeniedCount) + L",";
+  json += L"\"breakGlassEnabled\":" + JsonBool(breakGlassEnabled) + L",";
+  json += L"\"ownerSidConfigured\":" + JsonBool(!householdRolePolicy.ownerSid.empty()) + L",";
+  json += L"\"trustedHouseholdSidCount\":" + std::to_wstring(householdRolePolicy.trustedHouseholdSids.size()) + L",";
+  json += L"\"restrictedHouseholdSidCount\":" + std::to_wstring(householdRolePolicy.restrictedHouseholdSids.size()) + L",";
+  json += L"\"householdPolicyValid\":" + JsonBool(householdRolePolicyValid) + L",";
+  json += L"\"householdPolicyValidationError\":" + JsonString(householdRoleValidationError) + L",";
+  json += L"\"localAdminBaselineCount\":" + std::to_wstring(localAdminBaseline.size()) + L",";
+  json += L"\"localAdminProtectedMemberCount\":" + std::to_wstring(localAdminProtectedMemberCount) + L",";
+  json += L"\"localAdminManagedCandidateCount\":" + std::to_wstring(localAdminManagedCandidateCount) + L",";
+  json += L"\"pendingLocalApprovalRequestCount\":" + std::to_wstring(pendingLocalApprovalRequestCount) + L",";
+  json += L"\"localApprovalLedgerEntries\":" + std::to_wstring(localApprovalLedgerEntries) + L",";
+  json += L"\"localApprovalApprovedCount\":" + std::to_wstring(localApprovalApprovedCount) + L",";
+  json += L"\"localApprovalRejectedCount\":" + std::to_wstring(localApprovalRejectedCount) + L"},";
+  json += L"\"threatIntel\":{";
+  json += L"\"cachedIndicatorCount\":" + std::to_wstring(threatIntel.size()) + L",";
+  json += L"\"providerCount\":" + std::to_wstring(threatIntelProviders.size()) + L",";
+  json += L"\"signedPackCount\":" + std::to_wstring(threatIntelSignedPackCount) + L",";
+  json += L"\"localOnlyCount\":" + std::to_wstring(threatIntelLocalOnlyCount) + L",";
+  json += L"\"expiredIndicatorCount\":" + std::to_wstring(threatIntelExpiredCount) + L"},";
+  json += L"\"patch\":{";
+  json += L"\"patchPolicyLoaded\":" + JsonBool(patchPolicyLoaded) + L",";
+  json += L"\"policyId\":" + JsonString(patchPolicy.policyId) + L",";
+  json += L"\"policyPaused\":" + JsonBool(patchPolicy.paused) + L",";
+  json += L"\"policySilentOnly\":" + JsonBool(patchPolicy.silentOnly) + L",";
+  json += L"\"policyAllowWinget\":" + JsonBool(patchPolicy.allowWinget) + L",";
+  json += L"\"policyAllowRecipes\":" + JsonBool(patchPolicy.allowRecipes) + L",";
+  json += L"\"windowsUpdateCount\":" + std::to_wstring(windowsUpdates.size()) + L",";
+  json += L"\"windowsPendingCount\":" + std::to_wstring(windowsPendingCount) + L",";
+  json += L"\"windowsFailureCount\":" + std::to_wstring(windowsFailureCount) + L",";
+  json += L"\"softwarePatchCount\":" + std::to_wstring(softwarePatches.size()) + L",";
+  json += L"\"softwareHighRiskCount\":" + std::to_wstring(softwareHighRiskCount) + L",";
+  json += L"\"softwareManualOnlyCount\":" + std::to_wstring(softwareManualOnlyCount) + L",";
+  json += L"\"softwareUnsupportedCount\":" + std::to_wstring(softwareUnsupportedCount) + L",";
+  json += L"\"softwareRebootRequiredCount\":" + std::to_wstring(softwareRebootRequiredCount) + L",";
+  json += L"\"patchHistoryCount\":" + std::to_wstring(patchHistory.size()) + L",";
+  json += L"\"patchFailureCount\":" + std::to_wstring(patchFailureCount) + L",";
+  json += L"\"patchRebootRequiredCount\":" + std::to_wstring(patchRebootRequiredCount) + L"},";
+  json += L"\"exclusionGovernance\":{";
+  json += L"\"policyRecordCount\":" + std::to_wstring(exclusionPolicy.size()) + L",";
+  json += L"\"activeRecordCount\":" + std::to_wstring(exclusionActiveCount) + L",";
+  json += L"\"dangerousRecordCount\":" + std::to_wstring(exclusionDangerousCount) + L",";
+  json += L"\"approvedRecordCount\":" + std::to_wstring(exclusionApprovedCount) + L",";
+  json += L"\"pendingApprovalCount\":" + std::to_wstring(exclusionPendingApprovalCount) + L",";
+  json += L"\"expiredRecordCount\":" + std::to_wstring(exclusionExpiredCount) + L",";
+  json += L"\"configuredScanExclusionPathCount\":" + std::to_wstring(config.scanExcludedPaths.size()) + L",";
+  json += L"\"quarantineApprovalCount\":" + std::to_wstring(quarantineApprovals.size()) + L",";
+  json += L"\"quarantineApprovalApprovedCount\":" + std::to_wstring(quarantineApprovalApprovedCount) + L",";
+  json += L"\"quarantineApprovalDeniedCount\":" + std::to_wstring(quarantineApprovalDeniedCount) + L",";
+  json += L"\"quarantineApprovalPendingCount\":" + std::to_wstring(quarantineApprovalPendingCount) + L"},";
+  json += L"\"recoveryReleaseGate\":{";
+  json += L"\"runtimePathsTrusted\":" + JsonBool(runtimePathValidation.trusted) + L",";
+  json += L"\"runtimePathsMessage\":" + JsonString(runtimePathValidation.message) + L",";
+  json += L"\"runtimeTrustValidated\":" + JsonBool(runtimeTrustValidation.trusted) + L",";
+  json += L"\"runtimeTrustMessage\":" + JsonString(runtimeTrustValidation.message) + L",";
+  json += L"\"registryRuntimeMarkerPresent\":" + JsonBool(runtimeTrustValidation.registryRuntimeMarkerPresent) + L",";
+  json += L"\"registryRuntimeMatches\":" + JsonBool(runtimeTrustValidation.registryRuntimeMatches) + L",";
+  json += L"\"registryInstallMatches\":" + JsonBool(runtimeTrustValidation.registryInstallMatches) + L",";
+  json += L"\"serviceBinarySigned\":" + JsonBool(runtimeTrustValidation.serviceBinarySigned) + L",";
+  json += L"\"amsiProviderSigned\":" + JsonBool(runtimeTrustValidation.amsiProviderSigned) + L",";
+  json += L"\"requireSignedBinaries\":" + JsonBool(runtimeTrustValidation.requireSignedBinaries) + L",";
+  json += L"\"signatureWarning\":" + JsonBool(runtimeTrustValidation.signatureWarning) + L",";
+  json += L"\"enforceReleasePromotionGates\":" + JsonBool(config.enforceReleasePromotionGates) + L",";
+  json += L"\"updateHistoryCount\":" + std::to_wstring(updateHistory.size()) + L",";
+  json += L"\"updateFailureCount\":" + std::to_wstring(updateFailureCount) + L",";
+  json += L"\"updateRollbackCount\":" + std::to_wstring(updateRollbackCount) + L",";
+  json += L"\"updatePendingRestartCount\":" + std::to_wstring(updatePendingRestartCount) + L",";
+  json += L"\"releaseGateBlockCount\":" + std::to_wstring(releaseGateBlockCount) + L",";
+  json += L"\"latestUpdateStatus\":" + JsonString(latestUpdateStatus) + L",";
+  json += L"\"latestUpdateTargetVersion\":" + JsonString(latestUpdateTargetVersion) + L"}";
+  json += L"},";
   json += L"\"reboot\":{";
   json += L"\"required\":" + JsonBool(reboot.rebootRequired) + L",";
   json += L"\"reasons\":" + JsonString(reboot.rebootReasons) + L",";

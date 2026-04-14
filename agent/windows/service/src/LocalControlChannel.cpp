@@ -69,6 +69,7 @@ bool RequiresSessionApproval(const std::wstring& type) {
          type == L"local.breakglass.disable" || type == L"local.admin.audit" ||
          type == L"local.admin.reduction.plan" || type == L"local.admin.reduction.apply" ||
          type == L"local.admin.reduction.rollback" || type == L"local.household.roles.audit" ||
+         type == L"intel.pack.ingest" ||
          type == L"local.household.roles.plan" || type == L"local.household.roles.apply";
 }
 
@@ -220,6 +221,14 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
     return LocalAction::PatchRefresh;
   }
 
+  if (type == L"intel.lookup") {
+    return LocalAction::ViewStatus;
+  }
+
+  if (type == L"intel.pack.ingest") {
+    return LocalAction::StartServiceAction;
+  }
+
   if (type == L"support.bundle.export" || type == L"support.bundle.export.full" || type == L"storage.maintenance.run") {
     return LocalAction::ExportSupportBundle;
   }
@@ -250,14 +259,17 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
 }
 
 bool IsSupportedLocalCommand(const std::wstring& type) {
-  static const std::array<const wchar_t*, 21> kSupportedTypes = {
+  static const std::array<const wchar_t*, 24> kSupportedTypes = {
       L"local.auth.session.begin",
       L"quarantine.restore",
       L"quarantine.delete",
+      L"software.update.search",
       L"patch.scan",
       L"patch.software.install",
       L"patch.windows.install",
       L"patch.cycle.run",
+      L"intel.lookup",
+      L"intel.pack.ingest",
       L"support.bundle.export",
       L"support.bundle.export.full",
       L"storage.maintenance.run",

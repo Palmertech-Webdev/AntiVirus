@@ -17,3 +17,5 @@ tmp-phase2-corpora/
 tmp-phase2-exitcriteria/
 tmp-phase3-corpora/
 tmp-phase3-exitcriteria/
+tmp-*
+probe-*
