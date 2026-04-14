@@ -76,6 +76,17 @@ struct BlockedSoftwareRule {
   std::wstring blockedAt;
 };
 
+struct LocalAdminBaselineMemberRecord {
+  std::wstring baselineId;
+  std::wstring capturedAt;
+  std::wstring capturedBy;
+  std::wstring accountName;
+  std::wstring sid;
+  std::wstring memberClass;
+  bool protectedMember{false};
+  bool managedCandidate{false};
+};
+
 class RuntimeDatabase {
  public:
   explicit RuntimeDatabase(std::filesystem::path databasePath);
@@ -127,6 +138,12 @@ class RuntimeDatabase {
   std::vector<ExclusionPolicyRecord> ListExclusionPolicyRecords(std::size_t limit = 200) const;
   void UpsertQuarantineApprovalRecord(const QuarantineApprovalRecord& record) const;
   std::vector<QuarantineApprovalRecord> ListQuarantineApprovalRecords(std::size_t limit = 200) const;
+  void ReplaceLocalAdminBaselineSnapshot(const std::wstring& baselineId, const std::wstring& capturedAt,
+                                         const std::wstring& capturedBy,
+                                         const std::vector<LocalAdminBaselineMemberRecord>& members) const;
+  std::vector<LocalAdminBaselineMemberRecord> ListLocalAdminBaselineSnapshot(const std::wstring& baselineId,
+                                                                              std::size_t limit = 512) const;
+  std::vector<LocalAdminBaselineMemberRecord> ListLatestLocalAdminBaselineSnapshot(std::size_t limit = 512) const;
 
  private:
   std::filesystem::path databasePath_;

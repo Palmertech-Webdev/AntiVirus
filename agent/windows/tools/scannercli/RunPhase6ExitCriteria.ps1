@@ -48,7 +48,7 @@ if ([string]::IsNullOrWhiteSpace($jsonText)) {
 }
 
 try {
-  $selfTestReport = $jsonText | ConvertFrom-Json
+  $selfTestReport = ConvertFrom-Json -InputObject $jsonText
 } catch {
   throw "Service returned non-JSON self-test output.`nOutput: $jsonText"
 }
@@ -112,6 +112,17 @@ foreach ($criterion in $criteria) {
 }
 $allCriteriaPass = $failedCriteriaCount -eq 0
 $reportPath = Join-Path $workingRootAbsolute "phase6-exitcriteria-report.json"
+$additionalPhase6Checks = @()
+foreach ($check in $phase6UnexpectedChecks) {
+  $additionalPhase6Checks += [PSCustomObject]@{
+    id = "$($check.id)"
+    name = "$($check.name)"
+    status = "$($check.status)"
+    details = "$($check.details)"
+    remediation = "$($check.remediation)"
+  }
+}
+
 $report = [PSCustomObject]@{
   generatedAtUtc = [DateTime]::UtcNow.ToString("o")
   servicePath = $serviceAbsolute
@@ -119,20 +130,17 @@ $report = [PSCustomObject]@{
   selfTestOverallStatus = "$($selfTestReport.overallStatus)"
   requiredCheckIds = $RequiredCheckIds
   criteria = $criteria
-  additionalPhase6Checks = @($phase6UnexpectedChecks | ForEach-Object {
-      [PSCustomObject]@{
-        id = "$($_.id)"
-        name = "$($_.name)"
-        status = "$($_.status)"
-        details = "$($_.details)"
-        remediation = "$($_.remediation)"
-      }
-    })
+  additionalPhase6Checks = $additionalPhase6Checks
   allCriteriaPass = $allCriteriaPass
 }
 
-$report | ConvertTo-Json -Depth 8 | Set-Content -Path $reportPath -Encoding UTF8
-$criteria | Format-Table -AutoSize
+$reportJson = ConvertTo-Json -InputObject $report -Depth 8
+Set-Content -Path $reportPath -Encoding UTF8 -Value $reportJson
+
+foreach ($criterion in $criteria) {
+  Write-Host ("{0}`t{1}`t{2}" -f "$($criterion.Criterion)", "$($criterion.Status)", "$($criterion.Details)")
+}
+
 Write-Host "REPORT_PATH=$reportPath"
 Write-Host ("PHASE6_EXIT_CRITERIA={0}" -f ($(if ($allCriteriaPass) { "PASS" } else { "FAIL" })))
 

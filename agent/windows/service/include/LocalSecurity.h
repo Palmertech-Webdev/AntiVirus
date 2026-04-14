@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace antivirus::agent {
 
@@ -32,11 +33,22 @@ struct LocalActionAuthorization {
   std::wstring reason;
 };
 
+struct HouseholdRolePolicySnapshot {
+  std::wstring ownerSid;
+  std::vector<std::wstring> trustedHouseholdSids;
+  std::vector<std::wstring> restrictedHouseholdSids;
+};
+
 LocalUserRole QueryCurrentLocalUserRole();
 bool IsCurrentUserElevatedAdmin();
 bool IsCurrentTokenElevated();
 std::wstring QueryCurrentUserSid();
 std::wstring QueryConfiguredDeviceOwnerSid();
+HouseholdRolePolicySnapshot QueryHouseholdRolePolicySnapshot();
+bool ValidateHouseholdRolePolicySnapshot(const HouseholdRolePolicySnapshot& snapshot,
+                                         std::wstring* errorMessage = nullptr);
+bool SetHouseholdRolePolicySnapshot(const HouseholdRolePolicySnapshot& snapshot, bool persistOwnerSid,
+                                    std::wstring* errorMessage = nullptr);
 std::wstring LocalUserRoleToString(LocalUserRole role);
 LocalActionAuthorization AuthorizeCurrentUser(LocalAction action);
 bool QueryBreakGlassModeEnabled();

@@ -17,7 +17,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
-constexpr int kRuntimeDatabaseSchemaVersion = 4;
+constexpr int kRuntimeDatabaseSchemaVersion = 5;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -220,6 +220,12 @@ void EnsureBaseSchema(sqlite3* db) {
        " restore_path TEXT, requested_at TEXT NOT NULL, decided_at TEXT, decision TEXT NOT NULL, reason TEXT,"
        " PRIMARY KEY(record_id, action, requested_at)"
        ");"
+      "CREATE TABLE IF NOT EXISTS local_admin_baseline ("
+      " entry_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      " baseline_id TEXT NOT NULL, captured_at TEXT NOT NULL, captured_by TEXT,"
+      " account_name TEXT NOT NULL, sid TEXT, member_class TEXT NOT NULL,"
+      " protected_member INTEGER NOT NULL DEFAULT 0, managed_candidate INTEGER NOT NULL DEFAULT 0"
+      ");"
        "CREATE INDEX IF NOT EXISTS idx_telemetry_queue_queue_id ON telemetry_queue(queue_id);"
        "CREATE INDEX IF NOT EXISTS idx_command_journal_status ON command_journal(status, updated_at);"
        "CREATE INDEX IF NOT EXISTS idx_quarantine_index_status ON quarantine_index(local_status);"
@@ -233,7 +239,9 @@ void EnsureBaseSchema(sqlite3* db) {
        "CREATE INDEX IF NOT EXISTS idx_patch_recipes_name ON patch_recipes(display_name, priority);"
        "CREATE INDEX IF NOT EXISTS idx_threat_intel_lookup ON threat_intelligence_cache(indicator_type, indicator_key, expires_at);"
        "CREATE INDEX IF NOT EXISTS idx_exclusion_policy_state ON exclusion_policy(state, expires_at);"
-       "CREATE INDEX IF NOT EXISTS idx_quarantine_approvals_decision ON quarantine_approvals(decision, requested_at DESC);");
+      "CREATE INDEX IF NOT EXISTS idx_quarantine_approvals_decision ON quarantine_approvals(decision, requested_at DESC);"
+      "CREATE INDEX IF NOT EXISTS idx_local_admin_baseline_group ON local_admin_baseline(baseline_id, captured_at DESC);"
+      "CREATE INDEX IF NOT EXISTS idx_local_admin_baseline_sid ON local_admin_baseline(sid, baseline_id);");
 }
 
 void RunSchemaMigrations(sqlite3* db) {
@@ -256,6 +264,10 @@ void RunSchemaMigrations(sqlite3* db) {
     }
 
     if (currentVersion < 4) {
+      EnsureBaseSchema(db);
+    }
+
+    if (currentVersion < 5) {
       EnsureBaseSchema(db);
     }
 
@@ -1644,6 +1656,129 @@ std::vector<QuarantineApprovalRecord> RuntimeDatabase::ListQuarantineApprovalRec
         .decision = ColumnText(statement.get(), 7),
         .reason = ColumnText(statement.get(), 8)});
   }
+  return records;
+}
+
+void RuntimeDatabase::ReplaceLocalAdminBaselineSnapshot(const std::wstring& baselineId,
+                                                        const std::wstring& capturedAt,
+                                                        const std::wstring& capturedBy,
+                                                        const std::vector<LocalAdminBaselineMemberRecord>& members) const {
+  if (baselineId.empty()) {
+    throw std::runtime_error("local admin baseline id cannot be empty");
+  }
+
+  const auto db = OpenConnection(databasePath_);
+  try {
+    Begin(db.get());
+
+    auto deleteStatement = Prepare(db.get(),
+                                   "DELETE FROM local_admin_baseline WHERE baseline_id=?;");
+    BindText(deleteStatement.get(), 1, baselineId);
+    StepDone(db.get(), deleteStatement.get());
+
+    auto insertStatement = Prepare(
+        db.get(),
+        "INSERT INTO local_admin_baseline("
+        " baseline_id, captured_at, captured_by, account_name, sid, member_class, protected_member, managed_candidate)"
+        " VALUES(?, ?, ?, ?, ?, ?, ?, ?);");
+
+    for (const auto& member : members) {
+      sqlite3_reset(insertStatement.get());
+      sqlite3_clear_bindings(insertStatement.get());
+      BindText(insertStatement.get(), 1, baselineId);
+      BindText(insertStatement.get(), 2, capturedAt.empty() ? member.capturedAt : capturedAt);
+      BindText(insertStatement.get(), 3, capturedBy.empty() ? member.capturedBy : capturedBy);
+      BindText(insertStatement.get(), 4, member.accountName);
+      BindText(insertStatement.get(), 5, member.sid);
+      BindText(insertStatement.get(), 6, member.memberClass);
+      sqlite3_bind_int(insertStatement.get(), 7, member.protectedMember ? 1 : 0);
+      sqlite3_bind_int(insertStatement.get(), 8, member.managedCandidate ? 1 : 0);
+      StepDone(db.get(), insertStatement.get());
+    }
+
+    Commit(db.get());
+  } catch (...) {
+    Rollback(db.get());
+    throw;
+  }
+}
+
+std::vector<LocalAdminBaselineMemberRecord> RuntimeDatabase::ListLocalAdminBaselineSnapshot(
+    const std::wstring& baselineId, const std::size_t limit) const {
+  if (baselineId.empty()) {
+    return {};
+  }
+
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT baseline_id, captured_at, captured_by, account_name, sid, member_class, protected_member, managed_candidate"
+      " FROM local_admin_baseline WHERE baseline_id=?"
+      " ORDER BY account_name COLLATE NOCASE ASC, sid COLLATE NOCASE ASC LIMIT ?;");
+  BindText(statement.get(), 1, baselineId);
+  sqlite3_bind_int64(statement.get(), 2, static_cast<sqlite3_int64>(limit));
+
+  std::vector<LocalAdminBaselineMemberRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing local admin baseline snapshot failed");
+    }
+
+    records.push_back(LocalAdminBaselineMemberRecord{
+        .baselineId = ColumnText(statement.get(), 0),
+        .capturedAt = ColumnText(statement.get(), 1),
+        .capturedBy = ColumnText(statement.get(), 2),
+        .accountName = ColumnText(statement.get(), 3),
+        .sid = ColumnText(statement.get(), 4),
+        .memberClass = ColumnText(statement.get(), 5),
+        .protectedMember = sqlite3_column_int(statement.get(), 6) != 0,
+        .managedCandidate = sqlite3_column_int(statement.get(), 7) != 0,
+    });
+  }
+
+  return records;
+}
+
+std::vector<LocalAdminBaselineMemberRecord> RuntimeDatabase::ListLatestLocalAdminBaselineSnapshot(
+    const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT baseline_id, captured_at, captured_by, account_name, sid, member_class, protected_member, managed_candidate"
+      " FROM local_admin_baseline"
+      " WHERE baseline_id=("
+      "   SELECT baseline_id FROM local_admin_baseline"
+      "   ORDER BY captured_at DESC, baseline_id DESC, entry_id DESC LIMIT 1"
+      " )"
+      " ORDER BY account_name COLLATE NOCASE ASC, sid COLLATE NOCASE ASC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<LocalAdminBaselineMemberRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing latest local admin baseline snapshot failed");
+    }
+
+    records.push_back(LocalAdminBaselineMemberRecord{
+        .baselineId = ColumnText(statement.get(), 0),
+        .capturedAt = ColumnText(statement.get(), 1),
+        .capturedBy = ColumnText(statement.get(), 2),
+        .accountName = ColumnText(statement.get(), 3),
+        .sid = ColumnText(statement.get(), 4),
+        .memberClass = ColumnText(statement.get(), 5),
+        .protectedMember = sqlite3_column_int(statement.get(), 6) != 0,
+        .managedCandidate = sqlite3_column_int(statement.get(), 7) != 0,
+    });
+  }
+
   return records;
 }
 

@@ -224,15 +224,27 @@ if ($DriverArtifactRoot) {
 }
 
 $inventory = @()
-Get-ChildItem -LiteralPath $outputRoot -Recurse -File | ForEach-Object {
-    if (-not (Test-PathWithin -Root $buildRoot -Path $_.FullName)) {
-        $relativePath = Get-RelativePath -Root $outputRoot -Path $_.FullName
-        $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        $inventory += [pscustomobject]@{
-            path = $relativePath
-            sizeBytes = $_.Length
-            sha256 = $hash
-        }
+$inventoryCandidates = @()
+foreach ($entry in (Get-ChildItem -LiteralPath $outputRoot -Force)) {
+    if (Test-PathWithin -Root $buildRoot -Path $entry.FullName) {
+        continue
+    }
+
+    if ($entry.PSIsContainer) {
+        $inventoryCandidates += Get-ChildItem -LiteralPath $entry.FullName -Recurse -File
+    }
+    else {
+        $inventoryCandidates += $entry
+    }
+}
+
+foreach ($file in $inventoryCandidates) {
+    $relativePath = Get-RelativePath -Root $outputRoot -Path $file.FullName
+    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $inventory += [pscustomobject]@{
+        path = $relativePath
+        sizeBytes = $file.Length
+        sha256 = $hash
     }
 }
 

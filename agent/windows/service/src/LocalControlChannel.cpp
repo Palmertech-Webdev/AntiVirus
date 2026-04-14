@@ -68,7 +68,8 @@ bool RequiresSessionApproval(const std::wstring& type) {
          type == L"local.approval.list" || type == L"local.breakglass.enable" ||
          type == L"local.breakglass.disable" || type == L"local.admin.audit" ||
          type == L"local.admin.reduction.plan" || type == L"local.admin.reduction.apply" ||
-         type == L"local.admin.reduction.rollback";
+         type == L"local.admin.reduction.rollback" || type == L"local.household.roles.audit" ||
+         type == L"local.household.roles.plan" || type == L"local.household.roles.apply";
 }
 
 std::string EscapeRegex(const std::string& value) {
@@ -240,11 +241,16 @@ LocalAction ResolveActionForCommandType(const std::wstring& type) {
     return LocalAction::StartServiceAction;
   }
 
+  if (type == L"local.household.roles.audit" || type == L"local.household.roles.plan" ||
+      type == L"local.household.roles.apply") {
+    return LocalAction::StartServiceAction;
+  }
+
   return LocalAction::ViewStatus;
 }
 
 bool IsSupportedLocalCommand(const std::wstring& type) {
-  static const std::array<const wchar_t*, 18> kSupportedTypes = {
+  static const std::array<const wchar_t*, 21> kSupportedTypes = {
       L"local.auth.session.begin",
       L"quarantine.restore",
       L"quarantine.delete",
@@ -262,7 +268,10 @@ bool IsSupportedLocalCommand(const std::wstring& type) {
       L"local.admin.audit",
       L"local.admin.reduction.plan",
       L"local.admin.reduction.apply",
-      L"local.admin.reduction.rollback"};
+      L"local.admin.reduction.rollback",
+      L"local.household.roles.audit",
+      L"local.household.roles.plan",
+      L"local.household.roles.apply"};
 
   return std::any_of(kSupportedTypes.begin(), kSupportedTypes.end(),
                      [&type](const auto* candidate) { return type == candidate; });

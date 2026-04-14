@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace antivirus::agent {
@@ -18,6 +19,7 @@ constexpr wchar_t kOwnerSidValueName[] = L"DeviceOwnerSid";
 constexpr wchar_t kBreakGlassEnabledValueName[] = L"BreakGlassEnabled";
 constexpr wchar_t kTrustedHouseholdSidsValueName[] = L"HouseholdTrustedSids";
 constexpr wchar_t kRestrictedHouseholdSidsValueName[] = L"HouseholdRestrictedSids";
+constexpr std::size_t kMaxHouseholdRoleSidEntries = 256;
 
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -63,6 +65,165 @@ std::vector<std::wstring> SplitSidList(const std::wstring& value) {
   }
 
   return values;
+}
+
+std::wstring TrimSidToken(std::wstring value) {
+  value.erase(std::remove_if(value.begin(), value.end(),
+                             [](const wchar_t ch) {
+                               return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+                             }),
+              value.end());
+  return value;
+}
+
+std::optional<std::wstring> CanonicalizeSidToken(const std::wstring& sidToken) {
+  const auto trimmed = TrimSidToken(sidToken);
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+
+  PSID parsedSid = nullptr;
+  if (ConvertStringSidToSidW(trimmed.c_str(), &parsedSid) == FALSE || parsedSid == nullptr) {
+    return std::nullopt;
+  }
+
+  LPWSTR canonicalSid = nullptr;
+  if (ConvertSidToStringSidW(parsedSid, &canonicalSid) == FALSE || canonicalSid == nullptr) {
+    LocalFree(parsedSid);
+    return std::nullopt;
+  }
+
+  std::wstring normalized(canonicalSid);
+  LocalFree(canonicalSid);
+  LocalFree(parsedSid);
+  return normalized;
+}
+
+std::vector<std::wstring> NormalizeSidTokens(const std::vector<std::wstring>& values) {
+  std::vector<std::wstring> normalized;
+  std::set<std::wstring> dedupe;
+  for (const auto& value : values) {
+    const auto canonicalSid = CanonicalizeSidToken(value);
+    if (!canonicalSid.has_value()) {
+      continue;
+    }
+
+    const auto sidLower = ToLowerCopy(*canonicalSid);
+    if (dedupe.insert(sidLower).second) {
+      normalized.push_back(*canonicalSid);
+    }
+  }
+
+  return normalized;
+}
+
+std::wstring JoinSidList(const std::vector<std::wstring>& values) {
+  std::wstring joined;
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    if (index != 0) {
+      joined += L";";
+    }
+    joined += values[index];
+  }
+
+  return joined;
+}
+
+bool WriteRegistryStringToRoot(const HKEY hive, const wchar_t* rootPath, const wchar_t* valueName,
+                               const std::wstring& value);
+
+bool WriteRegistryValueWithFallback(const HKEY hive, const wchar_t* valueName, const std::wstring& value) {
+  return WriteRegistryStringToRoot(hive, kRegistryRoot, valueName, value) ||
+         WriteRegistryStringToRoot(hive, kLegacyRegistryRoot, valueName, value);
+}
+
+bool NormalizeHouseholdRolePolicy(const HouseholdRolePolicySnapshot& input, const bool requireOwnerSid,
+                                  HouseholdRolePolicySnapshot* normalized, std::wstring* errorMessage) {
+  if (normalized == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir household role propagation did not receive a destination snapshot.";
+    }
+    return false;
+  }
+
+  normalized->ownerSid.clear();
+  normalized->trustedHouseholdSids.clear();
+  normalized->restrictedHouseholdSids.clear();
+
+  if (input.trustedHouseholdSids.size() > kMaxHouseholdRoleSidEntries ||
+      input.restrictedHouseholdSids.size() > kMaxHouseholdRoleSidEntries) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir household role policy exceeds the maximum supported SID entry count.";
+    }
+    return false;
+  }
+
+  if (!TrimSidToken(input.ownerSid).empty()) {
+    const auto canonicalOwner = CanonicalizeSidToken(input.ownerSid);
+    if (!canonicalOwner.has_value()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir household role policy owner SID is not a valid Windows SID.";
+      }
+      return false;
+    }
+
+    normalized->ownerSid = *canonicalOwner;
+  } else if (requireOwnerSid) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir requires a valid owner SID before applying household role propagation.";
+    }
+    return false;
+  }
+
+  std::set<std::wstring> trustedLower;
+  for (const auto& sid : input.trustedHouseholdSids) {
+    const auto canonicalSid = CanonicalizeSidToken(sid);
+    if (!canonicalSid.has_value()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir household trusted SID list contains an invalid SID entry.";
+      }
+      return false;
+    }
+
+    const auto sidLower = ToLowerCopy(*canonicalSid);
+    if (trustedLower.insert(sidLower).second) {
+      normalized->trustedHouseholdSids.push_back(*canonicalSid);
+    }
+  }
+
+  std::set<std::wstring> restrictedLower;
+  for (const auto& sid : input.restrictedHouseholdSids) {
+    const auto canonicalSid = CanonicalizeSidToken(sid);
+    if (!canonicalSid.has_value()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir household restricted SID list contains an invalid SID entry.";
+      }
+      return false;
+    }
+
+    const auto sidLower = ToLowerCopy(*canonicalSid);
+    if (restrictedLower.insert(sidLower).second) {
+      normalized->restrictedHouseholdSids.push_back(*canonicalSid);
+    }
+  }
+
+  for (const auto& sidLower : trustedLower) {
+    if (restrictedLower.find(sidLower) != restrictedLower.end()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir household role policy cannot place the same SID in both trusted and restricted sets.";
+      }
+      return false;
+    }
+  }
+
+  if (!normalized->ownerSid.empty() && restrictedLower.find(ToLowerCopy(normalized->ownerSid)) != restrictedLower.end()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Fenrir household role policy cannot place the owner SID into the restricted household set.";
+    }
+    return false;
+  }
+
+  return true;
 }
 
 bool OpenEffectiveToken(const DWORD accessMask, HANDLE* token) {
@@ -163,12 +324,12 @@ std::vector<std::wstring> ReadHouseholdSidList(const wchar_t* valueName) {
   for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
     const auto list = ReadRegistryStringFromRoot(hive, kRegistryRoot, valueName);
     if (!list.empty()) {
-      return SplitSidList(list);
+      return NormalizeSidTokens(SplitSidList(list));
     }
 
     const auto legacyList = ReadRegistryStringFromRoot(hive, kLegacyRegistryRoot, valueName);
     if (!legacyList.empty()) {
-      return SplitSidList(legacyList);
+      return NormalizeSidTokens(SplitSidList(legacyList));
     }
   }
 
@@ -339,6 +500,56 @@ std::wstring QueryCurrentUserSid() {
 
 std::wstring QueryConfiguredDeviceOwnerSid() {
   return ReadDeviceOwnerSid();
+}
+
+HouseholdRolePolicySnapshot QueryHouseholdRolePolicySnapshot() {
+  HouseholdRolePolicySnapshot snapshot{};
+  snapshot.ownerSid = ReadDeviceOwnerSid();
+  snapshot.trustedHouseholdSids = ReadHouseholdSidList(kTrustedHouseholdSidsValueName);
+  snapshot.restrictedHouseholdSids = ReadHouseholdSidList(kRestrictedHouseholdSidsValueName);
+  return snapshot;
+}
+
+bool ValidateHouseholdRolePolicySnapshot(const HouseholdRolePolicySnapshot& snapshot, std::wstring* errorMessage) {
+  HouseholdRolePolicySnapshot normalized;
+  return NormalizeHouseholdRolePolicy(snapshot, false, &normalized, errorMessage);
+}
+
+bool SetHouseholdRolePolicySnapshot(const HouseholdRolePolicySnapshot& snapshot, const bool persistOwnerSid,
+                                    std::wstring* errorMessage) {
+  HouseholdRolePolicySnapshot normalized;
+  if (!NormalizeHouseholdRolePolicy(snapshot, persistOwnerSid, &normalized, errorMessage)) {
+    return false;
+  }
+
+  const auto trustedJoined = JoinSidList(normalized.trustedHouseholdSids);
+  const auto restrictedJoined = JoinSidList(normalized.restrictedHouseholdSids);
+  auto trustedPersisted = false;
+  auto restrictedPersisted = false;
+  auto ownerPersisted = !persistOwnerSid;
+
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    if (!trustedPersisted) {
+      trustedPersisted = WriteRegistryValueWithFallback(hive, kTrustedHouseholdSidsValueName, trustedJoined);
+    }
+
+    if (!restrictedPersisted) {
+      restrictedPersisted = WriteRegistryValueWithFallback(hive, kRestrictedHouseholdSidsValueName, restrictedJoined);
+    }
+
+    if (persistOwnerSid && !ownerPersisted) {
+      ownerPersisted = WriteRegistryValueWithFallback(hive, kOwnerSidValueName, normalized.ownerSid);
+    }
+  }
+
+  if (trustedPersisted && restrictedPersisted && ownerPersisted) {
+    return true;
+  }
+
+  if (errorMessage != nullptr) {
+    *errorMessage = L"Fenrir could not persist one or more household role policy values to local registry policy roots.";
+  }
+  return false;
 }
 
 std::wstring LocalUserRoleToString(const LocalUserRole role) {

@@ -5,10 +5,13 @@ param(
   [string[]]$RequiredCheckIds = @(
     "phase5_pam_request_queue_visibility",
     "phase5_pam_audit_visibility",
-    "phase5_admin_membership_audit"
+    "phase5_admin_membership_audit",
+    "phase5_household_role_policy_governance",
+    "phase5_admin_baseline_persistence"
   ),
   [string[]]$WarningAllowedCheckIds = @(
-    "phase5_admin_membership_audit"
+    "phase5_admin_membership_audit",
+    "phase5_household_role_policy_governance"
   )
 )
 

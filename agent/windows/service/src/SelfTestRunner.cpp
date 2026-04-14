@@ -21,6 +21,7 @@
 #include "CryptoUtils.h"
 #include "EndpointClient.h"
 #include "HardeningManager.h"
+#include "LocalSecurity.h"
 #include "PatchOrchestrator.h"
 #include "RealtimeProtectionBroker.h"
 #include "RuntimeDatabase.h"
@@ -2101,6 +2102,77 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
           }
         }
       }
+
+      const auto householdRolePolicy = QueryHouseholdRolePolicySnapshot();
+      std::wstring householdRolePolicyError;
+      const auto householdRolePolicyValid =
+          ValidateHouseholdRolePolicySnapshot(householdRolePolicy, &householdRolePolicyError);
+      if (!householdRolePolicyValid) {
+        AddCheck(report, L"phase5_household_role_policy_governance",
+                 L"Phase 5 household role propagation governance", SelfTestStatus::Fail,
+                 householdRolePolicyError.empty()
+                     ? L"Fenrir detected an invalid household role policy state while validating local role propagation."
+                     : householdRolePolicyError,
+                 L"Apply local.household.roles.apply with non-overlapping trusted/restricted SID sets and a valid owner SID.");
+      } else if (householdRolePolicy.ownerSid.empty()) {
+        AddCheck(report, L"phase5_household_role_policy_governance",
+                 L"Phase 5 household role propagation governance", SelfTestStatus::Warning,
+                 L"Fenrir validated household role policy SID lists, but owner SID is not configured yet.",
+                 L"Set the owner SID through local.household.roles.apply before enforcing long-lived household role governance.");
+      } else {
+        AddCheck(report, L"phase5_household_role_policy_governance",
+                 L"Phase 5 household role propagation governance", SelfTestStatus::Pass,
+                 L"Fenrir validated household role policy with owner SID and non-overlapping trusted/restricted SID sets (trusted=" +
+                     std::to_wstring(householdRolePolicy.trustedHouseholdSids.size()) +
+                     L", restricted=" + std::to_wstring(householdRolePolicy.restrictedHouseholdSids.size()) + L").");
+      }
+
+      try {
+        RuntimeDatabase phase5Database(phase5Config.runtimeDatabasePath);
+        const auto baselineId = GenerateGuidString();
+        const auto capturedAt = CurrentUtcTimestamp();
+        const std::vector<LocalAdminBaselineMemberRecord> baselineRecords = {
+            LocalAdminBaselineMemberRecord{
+                .baselineId = baselineId,
+                .capturedAt = capturedAt,
+                .capturedBy = L"self-test-phase5",
+                .accountName = L"NT AUTHORITY\\SYSTEM",
+                .sid = L"S-1-5-18",
+                .memberClass = L"service_identity",
+                .protectedMember = true,
+                .managedCandidate = false,
+            },
+            LocalAdminBaselineMemberRecord{
+                .baselineId = baselineId,
+                .capturedAt = capturedAt,
+                .capturedBy = L"self-test-phase5",
+                .accountName = L"SELFTEST\\UnmanagedAdmin",
+                .sid = L"S-1-5-21-123456789-111111111-222222222-1337",
+                .memberClass = L"unmanaged_local_admin",
+                .protectedMember = false,
+                .managedCandidate = true,
+            }};
+
+        phase5Database.ReplaceLocalAdminBaselineSnapshot(baselineId, capturedAt, L"self-test-phase5", baselineRecords);
+        const auto persistedRecords = phase5Database.ListLocalAdminBaselineSnapshot(baselineId);
+        const auto latestRecords = phase5Database.ListLatestLocalAdminBaselineSnapshot();
+
+        if (persistedRecords.size() >= baselineRecords.size() && latestRecords.size() >= baselineRecords.size()) {
+          AddCheck(report, L"phase5_admin_baseline_persistence", L"Phase 5 admin baseline persistence",
+                   SelfTestStatus::Pass,
+                   L"Runtime database persisted local admin baseline snapshot records and latest-baseline lookup succeeded.");
+        } else {
+          AddCheck(report, L"phase5_admin_baseline_persistence", L"Phase 5 admin baseline persistence",
+                   SelfTestStatus::Fail,
+                   L"Runtime database baseline persistence returned fewer records than expected during roundtrip validation.",
+                   L"Validate local_admin_baseline schema migration and baseline snapshot persistence paths.");
+        }
+      } catch (const std::exception& error) {
+        AddCheck(report, L"phase5_admin_baseline_persistence", L"Phase 5 admin baseline persistence",
+                 SelfTestStatus::Fail,
+                 L"Runtime database local admin baseline persistence validation failed: " + Utf8ToWide(error.what()),
+                 L"Validate local admin baseline persistence migrations and runtime database path health.");
+      }
     } catch (const std::exception& error) {
       AddCheck(report, L"phase5_pam_request_queue_visibility", L"Phase 5 PAM request queue visibility",
                SelfTestStatus::Fail, L"Phase 5 PAM request visibility validation failed: " + Utf8ToWide(error.what()),
@@ -2111,6 +2183,14 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       AddCheck(report, L"phase5_admin_membership_audit", L"Phase 5 local-admin membership audit",
                SelfTestStatus::Fail, L"Phase 5 local-admin membership validation failed: " + Utf8ToWide(error.what()),
                L"Validate local-admin posture collection before rerunning self-test.");
+      AddCheck(report, L"phase5_household_role_policy_governance",
+               L"Phase 5 household role propagation governance", SelfTestStatus::Fail,
+               L"Phase 5 household role governance validation failed: " + Utf8ToWide(error.what()),
+               L"Validate household role SID policy parsing and local policy propagation before rerunning self-test.");
+      AddCheck(report, L"phase5_admin_baseline_persistence", L"Phase 5 admin baseline persistence",
+           SelfTestStatus::Fail,
+           L"Phase 5 local admin baseline persistence validation failed: " + Utf8ToWide(error.what()),
+           L"Validate runtime database baseline persistence and migration paths before rerunning self-test.");
     }
 
     try {
