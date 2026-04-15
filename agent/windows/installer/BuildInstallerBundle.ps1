@@ -4,6 +4,11 @@ param(
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
     [string]$DriverArtifactRoot = '',
     [string]$DriverPackageRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'driver\minifilter\package'),
+    [switch]$SkipMinifilterBuild,
+    [string]$DriverSigningCertificateThumbprint = '',
+    [string]$DriverSigningPfxPath = '',
+    [string]$DriverSigningPfxPassword = '',
+    [switch]$AllowUnsignedMinifilterBuild,
     [switch]$AllowMissingMinifilterPayload,
     [string]$WebView2RuntimeInstallerPath = '',
     [switch]$Clean
@@ -107,6 +112,55 @@ function Stage-MinifilterPayload {
     }
 }
 
+function Invoke-MinifilterBuildIfNeeded {
+    param(
+        [string]$WindowsRoot,
+        [string]$DriverPackageRoot,
+        [string]$DriverSigningCertificateThumbprint,
+        [string]$DriverSigningPfxPath,
+        [string]$DriverSigningPfxPassword,
+        [switch]$AllowUnsignedMinifilterBuild
+    )
+
+    $packageRoot = $DriverPackageRoot
+    if (-not [System.IO.Path]::IsPathRooted($packageRoot)) {
+        $packageRoot = Join-Path $WindowsRoot $packageRoot
+    }
+    $packageRoot = [System.IO.Path]::GetFullPath($packageRoot)
+
+    $sysPath = Join-Path $packageRoot 'AntivirusMinifilter.sys'
+    $catPath = Join-Path $packageRoot 'AntivirusMinifilter.cat'
+    if ((Test-Path -LiteralPath $sysPath) -and (Test-Path -LiteralPath $catPath)) {
+        return
+    }
+
+    $buildScriptPath = Join-Path $WindowsRoot 'driver\minifilter\BuildMinifilterDriver.ps1'
+    if (-not (Test-Path -LiteralPath $buildScriptPath)) {
+        throw "Minifilter build script was not found: $buildScriptPath"
+    }
+
+    $buildArgs = @{
+        OutputRoot = $packageRoot
+    }
+    if ($DriverSigningCertificateThumbprint) {
+        $buildArgs.SigningCertificateThumbprint = $DriverSigningCertificateThumbprint
+    }
+    if ($DriverSigningPfxPath) {
+        $buildArgs.SigningPfxPath = $DriverSigningPfxPath
+    }
+    if ($DriverSigningPfxPassword) {
+        $buildArgs.SigningPfxPassword = $DriverSigningPfxPassword
+    }
+    if ($AllowUnsignedMinifilterBuild) {
+        $buildArgs.AllowUnsignedArtifacts = $true
+    }
+
+    & $buildScriptPath @buildArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Minifilter build failed with exit code $LASTEXITCODE"
+    }
+}
+
 function Remove-LegacyBuildOutputs {
     param([string]$BuildRoot)
 
@@ -151,6 +205,10 @@ if ($Clean -and (Test-Path -LiteralPath $outputRootFull)) {
 Ensure-Directory -Path $buildRootFull
 Ensure-Directory -Path $devOutputRootFull
 Ensure-Directory -Path $outputRootFull
+
+if (-not $SkipMinifilterBuild -and -not $DriverArtifactRoot) {
+    Invoke-MinifilterBuildIfNeeded -WindowsRoot $windowsRoot -DriverPackageRoot $DriverPackageRoot -DriverSigningCertificateThumbprint $DriverSigningCertificateThumbprint -DriverSigningPfxPath $DriverSigningPfxPath -DriverSigningPfxPassword $DriverSigningPfxPassword -AllowUnsignedMinifilterBuild:$AllowUnsignedMinifilterBuild
+}
 
 Stage-MinifilterPayload -WindowsRoot $windowsRoot -DevOutputRoot $devOutputRootFull -DriverArtifactRoot $DriverArtifactRoot -DriverPackageRoot $DriverPackageRoot -RequireCompletePayload $requireMinifilterPayload
 

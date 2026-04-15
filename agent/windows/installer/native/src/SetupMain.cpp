@@ -27,6 +27,7 @@ constexpr wchar_t kWindowTitle[] = L"Fenrir Endpoint Setup";
 constexpr wchar_t kCompanyName[] = L"Fenrir";
 constexpr wchar_t kProductName[] = L"Fenrir Endpoint";
 constexpr wchar_t kServiceName[] = L"FenrirAgent";
+constexpr wchar_t kMinifilterServiceName[] = L"AntivirusMinifilter";
 constexpr wchar_t kAgentRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
 constexpr wchar_t kArpRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\FenrirEndpoint";
@@ -236,6 +237,7 @@ bool WriteRegistryDword(HKEY root, const wchar_t* subKey, const wchar_t* valueNa
 bool DeleteRegistryTree(HKEY root, const wchar_t* subKey);
 std::filesystem::path GetDefaultInstallRoot();
 std::filesystem::path QueryInstallRoot();
+std::wstring QueryServiceStateByName(const wchar_t* serviceName);
 bool ServiceExists();
 bool IsInstalledAt(const std::filesystem::path& installRoot);
 bool IsProcessElevated();
@@ -244,9 +246,12 @@ bool ExtractResourceToFile(HINSTANCE instance, int resourceId, const std::filesy
                            std::wstring* errorMessage);
 bool RunProcessHidden(const std::filesystem::path& executable, const std::wstring& arguments,
                       const std::filesystem::path& workingDirectory, DWORD* exitCode, std::wstring* errorMessage);
+bool WaitForServiceStateByName(const wchar_t* serviceName, DWORD targetState, DWORD timeoutMs);
 bool WaitForServiceState(DWORD targetState, DWORD timeoutMs);
+bool StartServiceByName(const wchar_t* serviceName, DWORD timeoutMs, std::wstring* errorMessage);
 bool StartInstalledService(std::wstring* errorMessage);
 bool StopInstalledService(std::wstring* errorMessage);
+bool InstallMinifilterDriver(const std::filesystem::path& installRoot, bool repair, std::wstring* errorMessage);
 bool StopMatchingProcess(const std::filesystem::path& imagePath);
 bool CreateShortcut(const std::filesystem::path& linkPath, const std::filesystem::path& targetPath,
                     const std::wstring& arguments, const std::wstring& description);
@@ -399,6 +404,54 @@ std::filesystem::path GetDefaultInstallRoot() {
 
 std::filesystem::path QueryInstallRoot() {
   return GetDefaultInstallRoot();
+}
+
+std::wstring QueryServiceStateByName(const wchar_t* serviceName) {
+  const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (manager == nullptr) {
+    return L"scm-unavailable";
+  }
+
+  const auto service = OpenServiceW(manager, serviceName, SERVICE_QUERY_STATUS);
+  if (service == nullptr) {
+    const auto openError = GetLastError();
+    CloseServiceHandle(manager);
+    if (openError == ERROR_SERVICE_DOES_NOT_EXIST) {
+      return L"missing";
+    }
+    return L"open-failed";
+  }
+
+  SERVICE_STATUS_PROCESS status{};
+  DWORD bytesNeeded = 0;
+  if (QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status),
+                           &bytesNeeded) == FALSE) {
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    return L"query-failed";
+  }
+
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+
+  switch (status.dwCurrentState) {
+    case SERVICE_STOPPED:
+      return L"stopped";
+    case SERVICE_START_PENDING:
+      return L"start-pending";
+    case SERVICE_STOP_PENDING:
+      return L"stop-pending";
+    case SERVICE_RUNNING:
+      return L"running";
+    case SERVICE_CONTINUE_PENDING:
+      return L"continue-pending";
+    case SERVICE_PAUSE_PENDING:
+      return L"pause-pending";
+    case SERVICE_PAUSED:
+      return L"paused";
+    default:
+      return L"unknown";
+  }
 }
 
 bool ServiceExists() {
@@ -566,13 +619,13 @@ bool RunProcessHidden(const std::filesystem::path& executable, const std::wstrin
   return processExitCode == 0;
 }
 
-bool WaitForServiceState(const DWORD targetState, const DWORD timeoutMs) {
+bool WaitForServiceStateByName(const wchar_t* serviceName, const DWORD targetState, const DWORD timeoutMs) {
   const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (manager == nullptr) {
     return false;
   }
 
-  const auto service = OpenServiceW(manager, kServiceName, SERVICE_QUERY_STATUS);
+  const auto service = OpenServiceW(manager, serviceName, SERVICE_QUERY_STATUS);
   if (service == nullptr) {
     CloseServiceHandle(manager);
     return false;
@@ -602,7 +655,11 @@ bool WaitForServiceState(const DWORD targetState, const DWORD timeoutMs) {
   return reachedTarget;
 }
 
-bool StartInstalledService(std::wstring* errorMessage) {
+bool WaitForServiceState(const DWORD targetState, const DWORD timeoutMs) {
+  return WaitForServiceStateByName(kServiceName, targetState, timeoutMs);
+}
+
+bool StartServiceByName(const wchar_t* serviceName, const DWORD timeoutMs, std::wstring* errorMessage) {
   const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (manager == nullptr) {
     if (errorMessage != nullptr) {
@@ -611,11 +668,11 @@ bool StartInstalledService(std::wstring* errorMessage) {
     return false;
   }
 
-  const auto service = OpenServiceW(manager, kServiceName, SERVICE_START | SERVICE_QUERY_STATUS);
+  const auto service = OpenServiceW(manager, serviceName, SERVICE_START | SERVICE_QUERY_STATUS);
   if (service == nullptr) {
     CloseServiceHandle(manager);
     if (errorMessage != nullptr) {
-      *errorMessage = L"Could not open the installed protection service.";
+      *errorMessage = std::wstring(L"Could not open service '") + serviceName + L"'.";
     }
     return false;
   }
@@ -625,14 +682,118 @@ bool StartInstalledService(std::wstring* errorMessage) {
   CloseServiceHandle(manager);
   if (!started) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"The protection service could not be started.";
+      *errorMessage = std::wstring(L"Service '") + serviceName + L"' could not be started.";
     }
     return false;
   }
 
-  if (!WaitForServiceState(SERVICE_RUNNING, 20'000)) {
+  if (!WaitForServiceStateByName(serviceName, SERVICE_RUNNING, timeoutMs)) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"The protection service did not reach the running state.";
+      *errorMessage = std::wstring(L"Service '") + serviceName + L"' did not reach the running state.";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool StartInstalledService(std::wstring* errorMessage) {
+  return StartServiceByName(kServiceName, 20'000, errorMessage);
+}
+
+bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const bool repair, std::wstring* errorMessage) {
+  const auto driverInfPath = installRoot / kDriverInfRelativePath;
+  const auto driverSysPath = installRoot / kDriverSysRelativePath;
+  const auto driverCatPath = installRoot / kDriverCatRelativePath;
+
+  if (!std::filesystem::exists(driverInfPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Minifilter deployment metadata is missing from the install payload: " + driverInfPath.wstring();
+    }
+    return false;
+  }
+
+  if (!std::filesystem::exists(driverSysPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Minifilter driver payload is missing from the install payload: " + driverSysPath.wstring();
+    }
+    return false;
+  }
+
+  if (!std::filesystem::exists(driverCatPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Minifilter catalog payload is missing from the install payload: " + driverCatPath.wstring();
+    }
+    return false;
+  }
+
+  std::filesystem::path windowsRoot = L"C:\\Windows";
+  const auto windir = _wgetenv(L"WINDIR");
+  if (windir != nullptr && *windir != L'\0') {
+    windowsRoot = std::filesystem::path(windir);
+  }
+
+  const auto pnputilPath = windowsRoot / L"System32" / L"pnputil.exe";
+  if (!std::filesystem::exists(pnputilPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"pnputil.exe is unavailable on this host; cannot register minifilter payload.";
+    }
+    return false;
+  }
+
+  DWORD pnputilExitCode = 0;
+  std::wstring pnputilError;
+  const auto pnputilArgs = std::wstring(L"/add-driver ") + QuotePath(driverInfPath) + L" /install";
+  const auto pnputilSucceeded =
+      RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+  if (!pnputilSucceeded && pnputilExitCode != ERROR_SUCCESS_REBOOT_REQUIRED) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not register AntivirusMinifilter with pnputil. " + pnputilError;
+    }
+    return false;
+  }
+
+  auto minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+  if (minifilterState == L"missing") {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Minifilter service 'AntivirusMinifilter' was not registered after driver install.";
+    }
+    return false;
+  }
+
+  if (minifilterState == L"scm-unavailable" || minifilterState == L"open-failed" ||
+      minifilterState == L"query-failed") {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not query AntivirusMinifilter service state after driver install.";
+    }
+    return false;
+  }
+
+  if (_wcsicmp(minifilterState.c_str(), L"running") != 0) {
+    const auto fltmcPath = windowsRoot / L"System32" / L"fltmc.exe";
+    if (std::filesystem::exists(fltmcPath)) {
+      DWORD fltmcExitCode = 0;
+      std::wstring fltmcError;
+      const auto loadArgs = std::wstring(L"load ") + kMinifilterServiceName;
+      RunProcessHidden(fltmcPath, loadArgs, installRoot, &fltmcExitCode, &fltmcError);
+    }
+
+    std::wstring serviceStartError;
+    if (!StartServiceByName(kMinifilterServiceName, 20'000, &serviceStartError)) {
+      minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+      if (errorMessage != nullptr) {
+        *errorMessage = L"AntivirusMinifilter did not reach running state (current state: " + minifilterState +
+                        L"). " + serviceStartError;
+      }
+      return false;
+    }
+  }
+
+  const auto finalState = QueryServiceStateByName(kMinifilterServiceName);
+  if (_wcsicmp(finalState.c_str(), L"running") != 0) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"AntivirusMinifilter service is not running after " +
+                      std::wstring(repair ? L"repair" : L"install") + L" (state: " + finalState + L").";
     }
     return false;
   }
@@ -973,29 +1134,42 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
     std::filesystem::path relativePath;
     int progress;
     const wchar_t* label;
+    bool required;
   };
 
   const std::vector<PayloadItem> payloadItems{
-      {IDR_PAYLOAD_SERVICE, kServiceExeName, 15, L"Installing service binary"},
-      {IDR_PAYLOAD_ENDPOINT_CLIENT, kEndpointExeName, 25, L"Installing endpoint client"},
-      {IDR_PAYLOAD_PAM_CLIENT, kPamExeName, 35, L"Installing PAM tool"},
-      {IDR_PAYLOAD_AMSI_PROVIDER, kAmsiDllName, 45, L"Installing AMSI provider"},
-      {IDR_PAYLOAD_SCANNERCLI, kToolsRelativePath, 55, L"Installing diagnostic scanner"},
-      {IDR_PAYLOAD_AMSITESTCLI, kToolsAmsiTestCliRelativePath, 60, L"Installing AMSI diagnostic tool"},
-      {IDR_PAYLOAD_ETWTESTCLI, kToolsEtwTestCliRelativePath, 64, L"Installing ETW diagnostic tool"},
-      {IDR_PAYLOAD_WFPTESTCLI, kToolsWfpTestCliRelativePath, 68, L"Installing WFP diagnostic tool"},
-      {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 72, L"Installing runtime dependencies"},
-      {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 76, L"Installing tool runtime dependencies"},
-      {IDR_PAYLOAD_WEBVIEW2_LOADER, kWebView2LoaderDllName, 80, L"Installing WebView2 runtime loader"},
-      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 84, L"Installing signature bundle"},
-      {IDR_PAYLOAD_DRIVER_INF, kDriverInfRelativePath, 88, L"Installing minifilter deployment metadata"},
-        {IDR_PAYLOAD_DRIVER_SYS, kDriverSysRelativePath, 90, L"Installing minifilter driver payload"},
-        {IDR_PAYLOAD_DRIVER_CAT, kDriverCatRelativePath, 92, L"Installing minifilter catalog payload"},
-        {IDR_PAYLOAD_DRIVER_README, kDriverReadmeRelativePath, 94, L"Installing minifilter documentation"},
+      {IDR_PAYLOAD_SERVICE, kServiceExeName, 15, L"Installing service binary", true},
+      {IDR_PAYLOAD_ENDPOINT_CLIENT, kEndpointExeName, 25, L"Installing endpoint client", true},
+      {IDR_PAYLOAD_PAM_CLIENT, kPamExeName, 35, L"Installing PAM tool", true},
+      {IDR_PAYLOAD_AMSI_PROVIDER, kAmsiDllName, 45, L"Installing AMSI provider", true},
+      {IDR_PAYLOAD_SCANNERCLI, kToolsRelativePath, 55, L"Installing diagnostic scanner", true},
+      {IDR_PAYLOAD_AMSITESTCLI, kToolsAmsiTestCliRelativePath, 60, L"Installing AMSI diagnostic tool", true},
+      {IDR_PAYLOAD_ETWTESTCLI, kToolsEtwTestCliRelativePath, 64, L"Installing ETW diagnostic tool", true},
+      {IDR_PAYLOAD_WFPTESTCLI, kToolsWfpTestCliRelativePath, 68, L"Installing WFP diagnostic tool", true},
+      {IDR_PAYLOAD_WINPTHREAD, kWinpthreadDllName, 72, L"Installing runtime dependencies", true},
+      {IDR_PAYLOAD_WINPTHREAD, kToolsWinpthreadRelativePath, 76, L"Installing tool runtime dependencies", true},
+      {IDR_PAYLOAD_WEBVIEW2_LOADER, kWebView2LoaderDllName, 80, L"Installing WebView2 runtime loader", true},
+      {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 84, L"Installing signature bundle", true},
+      {IDR_PAYLOAD_DRIVER_INF, kDriverInfRelativePath, 88, L"Installing minifilter deployment metadata", true},
+      {IDR_PAYLOAD_DRIVER_SYS, kDriverSysRelativePath, 90, L"Installing minifilter driver payload", false},
+      {IDR_PAYLOAD_DRIVER_CAT, kDriverCatRelativePath, 92, L"Installing minifilter catalog payload", false},
+      {IDR_PAYLOAD_DRIVER_README, kDriverReadmeRelativePath, 94, L"Installing minifilter documentation", true},
   };
 
   for (const auto& item : payloadItems) {
     PostStatus(hwnd, item.label, item.progress);
+    if (!HasEmbeddedPayloadResource(context->instance, item.resourceId)) {
+      if (item.required) {
+        if (errorMessage != nullptr) {
+          *errorMessage = std::wstring(L"Required embedded setup payload is missing for ") + item.relativePath.wstring() + L".";
+        }
+        return false;
+      }
+
+      PostLog(hwnd, std::wstring(item.label) + L" (skipped; payload not embedded in this installer build)");
+      continue;
+    }
+
     PostLog(hwnd, item.label);
     if (!ExtractResourceToFile(context->instance, item.resourceId, installRoot / item.relativePath, errorMessage)) {
       return false;
@@ -1077,6 +1251,13 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
   PostStatus(hwnd, repair ? L"Repairing service registration..." : L"Registering protection service...", 80);
   PostLog(hwnd, repair ? L"Running service repair" : L"Installing the protection service");
   if (!RunProcessHidden(serviceExe, repair ? L"--repair" : L"--install", context->installRoot, &exitCode, &errorMessage)) {
+    PostComplete(hwnd, false, false, false, errorMessage);
+    return;
+  }
+
+  PostStatus(hwnd, repair ? L"Repairing minifilter registration..." : L"Registering minifilter driver...", 84);
+  PostLog(hwnd, repair ? L"Refreshing AntivirusMinifilter deployment" : L"Installing AntivirusMinifilter driver package");
+  if (!InstallMinifilterDriver(context->installRoot, repair, &errorMessage)) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;
   }

@@ -3,7 +3,7 @@
 #include <ntstrsafe.h>
 #include <suppress.h>
 
-#include "../../shared/include/RealtimeProtectionProtocol.h"
+#include "../../../shared/include/RealtimeProtectionProtocol.h"
 
 PFLT_FILTER gFilterHandle = NULL;
 PFLT_PORT gServerPort = NULL;
