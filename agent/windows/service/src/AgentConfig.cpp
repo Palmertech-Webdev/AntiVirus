@@ -797,6 +797,43 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
     config.evidenceRootPath = std::filesystem::path(evidenceRootPath);
   }
 
+  const auto threatIntelPackPath = ReadEnvironmentVariable(L"ANTIVIRUS_THREAT_INTEL_PACK_PATH");
+  if (!threatIntelPackPath.empty()) {
+    config.threatIntelPackPath = std::filesystem::path(threatIntelPackPath);
+  }
+
+  const auto cleanwareSignerListPath = ReadEnvironmentVariable(L"ANTIVIRUS_CLEANWARE_SIGNERS_PATH");
+  if (!cleanwareSignerListPath.empty()) {
+    config.cleanwareSignerListPath = std::filesystem::path(cleanwareSignerListPath);
+  }
+
+  const auto knownGoodHashListPath = ReadEnvironmentVariable(L"ANTIVIRUS_KNOWN_GOOD_HASHES_PATH");
+  if (!knownGoodHashListPath.empty()) {
+    config.knownGoodHashListPath = std::filesystem::path(knownGoodHashListPath);
+  }
+
+  const auto observeOnlyRuleListPath = ReadEnvironmentVariable(L"ANTIVIRUS_OBSERVE_ONLY_RULES_PATH");
+  if (!observeOnlyRuleListPath.empty()) {
+    config.observeOnlyRuleListPath = std::filesystem::path(observeOnlyRuleListPath);
+  }
+
+  const auto phase2CleanwareCorpusPath = ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_CLEANWARE_CORPUS_PATH");
+  if (!phase2CleanwareCorpusPath.empty()) {
+    config.phase2CleanwareCorpusPath = std::filesystem::path(phase2CleanwareCorpusPath);
+  }
+
+  const auto phase2FalsePositiveCorpusPath =
+      ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_FALSE_POSITIVE_CORPUS_PATH");
+  if (!phase2FalsePositiveCorpusPath.empty()) {
+    config.phase2FalsePositiveCorpusPath = std::filesystem::path(phase2FalsePositiveCorpusPath);
+  }
+
+  const auto phase2RuleQualityReportPath = ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_RULE_QUALITY_REPORT_PATH");
+  const auto phase2RuleQualityReportPathOverridden = !phase2RuleQualityReportPath.empty();
+  if (!phase2RuleQualityReportPath.empty()) {
+    config.phase2RuleQualityReportPath = std::filesystem::path(phase2RuleQualityReportPath);
+  }
+
   const auto realtimeProtectionPortName = ReadEnvironmentVariable(L"ANTIVIRUS_REALTIME_PORT_NAME");
   if (!realtimeProtectionPortName.empty()) {
     config.realtimeProtectionPortName = realtimeProtectionPortName;
@@ -838,6 +875,41 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   config.enforceReleasePromotionGates =
       ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_RELEASE_GATES"),
                         config.enforceReleasePromotionGates);
+    config.phase2FalsePositiveBudgetPercent = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_FALSE_POSITIVE_BUDGET_PERCENT"),
+               config.phase2FalsePositiveBudgetPercent),
+      0, 100);
+    config.phase2MaxFalsePositiveFindings = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_MAX_FALSE_POSITIVE_FINDINGS"),
+               config.phase2MaxFalsePositiveFindings),
+      1, 1000);
+    config.phase2MinRuleQualityScore = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_MIN_RULE_QUALITY_SCORE"),
+               config.phase2MinRuleQualityScore),
+      1, 100);
+    config.phase2MinMaliciousPassRatePercent = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_MIN_MALICIOUS_PASS_RATE_PERCENT"),
+               config.phase2MinMaliciousPassRatePercent),
+      1, 100);
+    config.phase2MinCleanwarePassRatePercent = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_PHASE2_MIN_CLEANWARE_PASS_RATE_PERCENT"),
+               config.phase2MinCleanwarePassRatePercent),
+      1, 100);
+    config.genericRuleScoreCap = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_GENERIC_RULE_SCORE_CAP"), config.genericRuleScoreCap),
+      1, 99);
+    config.benignContextDampeningScore =
+      std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_BENIGN_CONTEXT_DAMPENING_SCORE"),
+                    config.benignContextDampeningScore),
+           1, 80);
+    config.nonExecuteRealtimeBlockBias =
+      std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_NON_EXECUTE_REALTIME_BLOCK_BIAS"),
+                    config.nonExecuteRealtimeBlockBias),
+           1, 40);
+    config.reputationKnownGoodDampeningBonus =
+      std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_REPUTATION_KNOWN_GOOD_DAMPENING_BONUS"),
+                    config.reputationKnownGoodDampeningBonus),
+           1, 80);
   config.isolationAllowLoopback =
       ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ISOLATION_ALLOW_LOOPBACK"), config.isolationAllowLoopback);
   config.isolationAllowedRemoteAddresses =
@@ -857,7 +929,7 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   const auto runtimeRootOverridden =
       runtimeDatabasePathOverridden || stateFilePathOverridden || telemetryQueuePathOverridden ||
       updateRootPathOverridden || journalRootPathOverridden || quarantineRootPathOverridden ||
-      evidenceRootPathOverridden;
+      evidenceRootPathOverridden || phase2RuleQualityReportPathOverridden;
   const std::optional<std::filesystem::path> preferredRuntimeRoot =
       runtimeRootOverridden ? std::optional<std::filesystem::path>{} : DeterminePreferredRuntimeRoot(moduleHandle);
 
@@ -872,6 +944,8 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   }
   config.quarantineRootPath = ResolveRuntimePath(config.quarantineRootPath, moduleHandle, preferredRuntimeRoot);
   config.evidenceRootPath = ResolveRuntimePath(config.evidenceRootPath, moduleHandle, preferredRuntimeRoot);
+  config.phase2RuleQualityReportPath =
+      ResolveRuntimePath(config.phase2RuleQualityReportPath, moduleHandle, preferredRuntimeRoot);
 
   auto runtimeRoot = NormalizeAbsolutePath(config.runtimeDatabasePath.parent_path());
   if (runtimeRoot.empty()) {
@@ -888,6 +962,35 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   config.journalRootPath = NormalizeRuntimeArtifactPath(config.journalRootPath, runtimeRoot, L"journal");
   config.quarantineRootPath = NormalizeRuntimeArtifactPath(config.quarantineRootPath, runtimeRoot, L"quarantine");
   config.evidenceRootPath = NormalizeRuntimeArtifactPath(config.evidenceRootPath, runtimeRoot, L"evidence");
+  config.phase2RuleQualityReportPath =
+      NormalizeRuntimeArtifactPath(config.phase2RuleQualityReportPath, runtimeRoot, L"phase2-rule-quality.json");
+
+  const auto normalizeInstallRelativePath = [&config](const std::filesystem::path& value) {
+    if (value.empty()) {
+      return value;
+    }
+
+    if (value.is_absolute()) {
+      return NormalizeAbsolutePath(value);
+    }
+
+    return NormalizeAbsolutePath(config.installRootPath / value);
+  };
+
+  const auto normalizeGeneralPath = [](const std::filesystem::path& value) {
+    if (value.empty()) {
+      return value;
+    }
+
+    return NormalizeAbsolutePath(value);
+  };
+
+  config.threatIntelPackPath = normalizeInstallRelativePath(config.threatIntelPackPath);
+  config.cleanwareSignerListPath = normalizeInstallRelativePath(config.cleanwareSignerListPath);
+  config.knownGoodHashListPath = normalizeInstallRelativePath(config.knownGoodHashListPath);
+  config.observeOnlyRuleListPath = normalizeInstallRelativePath(config.observeOnlyRuleListPath);
+  config.phase2CleanwareCorpusPath = normalizeGeneralPath(config.phase2CleanwareCorpusPath);
+  config.phase2FalsePositiveCorpusPath = normalizeGeneralPath(config.phase2FalsePositiveCorpusPath);
 
   const auto appendScanExclusion = [&config](const std::filesystem::path& path) {
     if (!path.empty()) {
@@ -903,6 +1006,7 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   appendScanExclusion(config.journalRootPath);
   appendScanExclusion(config.quarantineRootPath);
   appendScanExclusion(config.evidenceRootPath);
+  appendScanExclusion(config.phase2RuleQualityReportPath);
 
   if (preferredRuntimeRoot.has_value()) {
     PersistRuntimeRootMarker(runtimeRoot, config.installRootPath);
@@ -958,7 +1062,8 @@ RuntimePathValidation ValidateRuntimePaths(const AgentConfig& config) {
       !ensurePathWithinRuntimeRoot(config.updateRootPath, L"Update root path") ||
       !ensurePathWithinRuntimeRoot(config.journalRootPath, L"Journal root path") ||
       !ensurePathWithinRuntimeRoot(config.quarantineRootPath, L"Quarantine root path") ||
-      !ensurePathWithinRuntimeRoot(config.evidenceRootPath, L"Evidence root path")) {
+      !ensurePathWithinRuntimeRoot(config.evidenceRootPath, L"Evidence root path") ||
+      !ensurePathWithinRuntimeRoot(config.phase2RuleQualityReportPath, L"Phase 2 rule quality report path")) {
     return validation;
   }
 

@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -28,8 +29,6 @@ constexpr std::size_t kReadLimit = 1024 * 1024;
 constexpr std::uint32_t kMaxArchiveEntryCount = 5000;
 constexpr std::size_t kMaxZipEntryNameOutputChars = 64 * 1024;
 constexpr std::size_t kMaxDecodedTextChars = 512 * 1024;
-constexpr int kDetectThreshold = 45;
-constexpr int kQuarantineThreshold = 70;
 
 struct Hit {
   std::wstring code;
@@ -80,6 +79,98 @@ struct AllowOverrideMatch {
   std::wstring code;
   std::wstring message;
 };
+
+std::wstring ToLowerCopy(std::wstring value);
+bool ContainsAny(std::wstring_view haystack, std::initializer_list<std::wstring_view> needles);
+std::wstring TrimWide(std::wstring value);
+std::filesystem::path ResolveSignatureBundlePath();
+
+int ResolveGenericRuleScoreCap() {
+  const auto configured = ReadEnvironmentVariable(L"ANTIVIRUS_GENERIC_RULE_SCORE_CAP");
+  if (configured.empty()) {
+    return 34;
+  }
+
+  try {
+    return std::clamp(std::stoi(configured), 1, 99);
+  } catch (...) {
+    return 34;
+  }
+}
+
+std::filesystem::path ResolveObserveOnlyRuleCodesPath() {
+  const auto envPath = ReadEnvironmentVariable(L"ANTIVIRUS_OBSERVE_ONLY_RULES_PATH");
+  if (!envPath.empty()) {
+    return std::filesystem::path(envPath);
+  }
+
+  const auto signaturePath = ResolveSignatureBundlePath();
+  if (!signaturePath.empty()) {
+    return signaturePath.parent_path() / L"default-observe-only.tsv";
+  }
+
+  return std::filesystem::path{};
+}
+
+const std::set<std::wstring>& LoadObserveOnlyRuleCodes() {
+  static std::once_flag once;
+  static std::set<std::wstring> codes;
+
+  std::call_once(once, [] {
+    const auto path = ResolveObserveOnlyRuleCodesPath();
+    if (path.empty()) {
+      return;
+    }
+
+    std::ifstream input(WideToUtf8(path.wstring()), std::ios::binary);
+    if (!input.is_open()) {
+      return;
+    }
+
+    std::string lineUtf8;
+    while (std::getline(input, lineUtf8)) {
+      const auto line = TrimWide(Utf8ToWide(lineUtf8));
+      if (line.empty() || line.starts_with(L"#") || line.starts_with(L";")) {
+        continue;
+      }
+      codes.insert(ToLowerCopy(line));
+    }
+  });
+
+  return codes;
+}
+
+bool IsObserveOnlyRuleCode(const std::wstring& code) {
+  const auto& codes = LoadObserveOnlyRuleCodes();
+  if (codes.empty()) {
+    return false;
+  }
+
+  return codes.find(ToLowerCopy(code)) != codes.end();
+}
+
+bool IsGenericRuleCode(const std::wstring& code) {
+  const auto lower = ToLowerCopy(code);
+  return ContainsAny(lower, {L"persistence", L"credential_access", L"defender_config_tamper", L"script_host",
+                             L"long_base64", L"obfuscation", L"download", L"archive_"});
+}
+
+int ScaleRuleScoreForPolicy(const Rule& rule, const PolicySnapshot& policy) {
+  if (rule.score <= 0) {
+    return rule.score;
+  }
+
+  auto scaled = rule.score;
+  if (IsObserveOnlyRuleCode(rule.code)) {
+    scaled = std::min(scaled, 12);
+  }
+  if (IsGenericRuleCode(rule.code)) {
+    scaled = std::max(1, (scaled * static_cast<int>(policy.genericRuleScoreScalePercent)) / 100);
+    scaled = std::min(scaled, ResolveGenericRuleScoreCap());
+  }
+
+  return std::clamp(scaled, 1, 99);
+}
 
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -256,6 +347,32 @@ std::filesystem::path ResolveSignatureBundlePath() {
   }
 
   return std::filesystem::current_path() / L"agent" / L"windows" / L"signatures" / L"default-signatures.tsv";
+}
+
+std::vector<std::filesystem::path> ResolveSignatureBundlePaths() {
+  std::vector<std::filesystem::path> paths;
+  const auto primary = ResolveSignatureBundlePath();
+  if (!primary.empty()) {
+    paths.push_back(primary);
+  }
+
+  const auto addIfExists = [&paths](const std::filesystem::path& path) {
+    if (path.empty()) {
+      return;
+    }
+    std::error_code error;
+    if (std::filesystem::exists(path, error) && !error) {
+      paths.push_back(path);
+    }
+  };
+
+  const auto baseDirectory = primary.parent_path();
+  addIfExists(baseDirectory / L"default-signatures-malicious.tsv");
+  addIfExists(baseDirectory / L"default-signatures-observe.tsv");
+
+  std::sort(paths.begin(), paths.end());
+  paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+  return paths;
 }
 
 std::vector<std::wstring> SplitPatterns(const std::wstring& value, const wchar_t separator) {
@@ -627,7 +744,8 @@ std::wstring_view RuleHaystack(const Rule& rule, const FileData& file) {
   return file.textLower;
 }
 
-void AddRuleHits(const std::vector<Rule>& rules, const FileData& file, std::vector<Hit>& hits) {
+void AddRuleHits(const std::vector<Rule>& rules, const FileData& file, const PolicySnapshot& policy,
+                 std::vector<Hit>& hits) {
   for (const auto& rule : rules) {
     if (!RuleApplies(rule, file)) {
       continue;
@@ -635,7 +753,8 @@ void AddRuleHits(const std::vector<Rule>& rules, const FileData& file, std::vect
     const auto haystack = RuleHaystack(rule, file);
     for (const auto& pattern : rule.patterns) {
       if (Contains(haystack, pattern)) {
-        AddHit(hits, Hit{rule.code, rule.message, rule.tacticId, rule.techniqueId, rule.score});
+        AddHit(hits, Hit{rule.code, rule.message, rule.tacticId, rule.techniqueId,
+                         ScaleRuleScoreForPolicy(rule, policy)});
         break;
       }
     }
@@ -647,38 +766,39 @@ std::vector<Rule> LoadExternalRules() {
   static std::vector<Rule> cachedRules;
 
   std::call_once(once, [] {
-    const auto path = ResolveSignatureBundlePath();
-    std::ifstream input(WideToUtf8(path.wstring()), std::ios::binary);
-    if (!input.is_open()) {
-      return;
-    }
-
-    std::string lineUtf8;
-    while (std::getline(input, lineUtf8)) {
-      const auto trimmed = TrimWide(Utf8ToWide(lineUtf8));
-      if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
+    for (const auto& path : ResolveSignatureBundlePaths()) {
+      std::ifstream input(WideToUtf8(path.wstring()), std::ios::binary);
+      if (!input.is_open()) {
         continue;
       }
 
-      const auto columns = SplitColumns(trimmed, L'|');
-      if (columns.size() < 7) {
-        continue;
-      }
+      std::string lineUtf8;
+      while (std::getline(input, lineUtf8)) {
+        const auto trimmed = TrimWide(Utf8ToWide(lineUtf8));
+        if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
+          continue;
+        }
 
-      Rule rule;
-      rule.scope = ToLowerCopy(columns[0]);
-      rule.code = columns[1];
-      rule.message = columns[2];
-      rule.tacticId = columns[3];
-      rule.techniqueId = columns[4];
-      try {
-        rule.score = std::stoi(columns[5]);
-      } catch (...) {
-        continue;
-      }
-      rule.patterns = SplitPatterns(columns[6], L';');
-      if (!rule.code.empty() && !rule.patterns.empty()) {
-        cachedRules.push_back(std::move(rule));
+        const auto columns = SplitColumns(trimmed, L'|');
+        if (columns.size() < 7) {
+          continue;
+        }
+
+        Rule rule;
+        rule.scope = ToLowerCopy(columns[0]);
+        rule.code = columns[1];
+        rule.message = columns[2];
+        rule.tacticId = columns[3];
+        rule.techniqueId = columns[4];
+        try {
+          rule.score = std::stoi(columns[5]);
+        } catch (...) {
+          continue;
+        }
+        rule.patterns = SplitPatterns(columns[6], L';');
+        if (!rule.code.empty() && !rule.patterns.empty()) {
+          cachedRules.push_back(std::move(rule));
+        }
       }
     }
   });
@@ -749,7 +869,11 @@ std::optional<AllowOverrideMatch> MatchPolicyAllowOverride(const FileData& file,
     }
   }
 
-  if (!highRiskUnsignedUserSurface) {
+  if (!highRiskUnsignedUserSurface || policy.allowUnsignedSuppressionPathExecutables) {
+    if (policy.requireSignerForSuppression && file.signer.empty()) {
+      return std::nullopt;
+    }
+
     const auto normalizedPath = NormalizePathForComparison(file.path);
     for (const auto& root : policy.suppressionPathRoots) {
       const auto normalizedRoot = NormalizePathForComparison(std::filesystem::path(root));
@@ -765,7 +889,7 @@ std::optional<AllowOverrideMatch> MatchPolicyAllowOverride(const FileData& file,
     }
   }
 
-  if (!file.signer.empty() && !file.userPath) {
+  if (!file.signer.empty() && (!file.userPath || policy.requireSignerForSuppression)) {
     const auto normalizedSigner = NormalizeSuppressionValue(file.signer);
     for (const auto& signer : policy.suppressionSignerNames) {
       if (NormalizeSuppressionValue(signer) == normalizedSigner) {
@@ -1077,17 +1201,75 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                      L"TA0005", L"T1564.004", 26});
   }
 
-  AddRuleHits(LoadExternalRules(), file, hits);
+  AddRuleHits(LoadExternalRules(), file, policy, hits);
 
-  int score = 0;
+  int maliciousPressure = 0;
+  int benignPressure = 0;
   for (const auto& hit : hits) {
-    score += hit.score;
+    if (hit.score >= 0) {
+      maliciousPressure += hit.score;
+    } else {
+      benignPressure += std::abs(hit.score);
+    }
   }
+
   const auto highSeverity =
       std::any_of(hits.begin(), hits.end(), [](const auto& hit) { return hit.score >= 45; });
-  if (((file.reputation == L"trusted-signed-system" || file.reputation == L"trusted-signed") && !highSeverity &&
-       score < 70) ||
-      (file.reputation == L"trusted-path" && score < 80) || score < kDetectThreshold) {
+  const auto highRiskSurface = IsHighRiskExecutionSurface(file) && file.userPath;
+  const auto archiveSurface = file.zip || file.ole;
+
+  int detectThreshold = static_cast<int>(policy.scanMaliciousBlockThreshold);
+  if (highRiskSurface) {
+    detectThreshold = std::max(20, detectThreshold - 8);
+  }
+  if (archiveSurface) {
+    detectThreshold += 4;
+  }
+  detectThreshold = std::clamp(detectThreshold, 1, 95);
+
+  int quarantineThreshold = static_cast<int>(policy.scanMaliciousQuarantineThreshold);
+  if (highRiskSurface) {
+    quarantineThreshold = std::max(detectThreshold + 4, quarantineThreshold - 4);
+  }
+  if (archiveSurface) {
+    quarantineThreshold += 4;
+  }
+  quarantineThreshold = std::clamp(quarantineThreshold, detectThreshold + 1, 99);
+
+  const auto signerLookup = policy.enableCleanwareSignerDampening && !file.signer.empty()
+                                ? LookupSignerReputation(file.signer)
+                                : ReputationLookupResult{};
+  const auto reputationLookup = policy.cloudLookupEnabled && !file.sha256.empty()
+                                    ? LookupPublicFileReputation(file.sha256)
+                                    : ReputationLookupResult{};
+
+  if ((file.reputation == L"trusted-signed-system" || file.reputation == L"trusted-signed") && !highSeverity) {
+    benignPressure += static_cast<int>(policy.scanBenignDampeningScore);
+  } else if (file.reputation == L"trusted-path" && !highSeverity) {
+    benignPressure += static_cast<int>(policy.scanBenignDampeningScore / 2);
+  }
+
+  if (policy.enableCleanwareSignerDampening && signerLookup.lookupSucceeded &&
+      (signerLookup.knownGood || signerLookup.trustedSigner)) {
+    benignPressure += static_cast<int>(policy.scanBenignDampeningScore) + 12;
+  }
+
+  if (policy.enableKnownGoodHashDampening && reputationLookup.lookupSucceeded && reputationLookup.knownGood) {
+    benignPressure += static_cast<int>(policy.scanBenignDampeningScore) + 18;
+  }
+
+  if (reputationLookup.lookupSucceeded && reputationLookup.malicious && !policy.cloudLookupObserveOnly) {
+    maliciousPressure += 18;
+  }
+
+  if (file.userPath && file.signer.empty() && IsHighRiskExecutionSurface(file)) {
+    maliciousPressure += 8;
+  }
+
+  const auto netPressure = std::clamp(maliciousPressure - benignPressure, 0, 99);
+  const auto shouldSurfaceFinding = netPressure >= detectThreshold ||
+                                    (highSeverity && maliciousPressure >= detectThreshold);
+  if (!shouldSurfaceFinding) {
     return std::nullopt;
   }
 
@@ -1096,34 +1278,67 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                        [](const auto& left, const auto& right) { return left.score < right.score; });
   const auto quarantineCandidate =
       file.pe || ExecutableExt(file.extension) || file.ole || file.zip || file.extension == L".hta";
-  const auto reputationLookup = policy.cloudLookupEnabled && !file.sha256.empty() && score >= kDetectThreshold
-                                    ? LookupPublicFileReputation(file.sha256)
-                                    : ReputationLookupResult{};
-  const auto verifiedKnownGood = reputationLookup.attempted && reputationLookup.knownGood;
+  const auto trustedCleanware = (policy.enableCleanwareSignerDampening && signerLookup.lookupSucceeded &&
+                                 (signerLookup.knownGood || signerLookup.trustedSigner)) ||
+                                (policy.enableKnownGoodHashDampening && reputationLookup.lookupSucceeded &&
+                                 reputationLookup.knownGood);
+
+  auto reportedReputation = BuildReportedReputation(file.reputation, signerLookup);
+  reportedReputation = BuildReportedReputation(reportedReputation, reputationLookup);
+
+  auto disposition = VerdictDisposition::Block;
+  if (trustedCleanware && netPressure < quarantineThreshold) {
+    disposition = VerdictDisposition::Allow;
+  }
+  if (policy.archiveObserveOnly && archiveSurface && netPressure < quarantineThreshold) {
+    disposition = VerdictDisposition::Allow;
+  }
+
+  if (policy.cloudLookupObserveOnly && reputationLookup.lookupSucceeded && reputationLookup.malicious &&
+      disposition == VerdictDisposition::Block && !highSeverity) {
+    disposition = VerdictDisposition::Allow;
+  }
+
   ScanFinding finding{
       .path = file.path,
       .sizeBytes = file.sizeBytes,
       .sha256 = file.sha256,
       .contentType = file.contentType,
-      .reputation = BuildReportedReputation(file.reputation, reputationLookup),
+      .reputation = reportedReputation,
       .signer = file.signer,
-      .heuristicScore = static_cast<std::uint32_t>(std::clamp(score, 0, 99)),
+      .heuristicScore = static_cast<std::uint32_t>(netPressure),
       .archiveEntryCount = file.archiveEntryCount,
       .verdict =
           ScanVerdict{
-              .disposition = verifiedKnownGood && score < kQuarantineThreshold
-                                 ? VerdictDisposition::Allow
-                                 : VerdictDisposition::Block,
-              .confidence = static_cast<std::uint32_t>(std::clamp(score, 1, 99)),
+              .disposition = disposition,
+              .confidence = static_cast<std::uint32_t>(std::clamp(std::max(netPressure, maliciousPressure / 2), 1, 99)),
               .tacticId = top != hits.end() ? top->tacticId : L"TA0002",
               .techniqueId = top != hits.end() ? top->techniqueId : GuessTechnique(file),
               .reasons = {}}};
-  if (reputationLookup.attempted) {
+
+  if (signerLookup.attempted) {
     finding.verdict.reasons.push_back(
-        {verifiedKnownGood ? L"REPUTATION_VERIFIED" : L"REPUTATION_LOOKUP", reputationLookup.summary});
+        {signerLookup.knownGood || signerLookup.trustedSigner ? L"SIGNER_REPUTATION_VERIFIED" : L"SIGNER_REPUTATION_LOOKUP",
+         signerLookup.summary.empty() ? L"Signer reputation lookup completed." : signerLookup.summary});
   }
+  if (reputationLookup.attempted) {
+    finding.verdict.reasons.push_back({
+        reputationLookup.knownGood ? L"REPUTATION_VERIFIED"
+                                   : (policy.cloudLookupObserveOnly && reputationLookup.malicious
+                                          ? L"REPUTATION_OBSERVE_ONLY"
+                                          : L"REPUTATION_LOOKUP"),
+        reputationLookup.summary.empty() ? L"File reputation lookup completed." : reputationLookup.summary});
+  }
+
+  finding.verdict.reasons.push_back(
+      {L"CONFIDENCE_PRESSURE_BALANCE",
+       L"Malicious pressure " + std::to_wstring(maliciousPressure) + L", benign pressure " +
+           std::to_wstring(benignPressure) + L", net " + std::to_wstring(netPressure) + L"."});
+
   for (const auto& hit : hits) {
-    finding.verdict.reasons.push_back({hit.code, hit.message});
+    if (hit.score > 0 || disposition != VerdictDisposition::Block) {
+      finding.verdict.reasons.push_back({hit.code, hit.message});
+    }
   }
   if (finding.sha256.empty()) {
     finding.verdict.reasons.push_back(
@@ -1131,6 +1346,14 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   }
   if (!file.signer.empty()) {
     finding.verdict.reasons.push_back({L"SIGNER_CONTEXT", L"Embedded signer: " + file.signer});
+  }
+  if (finding.verdict.disposition == VerdictDisposition::Allow && trustedCleanware) {
+    finding.verdict.reasons.push_back(
+        {L"CLEANWARE_DAMPENING", L"Fenrir reduced confidence because trusted signer/hash cleanware intelligence matched."});
+  }
+  if (finding.verdict.disposition == VerdictDisposition::Allow && policy.archiveObserveOnly && archiveSurface) {
+    finding.verdict.reasons.push_back(
+        {L"ARCHIVE_OBSERVE_ONLY", L"Archive policy is observe-only for this confidence tier."});
   }
   if (finding.verdict.disposition == VerdictDisposition::Block && quarantineCandidate) {
     finding.verdict.reasons.push_back({L"BLOCK_FIRST",

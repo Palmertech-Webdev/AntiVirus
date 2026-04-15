@@ -36,6 +36,23 @@ struct CachedReputationEntry {
 
 std::mutex gCacheMutex;
 std::unordered_map<std::wstring, CachedReputationEntry> gCache;
+std::once_flag gLocalIntelLoadOnce;
+
+struct LocalSignerIntelEntry {
+  std::wstring signer;
+  std::wstring publisher;
+  std::uint32_t prevalence{0};
+};
+
+struct LocalKnownGoodHashEntry {
+  std::wstring sha256;
+  std::wstring signer;
+  std::wstring source;
+  std::uint32_t prevalence{0};
+};
+
+std::unordered_map<std::wstring, LocalSignerIntelEntry> gLocalSignerIntel;
+std::unordered_map<std::wstring, LocalKnownGoodHashEntry> gLocalKnownGoodHashes;
 
 std::wstring ToLowerCopy(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -96,6 +113,115 @@ ThreatIndicatorType InferIndicatorType(const std::wstring& value) {
 
 std::wstring CacheKey(const ThreatIndicatorType type, const std::wstring& indicator) {
   return ThreatIndicatorTypeToString(type) + L"|" + ToLowerCopy(TrimCopy(indicator));
+}
+
+std::vector<std::wstring> SplitTabColumns(const std::wstring& line) {
+  std::vector<std::wstring> columns;
+  std::wstring current;
+  for (const auto ch : line) {
+    if (ch == L'\t') {
+      columns.push_back(TrimCopy(current));
+      current.clear();
+    } else {
+      current.push_back(ch);
+    }
+  }
+  columns.push_back(TrimCopy(current));
+  return columns;
+}
+
+void LoadLocalIntelCatalogs() {
+  const auto config = LoadAgentConfig();
+
+  const auto loadSignerCatalog = [](const std::filesystem::path& catalogPath) {
+    if (catalogPath.empty()) {
+      return;
+    }
+
+    std::ifstream input(catalogPath, std::ios::binary);
+    if (!input.is_open()) {
+      return;
+    }
+
+    std::string utf8Line;
+    while (std::getline(input, utf8Line)) {
+      if (utf8Line.empty() || utf8Line.starts_with("#")) {
+        continue;
+      }
+
+      const auto line = Utf8ToWide(utf8Line);
+      const auto columns = SplitTabColumns(line);
+      if (columns.empty() || columns[0].empty()) {
+        continue;
+      }
+
+      auto prevalence = 0u;
+      if (columns.size() >= 3) {
+        try {
+          prevalence = static_cast<std::uint32_t>(std::stoul(columns[2]));
+        } catch (...) {
+          prevalence = 0;
+        }
+      }
+
+      const auto normalizedSigner = ToLowerCopy(columns[0]);
+      gLocalSignerIntel[normalizedSigner] = LocalSignerIntelEntry{
+          .signer = columns[0],
+          .publisher = columns.size() >= 2 ? columns[1] : L"",
+          .prevalence = prevalence};
+    }
+  };
+
+  const auto loadHashCatalog = [](const std::filesystem::path& catalogPath) {
+    if (catalogPath.empty()) {
+      return;
+    }
+
+    std::ifstream input(catalogPath, std::ios::binary);
+    if (!input.is_open()) {
+      return;
+    }
+
+    std::string utf8Line;
+    while (std::getline(input, utf8Line)) {
+      if (utf8Line.empty() || utf8Line.starts_with("#")) {
+        continue;
+      }
+
+      const auto line = Utf8ToWide(utf8Line);
+      const auto columns = SplitTabColumns(line);
+      if (columns.empty() || columns[0].empty()) {
+        continue;
+      }
+
+      const auto normalizedHash = ToLowerCopy(columns[0]);
+      if (!IsHexSha256(normalizedHash)) {
+        continue;
+      }
+
+      auto prevalence = 0u;
+      if (columns.size() >= 4) {
+        try {
+          prevalence = static_cast<std::uint32_t>(std::stoul(columns[3]));
+        } catch (...) {
+          prevalence = 0;
+        }
+      }
+
+      gLocalKnownGoodHashes[normalizedHash] = LocalKnownGoodHashEntry{
+          .sha256 = normalizedHash,
+          .signer = columns.size() >= 2 ? columns[1] : L"",
+          .source = columns.size() >= 3 ? columns[2] : L"local-known-good",
+          .prevalence = prevalence};
+    }
+  };
+
+  loadSignerCatalog(config.cleanwareSignerListPath);
+  loadHashCatalog(config.knownGoodHashListPath);
+}
+
+void EnsureLocalIntelCatalogsLoaded() {
+  std::call_once(gLocalIntelLoadOnce, [] { LoadLocalIntelCatalogs(); });
 }
 
 std::wstring ResolveBaseUrl() {
@@ -445,25 +571,143 @@ bool VerifyAuthenticodeSignature(const std::filesystem::path& path) {
 }
 
 ReputationLookupResult ResultFromRecord(const ThreatIntelRecord& record) {
+  const auto verdictLower = ToLowerCopy(record.verdict);
   return ReputationLookupResult{
       .attempted = true,
       .lookupSucceeded = true,
-      .knownGood = ToLowerCopy(record.verdict).find(L"known_good") != std::wstring::npos,
-      .malicious = ToLowerCopy(record.verdict).find(L"malicious") != std::wstring::npos ||
-                   ToLowerCopy(record.verdict).find(L"suspicious") != std::wstring::npos,
+      .knownGood = verdictLower.find(L"known_good") != std::wstring::npos,
+      .malicious = verdictLower.find(L"malicious") != std::wstring::npos ||
+                   verdictLower.find(L"suspicious") != std::wstring::npos,
+      .trustedSigner = verdictLower.find(L"trusted_signer") != std::wstring::npos,
+      .observeOnly = verdictLower.find(L"observe") != std::wstring::npos,
       .fromCache = true,
       .localOnly = record.localOnly,
       .trustScore = record.trustScore,
       .providerWeight = record.providerWeight,
+      .prevalence = 0,
       .indicatorType = record.indicatorType,
       .indicatorKey = record.indicatorKey,
       .provider = record.provider,
       .source = record.source,
+      .publisher = {},
       .summary = record.summary,
       .details = record.details,
       .verdict = record.verdict,
       .expiresAt = record.expiresAt,
       .metadataJson = record.metadataJson};
+}
+
+ReputationLookupResult BuildKnownGoodHashResult(const std::wstring& sha256,
+                                                const LocalKnownGoodHashEntry& entry) {
+  ReputationLookupResult result{};
+  result.attempted = true;
+  result.lookupSucceeded = true;
+  result.knownGood = true;
+  result.malicious = false;
+  result.fromCache = false;
+  result.localOnly = true;
+  result.trustScore = 98;
+  result.providerWeight = 96;
+  result.prevalence = entry.prevalence;
+  result.indicatorType = ThreatIndicatorType::Sha256;
+  result.indicatorKey = sha256;
+  result.provider = L"fenrir-known-good";
+  result.source = entry.source.empty() ? L"local-known-good" : entry.source;
+  result.publisher = entry.signer;
+  result.summary = L"Known-good hash matched local cleanware intelligence.";
+  result.details = entry.signer.empty()
+                       ? L"Fenrir matched the hash against the local known-good catalog."
+                       : L"Fenrir matched the hash against the local known-good catalog for signer " + entry.signer +
+                             L".";
+  result.verdict = L"known_good_local";
+  result.expiresAt = IsoExpiryFromResult(result);
+  return result;
+}
+
+ReputationLookupResult BuildTrustedSignerResult(const std::wstring& signer, const LocalSignerIntelEntry& entry) {
+  ReputationLookupResult result{};
+  result.attempted = true;
+  result.lookupSucceeded = true;
+  result.knownGood = true;
+  result.malicious = false;
+  result.trustedSigner = true;
+  result.fromCache = false;
+  result.localOnly = true;
+  result.trustScore = 96;
+  result.providerWeight = 94;
+  result.prevalence = entry.prevalence;
+  result.indicatorType = ThreatIndicatorType::Unknown;
+  result.indicatorKey = signer;
+  result.provider = L"fenrir-cleanware-signer";
+  result.source = L"local-cleanware-signers";
+  result.publisher = entry.publisher;
+  result.summary = L"Signer matched local cleanware intelligence.";
+  result.details = entry.publisher.empty()
+                       ? L"Fenrir matched the signer against trusted cleanware signer intelligence."
+                       : L"Fenrir matched the signer against trusted cleanware intelligence for publisher " +
+                             entry.publisher + L".";
+  result.verdict = L"trusted_signer_cleanware";
+  result.expiresAt = IsoExpiryFromResult(result);
+  return result;
+}
+
+void UpdateThreatPrevalence(const std::filesystem::path& databasePath, const ReputationLookupResult& result) {
+  if (result.indicatorType == ThreatIndicatorType::Unknown || result.indicatorKey.empty()) {
+    return;
+  }
+
+  RuntimeDatabase database(databasePath);
+  ThreatPrevalenceRecord current{};
+  const auto now = CurrentUtcTimestamp();
+  const auto existing = database.TryGetThreatPrevalenceRecord(result.indicatorType, result.indicatorKey, current);
+  if (!existing) {
+    database.UpsertThreatPrevalenceRecord(ThreatPrevalenceRecord{
+        .indicatorType = result.indicatorType,
+        .indicatorKey = result.indicatorKey,
+        .sightingCount = 1,
+        .firstSeenAt = now,
+        .lastSeenAt = now,
+        .lastSource = result.source});
+    return;
+  }
+
+  current.sightingCount += 1;
+  current.lastSeenAt = now;
+  current.lastSource = result.source;
+  database.UpsertThreatPrevalenceRecord(current);
+}
+
+int ReputationPrecedenceScore(const ReputationLookupResult& result) {
+  if (!result.attempted) {
+    return 0;
+  }
+
+  auto score = static_cast<int>(result.providerWeight) * 4 + static_cast<int>(result.trustScore);
+  if (result.malicious && !result.observeOnly) {
+    score += 1'000;
+  } else if (result.knownGood || result.trustedSigner) {
+    score += 750;
+  } else if (result.lookupSucceeded) {
+    score += 350;
+  }
+
+  if (result.localOnly) {
+    score += 20;
+  }
+  if (result.fromCache) {
+    score += 5;
+  }
+  return score;
+}
+
+bool CandidatePreferred(const ReputationLookupResult& candidate, const ReputationLookupResult& baseline) {
+  if (!candidate.attempted) {
+    return false;
+  }
+  if (!baseline.attempted) {
+    return true;
+  }
+  return ReputationPrecedenceScore(candidate) > ReputationPrecedenceScore(baseline);
 }
 
 void PersistResult(const std::filesystem::path& databasePath, const ReputationLookupResult& result) {
@@ -485,6 +729,8 @@ void PersistResult(const std::filesystem::path& databasePath, const ReputationLo
       .expiresAt = result.expiresAt.empty() ? IsoExpiryFromResult(result) : result.expiresAt,
       .signedPack = false,
       .localOnly = result.localOnly});
+
+  UpdateThreatPrevalence(databasePath, result);
 }
 
 }  // namespace
@@ -515,44 +761,63 @@ ReputationLookupResult LookupThreatIntel(const ThreatIndicatorType indicatorType
   }
 
   const auto resolvedDatabasePath = ResolveDatabasePath(databasePath);
+  ReputationLookupResult cachedCandidate{};
+  bool hasCachedCandidate = false;
   try {
     RuntimeDatabase database(resolvedDatabasePath);
     database.PurgeExpiredThreatIntelRecords(CurrentUtcTimestamp());
     ThreatIntelRecord cachedRecord{};
     if (database.TryGetThreatIntelRecord(indicatorType, normalizedIndicator, cachedRecord) &&
         (cachedRecord.expiresAt.empty() || cachedRecord.expiresAt > CurrentUtcTimestamp())) {
-      auto result = ResultFromRecord(cachedRecord);
-      {
-        std::lock_guard lock(gCacheMutex);
-        gCache[cacheKeyValue] = CachedReputationEntry{.result = result, .expiresAt = now + std::chrono::minutes(30)};
-      }
-      return result;
+      cachedCandidate = ResultFromRecord(cachedRecord);
+      hasCachedCandidate = true;
     }
   } catch (...) {
   }
 
-  ReputationLookupResult result{};
+  ReputationLookupResult result = hasCachedCandidate ? cachedCandidate : ReputationLookupResult{};
   if (indicatorType == ThreatIndicatorType::Sha256) {
     if (!IsHexSha256(normalizedIndicator)) {
       return invalid;
     }
-    const auto response = ExecuteHttpGet(L"/lookup/sha256/" + normalizedIndicator);
-    result = response.has_value() ? BuildSha256Result(normalizedIndicator, *response) : ReputationLookupResult{};
-    if (!response.has_value()) {
-      result.attempted = true;
-      result.lookupSucceeded = false;
-      result.indicatorType = ThreatIndicatorType::Sha256;
-      result.indicatorKey = normalizedIndicator;
-      result.provider = L"CIRCL hashlookup";
-      result.providerWeight = 70;
-      result.source = L"hashlookup";
-      result.verdict = L"unavailable";
-      result.summary = L"Public reputation lookup was unavailable.";
-      result.details = L"CIRCL hashlookup could not be contacted for the requested hash.";
-      result.expiresAt = IsoExpiryFromResult(result);
+
+    const auto knownGoodCandidate = LookupKnownGoodHash(normalizedIndicator, resolvedDatabasePath);
+    if (knownGoodCandidate.lookupSucceeded && knownGoodCandidate.knownGood &&
+        CandidatePreferred(knownGoodCandidate, result)) {
+      result = knownGoodCandidate;
+    }
+
+    if (!result.malicious || result.providerWeight < 90) {
+      const auto response = ExecuteHttpGet(L"/lookup/sha256/" + normalizedIndicator);
+      auto publicCandidate = response.has_value() ? BuildSha256Result(normalizedIndicator, *response)
+                                                  : ReputationLookupResult{};
+      if (!response.has_value()) {
+        publicCandidate.attempted = true;
+        publicCandidate.lookupSucceeded = false;
+        publicCandidate.indicatorType = ThreatIndicatorType::Sha256;
+        publicCandidate.indicatorKey = normalizedIndicator;
+        publicCandidate.provider = L"CIRCL hashlookup";
+        publicCandidate.providerWeight = 70;
+        publicCandidate.source = L"hashlookup";
+        publicCandidate.verdict = L"unavailable";
+        publicCandidate.summary = L"Public reputation lookup was unavailable.";
+        publicCandidate.details = L"CIRCL hashlookup could not be contacted for the requested hash.";
+        publicCandidate.expiresAt = IsoExpiryFromResult(publicCandidate);
+      }
+
+      if (CandidatePreferred(publicCandidate, result)) {
+        result = std::move(publicCandidate);
+      }
     }
   } else {
-    result = BuildHeuristicDestinationResult(indicatorType, normalizedIndicator);
+    const auto heuristicCandidate = BuildHeuristicDestinationResult(indicatorType, normalizedIndicator);
+    if (CandidatePreferred(heuristicCandidate, result)) {
+      result = heuristicCandidate;
+    }
+  }
+
+  if (!result.attempted) {
+    result = invalid;
   }
 
   PersistResult(resolvedDatabasePath, result);
@@ -565,6 +830,161 @@ ReputationLookupResult LookupThreatIntel(const ThreatIndicatorType indicatorType
 
 ReputationLookupResult LookupPublicFileReputation(const std::wstring& sha256, const std::filesystem::path& databasePath) {
   return LookupThreatIntel(ThreatIndicatorType::Sha256, sha256, databasePath);
+}
+
+ReputationLookupResult LookupKnownGoodHash(const std::wstring& sha256, const std::filesystem::path& databasePath) {
+  const auto normalizedHash = ToLowerCopy(TrimCopy(sha256));
+  ReputationLookupResult result{};
+  result.attempted = true;
+  result.indicatorType = ThreatIndicatorType::Sha256;
+  result.indicatorKey = normalizedHash;
+  result.provider = L"fenrir-known-good";
+  result.source = L"local-known-good";
+
+  if (!IsHexSha256(normalizedHash)) {
+    result.lookupSucceeded = false;
+    result.verdict = L"invalid";
+    result.summary = L"Known-good hash lookup was skipped due to an invalid SHA-256 indicator.";
+    result.details = L"A 64-character hexadecimal SHA-256 indicator is required.";
+    return result;
+  }
+
+  const auto resolvedDatabasePath = ResolveDatabasePath(databasePath);
+  try {
+    RuntimeDatabase database(resolvedDatabasePath);
+    KnownGoodHashRecord record{};
+    if (database.TryGetKnownGoodHashRecord(normalizedHash, record) &&
+        (record.expiresAt.empty() || record.expiresAt > CurrentUtcTimestamp())) {
+      auto fromRecord = BuildKnownGoodHashResult(normalizedHash, LocalKnownGoodHashEntry{
+                                                                     .sha256 = record.sha256,
+                                                                     .signer = record.signerName,
+                                                                     .source = record.source,
+                                                                     .prevalence = record.prevalence});
+      fromRecord.fromCache = true;
+      if (!record.summary.empty()) {
+        fromRecord.summary = record.summary;
+      }
+      if (!record.details.empty()) {
+        fromRecord.details = record.details;
+      }
+      if (!record.expiresAt.empty()) {
+        fromRecord.expiresAt = record.expiresAt;
+      }
+      return fromRecord;
+    }
+  } catch (...) {
+  }
+
+  EnsureLocalIntelCatalogsLoaded();
+  if (const auto local = gLocalKnownGoodHashes.find(normalizedHash); local != gLocalKnownGoodHashes.end()) {
+    auto matched = BuildKnownGoodHashResult(normalizedHash, local->second);
+    try {
+      RuntimeDatabase database(resolvedDatabasePath);
+      database.UpsertKnownGoodHashRecord(KnownGoodHashRecord{
+          .sha256 = normalizedHash,
+          .source = matched.source,
+          .summary = matched.summary,
+          .details = matched.details,
+          .signerName = local->second.signer,
+          .firstSeenAt = CurrentUtcTimestamp(),
+          .lastSeenAt = CurrentUtcTimestamp(),
+          .expiresAt = matched.expiresAt,
+          .prevalence = matched.prevalence});
+    } catch (...) {
+    }
+    PersistResult(resolvedDatabasePath, matched);
+    return matched;
+  }
+
+  result.lookupSucceeded = true;
+  result.knownGood = false;
+  result.malicious = false;
+  result.localOnly = true;
+  result.trustScore = 45;
+  result.providerWeight = 40;
+  result.verdict = L"unknown";
+  result.summary = L"No local known-good hash match was found.";
+  result.details = L"The SHA-256 hash was not found in the local cleanware known-good catalog.";
+  result.expiresAt = IsoExpiryFromResult(result);
+  return result;
+}
+
+ReputationLookupResult LookupSignerReputation(const std::wstring& signer, const std::filesystem::path& databasePath) {
+  const auto normalizedSigner = ToLowerCopy(TrimCopy(signer));
+  ReputationLookupResult result{};
+  result.attempted = true;
+  result.lookupSucceeded = true;
+  result.indicatorType = ThreatIndicatorType::Unknown;
+  result.indicatorKey = normalizedSigner;
+  result.provider = L"fenrir-cleanware-signer";
+  result.source = L"local-cleanware-signers";
+
+  if (normalizedSigner.empty()) {
+    result.lookupSucceeded = false;
+    result.verdict = L"invalid";
+    result.summary = L"Signer reputation lookup was skipped because signer metadata was empty.";
+    result.details = L"Provide an Authenticode signer subject before requesting signer reputation intelligence.";
+    return result;
+  }
+
+  const auto resolvedDatabasePath = ResolveDatabasePath(databasePath);
+  try {
+    RuntimeDatabase database(resolvedDatabasePath);
+    TrustedSignerRecord record{};
+    if (database.TryGetTrustedSignerRecord(normalizedSigner, record) &&
+        (record.expiresAt.empty() || record.expiresAt > CurrentUtcTimestamp())) {
+      auto fromRecord = BuildTrustedSignerResult(normalizedSigner, LocalSignerIntelEntry{
+                                                                    .signer = record.signerName,
+                                                                    .publisher = record.publisher,
+                                                                    .prevalence = record.prevalence});
+      fromRecord.fromCache = true;
+      if (!record.summary.empty()) {
+        fromRecord.summary = record.summary;
+      }
+      if (!record.details.empty()) {
+        fromRecord.details = record.details;
+      }
+      if (!record.expiresAt.empty()) {
+        fromRecord.expiresAt = record.expiresAt;
+      }
+      return fromRecord;
+    }
+  } catch (...) {
+  }
+
+  EnsureLocalIntelCatalogsLoaded();
+  if (const auto local = gLocalSignerIntel.find(normalizedSigner); local != gLocalSignerIntel.end()) {
+    auto matched = BuildTrustedSignerResult(normalizedSigner, local->second);
+    try {
+      RuntimeDatabase database(resolvedDatabasePath);
+      database.UpsertTrustedSignerRecord(TrustedSignerRecord{
+          .signerName = normalizedSigner,
+          .publisher = local->second.publisher,
+          .trustLevel = L"trusted",
+          .source = matched.source,
+          .summary = matched.summary,
+          .details = matched.details,
+          .firstSeenAt = CurrentUtcTimestamp(),
+          .lastSeenAt = CurrentUtcTimestamp(),
+          .expiresAt = matched.expiresAt,
+          .prevalence = matched.prevalence,
+          .allowSuppression = true});
+    } catch (...) {
+    }
+    return matched;
+  }
+
+  result.knownGood = false;
+  result.malicious = false;
+  result.trustedSigner = false;
+  result.localOnly = true;
+  result.trustScore = 50;
+  result.providerWeight = 40;
+  result.verdict = L"unknown";
+  result.summary = L"Signer was not found in local cleanware intelligence.";
+  result.details = L"Fenrir did not find this signer in local trusted cleanware intelligence catalogs.";
+  result.expiresAt = IsoExpiryFromResult(result);
+  return result;
 }
 
 ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator, const std::filesystem::path& databasePath) {

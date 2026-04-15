@@ -17,7 +17,7 @@ param(
   [string]$MinifilterPackageWorkingRoot = "./tmp-phase1-minifilter-package",
   [switch]$SkipMinifilterEdgeCases,
   [switch]$SkipMinifilterPackageValidation,
-  [switch]$RequireMinifilterServiceInstalled
+  [bool]$RequireMinifilterServiceInstalled = $true
 )
 
 $ErrorActionPreference = "Stop"

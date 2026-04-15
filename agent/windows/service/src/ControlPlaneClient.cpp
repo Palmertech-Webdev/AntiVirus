@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -371,6 +372,57 @@ PolicySnapshot ParsePolicySnapshot(const std::string& json) {
   policy.scriptInspectionEnabled = RequireBool(ExtractJsonBool(json, "scriptInspection"), "scriptInspection");
   policy.networkContainmentEnabled = RequireBool(ExtractJsonBool(json, "networkContainment"), "networkContainment");
   policy.quarantineOnMalicious = RequireBool(ExtractJsonBool(json, "quarantineOnMalicious"), "quarantineOnMalicious");
+  if (const auto value = ExtractJsonInt(json, "scanMaliciousBlockThreshold"); value.has_value()) {
+    policy.scanMaliciousBlockThreshold = static_cast<std::uint32_t>(std::clamp(*value, 1, 99));
+  }
+  if (const auto value = ExtractJsonInt(json, "scanMaliciousQuarantineThreshold"); value.has_value()) {
+    policy.scanMaliciousQuarantineThreshold =
+        static_cast<std::uint32_t>(std::clamp(*value, static_cast<int>(policy.scanMaliciousBlockThreshold), 99));
+  }
+  if (const auto value = ExtractJsonInt(json, "scanBenignDampeningScore"); value.has_value()) {
+    policy.scanBenignDampeningScore = static_cast<std::uint32_t>(std::clamp(*value, 0, 80));
+  }
+  if (const auto value = ExtractJsonInt(json, "genericRuleScoreScalePercent"); value.has_value()) {
+    policy.genericRuleScoreScalePercent = static_cast<std::uint32_t>(std::clamp(*value, 20, 100));
+  }
+  if (const auto value = ExtractJsonInt(json, "realtimeExecuteBlockThreshold"); value.has_value()) {
+    policy.realtimeExecuteBlockThreshold = static_cast<std::uint32_t>(std::clamp(*value, 40, 99));
+  }
+  if (const auto value = ExtractJsonInt(json, "realtimeNonExecuteBlockThreshold"); value.has_value()) {
+    policy.realtimeNonExecuteBlockThreshold = static_cast<std::uint32_t>(std::clamp(*value, 50, 99));
+  }
+  if (const auto value = ExtractJsonInt(json, "realtimeQuarantineThreshold"); value.has_value()) {
+    const auto minThreshold = std::max<int>(static_cast<int>(policy.realtimeExecuteBlockThreshold),
+                                            static_cast<int>(policy.realtimeNonExecuteBlockThreshold));
+    policy.realtimeQuarantineThreshold = static_cast<std::uint32_t>(std::clamp(*value, minThreshold, 99));
+  }
+  if (const auto value = ExtractJsonInt(json, "realtimeObserveTelemetryThreshold"); value.has_value()) {
+    policy.realtimeObserveTelemetryThreshold = static_cast<std::uint32_t>(std::clamp(*value, 1, 95));
+  }
+  if (const auto value = ExtractJsonBool(json, "realtimeObserveOnlyForNonExecute"); value.has_value()) {
+    policy.realtimeObserveOnlyForNonExecute = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "archiveObserveOnly"); value.has_value()) {
+    policy.archiveObserveOnly = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "networkObserveOnly"); value.has_value()) {
+    policy.networkObserveOnly = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "cloudLookupObserveOnly"); value.has_value()) {
+    policy.cloudLookupObserveOnly = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "requireSignerForSuppression"); value.has_value()) {
+    policy.requireSignerForSuppression = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "allowUnsignedSuppressionPathExecutables"); value.has_value()) {
+    policy.allowUnsignedSuppressionPathExecutables = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "enableCleanwareSignerDampening"); value.has_value()) {
+    policy.enableCleanwareSignerDampening = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "enableKnownGoodHashDampening"); value.has_value()) {
+    policy.enableKnownGoodHashDampening = *value;
+  }
   for (const auto& root : ExtractJsonStringArray(json, "suppressionPathRoots")) {
     const auto wide = Utf8ToWide(root);
     if (!wide.empty()) {

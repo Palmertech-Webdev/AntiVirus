@@ -1,0 +1,5 @@
+# scope|code|message|tacticId|techniqueId|score|pattern1;pattern2;pattern3
+text|OBSERVE_AUTOMATION_TASK_CHAIN|Automation task strings were observed; monitor for corroborating malicious context.|TA0003|T1053.005|10|schtasks /create;register-scheduledtask;new-scheduledtaskaction
+text|OBSERVE_ADMIN_TOOLING_CHAIN|Administrative tooling strings were observed in content; hold in observe mode without stronger evidence.|TA0005|T1218|8|powershell.exe;cmd.exe;rundll32;mshta
+pe|OBSERVE_PACKED_BINARY_HINT|Packed/obfuscated binary hints were observed without decisive malicious markers.|TA0005|T1027.002|12|upx;aspack;fsg packer
+zip|OBSERVE_ARCHIVE_EXECUTION_LURE|Archive execution lure markers were observed and require behavioral corroboration.|TA0002|T1204.001|12|.lnk;.js;.vbs;.hta

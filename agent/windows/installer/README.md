@@ -4,7 +4,7 @@ This folder contains the production-facing release-layout and update-manifest sc
 
 What is included:
 
-- `BuildReleaseLayout.ps1` to gather the built binaries, signature bundle, and optional driver artifacts into the canonical `agent/windows/out/dev` tree
+- `BuildReleaseLayout.ps1` to gather the built binaries, signature bundle, and minifilter payload artifacts into the canonical `agent/windows/out/dev` tree
 - `BuildInstallerBundle.ps1` to build and stage a native `FenrirSetup.exe` installer into `agent/windows/out/install`
 - `GenerateUpdateManifest.ps1` to emit updater manifests in the format consumed by [UpdaterService.cpp](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/service/src/UpdaterService.cpp)
 - `native/` containing the source for the embedded-payload Windows setup application
@@ -14,6 +14,8 @@ The staged installer and raw release layout also carry the MinGW thread runtime 
 `FenrirSetup.exe` also deploys `WebView2Loader.dll` and now checks whether Microsoft Edge WebView2 Runtime is available on the target host. If the runtime is missing, setup still completes but logs and completion text explicitly warn that the endpoint client will run in native fallback mode until WebView2 Runtime is installed.
 
 If you provide `-WebView2RuntimeInstallerPath` to `BuildInstallerBundle.ps1` or `BuildReleaseLayout.ps1`, that run embeds the specified installer as a setup payload dependency and attempts a silent WebView2 runtime install on hosts where runtime detection fails. If you omit the parameter, no WebView2 runtime installer payload is embedded.
+
+By default, both `BuildReleaseLayout.ps1` and `BuildInstallerBundle.ps1` now require a complete minifilter payload (`AntivirusMinifilter.inf`, `AntivirusMinifilter.sys`, `AntivirusMinifilter.cat`) in the staged release path. Supply `-DriverArtifactRoot` or pre-stage a package under `agent/windows/driver/minifilter/package` when running these scripts. For non-production developer-only runs, you can explicitly opt out with `-AllowMissingMinifilterPayload`.
 
 Canonical output layout:
 
@@ -26,7 +28,7 @@ Typical flow:
 1. Build the user-mode agent binaries with CMake.
 2. Run `BuildInstallerBundle.ps1` to produce a one-click installer executable in `out/install`.
 3. Build and sign the minifilter with the WDK on a driver-capable workstation when kernel payloads are ready to ship.
-4. Run `BuildReleaseLayout.ps1` to stage the raw release tree in `out/dev` when you need unpacked payload artifacts.
+4. Run `BuildReleaseLayout.ps1` to stage the raw release tree in `out/dev`, including INF/SYS/CAT minifilter payload artifacts.
 5. Run `GenerateUpdateManifest.ps1` to create a rollback-aware platform or definitions package.
 6. Validate the staged endpoint with `fenrir-agent-service.exe --self-test`.
 
@@ -50,6 +52,7 @@ pwsh -ExecutionPolicy Bypass -File .\BuildInstallerBundle.ps1 `
   -BuildRoot ..\out\dev\build `
   -DevOutputRoot ..\out\dev `
   -OutputRoot ..\out\install `
+  -DriverArtifactRoot C:\DriverDrop `
   -WebView2RuntimeInstallerPath C:\Dependencies\MicrosoftEdgeWebView2Setup.exe
 
 pwsh -ExecutionPolicy Bypass -File .\GenerateUpdateManifest.ps1 `

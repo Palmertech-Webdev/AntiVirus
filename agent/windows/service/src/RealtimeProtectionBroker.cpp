@@ -550,6 +550,11 @@ bool IsHighRiskPersistencePath(const std::filesystem::path& path) {
                                   L"\\currentversion\\runonce"});
 }
 
+bool IsKnownSafeLocation(const std::filesystem::path& path) {
+  const auto lower = ToLowerCopy(path.wstring());
+  return ContainsAnyToken(lower, {L"\\windows\\", L"\\program files\\", L"\\program files (x86)\\"});
+}
+
 struct RealtimeHit {
   std::wstring code;
   std::wstring message;
@@ -591,8 +596,9 @@ void AddContextualRealtimeHits(std::vector<RealtimeHit>& hits, const std::filesy
   const auto hasProcessInjectionKeywords =
       ContainsAnyToken(commandLineLower, {L"createremotethread", L"writeprocessmemory", L"queueuserapc",
                                           L"rundll32", L"regsvr32", L"mshta"});
-    const auto likelyBenignBulkIoProcess =
+  const auto likelyBenignBulkIoProcess =
       IsLikelyBenignBulkIoProcess(processImageLower) || IsLikelyBenignBulkIoProcess(parentImageLower);
+  const auto knownSafeLocation = IsKnownSafeLocation(path);
 
   if (hasEncodedPayload) {
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_ENCODED_COMMANDLINE",
@@ -674,10 +680,25 @@ void AddContextualRealtimeHits(std::vector<RealtimeHit>& hits, const std::filesy
                                      L"Execution context resembles trusted backup, sync, or migration activity.",
                                      L"TA0000", L"T0000", -32});
   }
+
+  if (!executeLike && likelyBenignBulkIoProcess && !hasRecoveryInhibition && !hasDynamicExecution &&
+      !hasProcessInjectionKeywords) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_NON_EXECUTE_BENIGN_CONTEXT",
+                                     L"Fenrir reduced non-execute confidence for a likely benign bulk-I/O process.",
+                                     L"TA0000", L"T0000", -26});
+  }
+
+  if (!executeLike && knownSafeLocation && !hasRecoveryInhibition && !hasDynamicExecution &&
+      !hasProcessInjectionKeywords && !LooksLikeDoubleExtensionLure(fileNameLower)) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_SAFE_LOCATION_DAMPENING",
+                                     L"Fenrir reduced confidence because the target resides in a hardened system/application path.",
+                                     L"TA0000", L"T0000", -22});
+  }
 }
 
 void ApplyRealtimeHitsToFinding(ScanFinding& finding, const std::vector<RealtimeHit>& hits,
-                                const RealtimeFileOperation operation, const bool allowQuarantine) {
+                                const RealtimeFileOperation operation, const PolicySnapshot& policy,
+                                const bool allowQuarantine) {
   if (hits.empty()) {
     return;
   }
@@ -686,6 +707,13 @@ void ApplyRealtimeHitsToFinding(ScanFinding& finding, const std::vector<Realtime
                                        [](const auto& left, const auto& right) { return left.score < right.score; });
   const auto totalScore = std::clamp(ScoreRealtimeHits(hits), 0, 99);
   const auto executeLike = IsExecuteLikeOperation(operation);
+  const auto blockThreshold = static_cast<int>(
+      std::clamp(executeLike ? policy.realtimeExecuteBlockThreshold : policy.realtimeNonExecuteBlockThreshold,
+                 static_cast<std::uint32_t>(1), static_cast<std::uint32_t>(99)));
+  const auto quarantineThreshold = static_cast<int>(
+      std::clamp(policy.realtimeQuarantineThreshold, static_cast<std::uint32_t>(blockThreshold + 1),
+                 static_cast<std::uint32_t>(99)));
+  const auto nonExecuteObserveOnly = policy.realtimeObserveOnlyForNonExecute && !executeLike;
 
   finding.verdict.confidence = std::max<std::uint32_t>(finding.verdict.confidence, static_cast<std::uint32_t>(totalScore));
   if (topHit != hits.end() && !topHit->tacticId.empty() && topHit->tacticId != L"TA0000") {
@@ -699,13 +727,25 @@ void ApplyRealtimeHitsToFinding(ScanFinding& finding, const std::vector<Realtime
     finding.verdict.reasons.push_back({hit.code, hit.message});
   }
 
+  if (nonExecuteObserveOnly && finding.verdict.disposition != VerdictDisposition::Allow &&
+      totalScore < quarantineThreshold) {
+    finding.verdict.disposition = VerdictDisposition::Allow;
+    finding.verdict.reasons.push_back(
+        {L"REALTIME_NON_EXECUTE_OBSERVE_ONLY", L"Policy keeps non-execute interception in observe mode at this confidence."});
+  }
+
   if (finding.verdict.disposition == VerdictDisposition::Allow) {
-    if (totalScore >= 85) {
+    if (!nonExecuteObserveOnly && totalScore >= quarantineThreshold) {
       finding.verdict.disposition = allowQuarantine ? VerdictDisposition::Quarantine : VerdictDisposition::Block;
-    } else if (totalScore >= 65 && executeLike) {
+    } else if (!nonExecuteObserveOnly && totalScore >= blockThreshold) {
       finding.verdict.disposition = VerdictDisposition::Block;
+    } else if (nonExecuteObserveOnly && totalScore >= blockThreshold) {
+      finding.verdict.reasons.push_back(
+          {L"REALTIME_NON_EXECUTE_HIGH_CONFIDENCE_OBSERVED",
+           L"Fenrir observed elevated non-execute confidence without immediate block due to policy ladder."});
     }
-  } else if (finding.verdict.disposition == VerdictDisposition::Block && allowQuarantine && totalScore >= 90) {
+  } else if (finding.verdict.disposition == VerdictDisposition::Block && allowQuarantine && !nonExecuteObserveOnly &&
+             totalScore >= quarantineThreshold) {
     finding.verdict.disposition = VerdictDisposition::Quarantine;
   }
 }
@@ -1245,7 +1285,7 @@ bool ApplyBehaviorChainCorrelation(const RealtimeFileScanRequest& request, const
     return false;
   }
 
-  ApplyRealtimeHitsToFinding(finding, chainHits, operation, policy.quarantineOnMalicious);
+  ApplyRealtimeHitsToFinding(finding, chainHits, operation, policy, policy.quarantineOnMalicious);
   finding.verdict.reasons.push_back(
       {L"REALTIME_CHAIN_CORRELATED",
        L"Fenrir correlated this event with recent behavior from the same process lineage."});
@@ -1297,7 +1337,7 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
         std::vector<RealtimeHit> contextualHits;
         AddContextualRealtimeHits(contextualHits, path, extension, operation, processImageLower, parentImageLower,
                                   commandLineLower, userControlledPath);
-        ApplyRealtimeHitsToFinding(promoted, contextualHits, operation, policy.quarantineOnMalicious);
+        ApplyRealtimeHitsToFinding(promoted, contextualHits, operation, policy, policy.quarantineOnMalicious);
         return promoted;
       }
     }
@@ -1344,8 +1384,17 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
                                        [](const auto& left, const auto& right) { return left.score < right.score; });
   const auto score = std::clamp(ScoreRealtimeHits(hits), 0, 99);
 
-  if (score >= 85 || (score >= 65 && executeLike)) {
-    finding.verdict.disposition = policy.quarantineOnMalicious && highRiskFileType && score >= 85
+  const auto blockThreshold = static_cast<int>(
+      std::clamp(executeLike ? policy.realtimeExecuteBlockThreshold : policy.realtimeNonExecuteBlockThreshold,
+                 static_cast<std::uint32_t>(1), static_cast<std::uint32_t>(99)));
+  const auto quarantineThreshold = static_cast<int>(
+      std::clamp(policy.realtimeQuarantineThreshold, static_cast<std::uint32_t>(blockThreshold + 1),
+                 static_cast<std::uint32_t>(99)));
+  const auto nonExecuteObserveOnly = policy.realtimeObserveOnlyForNonExecute && !executeLike;
+  const auto archiveObserveAllow = policy.archiveObserveOnly && IsContainerExtension(extension) && !executeLike;
+
+  if (score >= blockThreshold && !archiveObserveAllow && !nonExecuteObserveOnly) {
+    finding.verdict.disposition = policy.quarantineOnMalicious && highRiskFileType && score >= quarantineThreshold
                                       ? VerdictDisposition::Quarantine
                                       : VerdictDisposition::Block;
     finding.verdict.confidence = static_cast<std::uint32_t>(score);
@@ -1370,6 +1419,14 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
     if (hit.score > 0) {
       finding.verdict.reasons.push_back({hit.code, hit.message});
     }
+  }
+  if (archiveObserveAllow && score >= blockThreshold) {
+    finding.verdict.reasons.push_back(
+        {L"REALTIME_ARCHIVE_OBSERVE_ONLY", L"Archive mode is configured for observe-only handling at this confidence."});
+  }
+  if (nonExecuteObserveOnly && score >= blockThreshold) {
+    finding.verdict.reasons.push_back(
+        {L"REALTIME_NON_EXECUTE_OBSERVE_ONLY", L"Policy keeps non-execute interception in observe mode at this confidence."});
   }
   finding.verdict.reasons.push_back({L"REALTIME_ALLOW", L"No blocking rule matched the intercepted file event."});
   return finding;
@@ -1409,6 +1466,8 @@ TelemetryRecord BuildRealtimeProtectionTelemetry(const ScanFinding& finding, con
   payload += actionValue;
   payload += L"\",\"disposition\":\"";
   payload += dispositionValue;
+  payload += L"\",\"confidence\":";
+  payload += std::to_wstring(finding.verdict.confidence);
   payload += L"\",\"tacticId\":\"";
   payload += finding.verdict.tacticId;
   payload += L"\",\"techniqueId\":\"";
@@ -1437,6 +1496,16 @@ TelemetryRecord BuildRealtimeProtectionTelemetry(const ScanFinding& finding, con
   payload += Utf8ToWide(EscapeJsonString(SafeCopy(request.userSid)));
   payload += L"\",\"contextEnriched\":";
   payload += contextEnriched ? L"true" : L"false";
+  payload += L",\"reasonCodes\":[";
+  for (std::size_t index = 0; index < finding.verdict.reasons.size(); ++index) {
+    if (index != 0) {
+      payload += L",";
+    }
+    payload += L"\"";
+    payload += Utf8ToWide(EscapeJsonString(finding.verdict.reasons[index].code));
+    payload += L"\"";
+  }
+  payload += L"]";
   payload += L"}";
 
   return TelemetryRecord{
@@ -1541,9 +1610,12 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
       BuildRealtimeFinding(targetPath, operation, effectiveRequest.request, policy, config_.scanExcludedPaths);
   const auto correlatedChain = ApplyBehaviorChainCorrelation(effectiveRequest.request, operation, policy, finding);
   if (finding.verdict.disposition == VerdictDisposition::Allow) {
+    const auto allowTelemetryThreshold =
+        std::clamp(policy.realtimeObserveTelemetryThreshold, static_cast<std::uint32_t>(1),
+                   static_cast<std::uint32_t>(99));
     const auto elevatedAllowSignal =
         correlatedChain ||
-        finding.verdict.confidence >= 45 ||
+        finding.verdict.confidence >= allowTelemetryThreshold ||
         std::any_of(finding.verdict.reasons.begin(), finding.verdict.reasons.end(), [](const auto& reason) {
           return reason.code != L"REALTIME_ALLOW";
         });

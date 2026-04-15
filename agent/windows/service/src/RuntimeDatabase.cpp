@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -17,7 +18,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
-constexpr int kRuntimeDatabaseSchemaVersion = 6;
+constexpr int kRuntimeDatabaseSchemaVersion = 7;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -90,6 +91,22 @@ void EnsureBaseSchema(sqlite3* db) {
        " script_inspection_enabled INTEGER NOT NULL,"
        " network_containment_enabled INTEGER NOT NULL,"
        " quarantine_on_malicious INTEGER NOT NULL,"
+      " scan_malicious_block_threshold INTEGER NOT NULL DEFAULT 45,"
+      " scan_malicious_quarantine_threshold INTEGER NOT NULL DEFAULT 70,"
+      " scan_benign_dampening_score INTEGER NOT NULL DEFAULT 20,"
+      " generic_rule_score_scale_percent INTEGER NOT NULL DEFAULT 75,"
+      " realtime_execute_block_threshold INTEGER NOT NULL DEFAULT 65,"
+      " realtime_non_execute_block_threshold INTEGER NOT NULL DEFAULT 85,"
+      " realtime_quarantine_threshold INTEGER NOT NULL DEFAULT 90,"
+      " realtime_observe_telemetry_threshold INTEGER NOT NULL DEFAULT 45,"
+      " realtime_observe_only_non_execute INTEGER NOT NULL DEFAULT 1,"
+      " archive_observe_only INTEGER NOT NULL DEFAULT 0,"
+      " network_observe_only INTEGER NOT NULL DEFAULT 0,"
+      " cloud_lookup_observe_only INTEGER NOT NULL DEFAULT 0,"
+      " require_signer_for_suppression INTEGER NOT NULL DEFAULT 0,"
+      " allow_unsigned_suppression_path_executables INTEGER NOT NULL DEFAULT 0,"
+      " enable_cleanware_signer_dampening INTEGER NOT NULL DEFAULT 1,"
+      " enable_known_good_hash_dampening INTEGER NOT NULL DEFAULT 1,"
        " suppression_path_roots TEXT NOT NULL DEFAULT '',"
        " suppression_sha256 TEXT NOT NULL DEFAULT '',"
        " suppression_signer_names TEXT NOT NULL DEFAULT ''"
@@ -209,6 +226,41 @@ void EnsureBaseSchema(sqlite3* db) {
        " signed_pack INTEGER NOT NULL DEFAULT 0, local_only INTEGER NOT NULL DEFAULT 0,"
        " PRIMARY KEY(indicator_type, indicator_key, provider)"
        ");"
+      "CREATE TABLE IF NOT EXISTS trusted_signers ("
+      " signer_name TEXT PRIMARY KEY, publisher TEXT, trust_level TEXT NOT NULL,"
+      " source TEXT, summary TEXT, details TEXT,"
+      " first_seen_at TEXT, last_seen_at TEXT, expires_at TEXT,"
+      " prevalence INTEGER NOT NULL DEFAULT 0,"
+      " allow_suppression INTEGER NOT NULL DEFAULT 1"
+      ");"
+      "CREATE TABLE IF NOT EXISTS known_good_hashes ("
+      " sha256 TEXT PRIMARY KEY, source TEXT, summary TEXT, details TEXT, signer_name TEXT,"
+      " first_seen_at TEXT, last_seen_at TEXT, expires_at TEXT,"
+      " prevalence INTEGER NOT NULL DEFAULT 0"
+      ");"
+      "CREATE TABLE IF NOT EXISTS threat_prevalence ("
+      " indicator_type TEXT NOT NULL, indicator_key TEXT NOT NULL, sighting_count INTEGER NOT NULL DEFAULT 0,"
+      " first_seen_at TEXT, last_seen_at TEXT, last_source TEXT,"
+      " PRIMARY KEY(indicator_type, indicator_key)"
+      ");"
+      "CREATE TABLE IF NOT EXISTS realtime_feedback ("
+      " feedback_id TEXT PRIMARY KEY, correlation_id TEXT, subject_path TEXT, sha256 TEXT,"
+      " disposition TEXT, action TEXT, reason_code TEXT,"
+      " feedback_source TEXT, operator_name TEXT, notes TEXT,"
+      " confidence_delta INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL"
+      ");"
+      "CREATE TABLE IF NOT EXISTS selftest_history ("
+      " record_id INTEGER PRIMARY KEY AUTOINCREMENT, check_id TEXT NOT NULL, check_name TEXT NOT NULL,"
+      " status TEXT NOT NULL, details TEXT, remediation TEXT, phase TEXT,"
+      " build_version TEXT, recorded_at TEXT NOT NULL"
+      ");"
+      "CREATE TABLE IF NOT EXISTS rule_quality ("
+      " rule_code TEXT NOT NULL, phase TEXT NOT NULL,"
+      " malicious_hits INTEGER NOT NULL DEFAULT 0, benign_hits INTEGER NOT NULL DEFAULT 0,"
+      " total_evaluations INTEGER NOT NULL DEFAULT 0, quality_score INTEGER NOT NULL DEFAULT 0,"
+      " summary TEXT, details TEXT, updated_at TEXT NOT NULL,"
+      " PRIMARY KEY(rule_code, phase)"
+      ");"
        "CREATE TABLE IF NOT EXISTS exclusion_policy ("
        " rule_id TEXT PRIMARY KEY, path TEXT NOT NULL, scope TEXT,"
        " created_by TEXT, reason TEXT, created_at TEXT NOT NULL, expires_at TEXT,"
@@ -238,6 +290,12 @@ void EnsureBaseSchema(sqlite3* db) {
        "CREATE INDEX IF NOT EXISTS idx_patch_history_started_at ON patch_history(started_at DESC);"
        "CREATE INDEX IF NOT EXISTS idx_patch_recipes_name ON patch_recipes(display_name, priority);"
        "CREATE INDEX IF NOT EXISTS idx_threat_intel_lookup ON threat_intelligence_cache(indicator_type, indicator_key, expires_at);"
+       "CREATE INDEX IF NOT EXISTS idx_trusted_signers_trust_level ON trusted_signers(trust_level, last_seen_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_known_good_hashes_signer ON known_good_hashes(signer_name, last_seen_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_threat_prevalence_last_seen ON threat_prevalence(last_seen_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_realtime_feedback_created_at ON realtime_feedback(created_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_selftest_history_phase ON selftest_history(phase, recorded_at DESC);"
+       "CREATE INDEX IF NOT EXISTS idx_rule_quality_phase ON rule_quality(phase, quality_score DESC);"
        "CREATE INDEX IF NOT EXISTS idx_exclusion_policy_state ON exclusion_policy(state, expires_at);"
       "CREATE INDEX IF NOT EXISTS idx_quarantine_approvals_decision ON quarantine_approvals(decision, requested_at DESC);"
       "CREATE INDEX IF NOT EXISTS idx_local_admin_baseline_group ON local_admin_baseline(baseline_id, captured_at DESC);"
@@ -272,6 +330,50 @@ void RunSchemaMigrations(sqlite3* db) {
     }
 
     if (currentVersion < 6) {
+      EnsureBaseSchema(db);
+    }
+
+    if (currentVersion < 7) {
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN scan_malicious_block_threshold INTEGER NOT NULL DEFAULT 45;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN scan_malicious_quarantine_threshold INTEGER NOT NULL DEFAULT 70;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN scan_benign_dampening_score INTEGER NOT NULL DEFAULT 20;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN generic_rule_score_scale_percent INTEGER NOT NULL DEFAULT 75;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN realtime_execute_block_threshold INTEGER NOT NULL DEFAULT 65;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN realtime_non_execute_block_threshold INTEGER NOT NULL DEFAULT 85;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN realtime_quarantine_threshold INTEGER NOT NULL DEFAULT 90;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN realtime_observe_telemetry_threshold INTEGER NOT NULL DEFAULT 45;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN realtime_observe_only_non_execute INTEGER NOT NULL DEFAULT 1;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN archive_observe_only INTEGER NOT NULL DEFAULT 0;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN network_observe_only INTEGER NOT NULL DEFAULT 0;");
+      ExecIgnoreDuplicateColumn(db,
+                  "ALTER TABLE policy_cache ADD COLUMN cloud_lookup_observe_only INTEGER NOT NULL DEFAULT 0;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN require_signer_for_suppression INTEGER NOT NULL DEFAULT 0;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN allow_unsigned_suppression_path_executables INTEGER NOT NULL DEFAULT 0;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN enable_cleanware_signer_dampening INTEGER NOT NULL DEFAULT 1;");
+      ExecIgnoreDuplicateColumn(
+        db,
+        "ALTER TABLE policy_cache ADD COLUMN enable_known_good_hash_dampening INTEGER NOT NULL DEFAULT 1;");
       EnsureBaseSchema(db);
     }
 
@@ -389,8 +491,16 @@ bool RuntimeDatabase::LoadAgentState(AgentState& state) const {
   auto policyStatement = Prepare(db.get(),
                                  "SELECT policy_id, policy_name, revision, realtime_protection_enabled,"
                                  " cloud_lookup_enabled, script_inspection_enabled, network_containment_enabled,"
-                                 " quarantine_on_malicious, suppression_path_roots, suppression_sha256,"
-                                 " suppression_signer_names FROM policy_cache WHERE singleton=1;");
+                                 " quarantine_on_malicious, scan_malicious_block_threshold,"
+                                 " scan_malicious_quarantine_threshold, scan_benign_dampening_score,"
+                                 " generic_rule_score_scale_percent, realtime_execute_block_threshold,"
+                                 " realtime_non_execute_block_threshold, realtime_quarantine_threshold,"
+                                 " realtime_observe_telemetry_threshold, realtime_observe_only_non_execute,"
+                                 " archive_observe_only, network_observe_only, cloud_lookup_observe_only,"
+                                 " require_signer_for_suppression, allow_unsigned_suppression_path_executables,"
+                                 " enable_cleanware_signer_dampening, enable_known_good_hash_dampening,"
+                                 " suppression_path_roots, suppression_sha256, suppression_signer_names"
+                                 " FROM policy_cache WHERE singleton=1;");
   const auto policyStep = sqlite3_step(policyStatement.get());
   if (policyStep == SQLITE_ROW) {
     state.policy.policyId = ColumnText(policyStatement.get(), 0);
@@ -401,9 +511,36 @@ bool RuntimeDatabase::LoadAgentState(AgentState& state) const {
     state.policy.scriptInspectionEnabled = sqlite3_column_int(policyStatement.get(), 5) != 0;
     state.policy.networkContainmentEnabled = sqlite3_column_int(policyStatement.get(), 6) != 0;
     state.policy.quarantineOnMalicious = sqlite3_column_int(policyStatement.get(), 7) != 0;
-    state.policy.suppressionPathRoots = SplitStrings(ColumnText(policyStatement.get(), 8));
-    state.policy.suppressionSha256 = SplitStrings(ColumnText(policyStatement.get(), 9));
-    state.policy.suppressionSignerNames = SplitStrings(ColumnText(policyStatement.get(), 10));
+    state.policy.scanMaliciousBlockThreshold =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 8), 1, 99));
+    state.policy.scanMaliciousQuarantineThreshold = static_cast<std::uint32_t>(std::clamp(
+      sqlite3_column_int(policyStatement.get(), 9), static_cast<int>(state.policy.scanMaliciousBlockThreshold), 99));
+    state.policy.scanBenignDampeningScore =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 10), 0, 80));
+    state.policy.genericRuleScoreScalePercent =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 11), 20, 100));
+    state.policy.realtimeExecuteBlockThreshold =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 12), 40, 99));
+    state.policy.realtimeNonExecuteBlockThreshold =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 13), 50, 99));
+    state.policy.realtimeQuarantineThreshold =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 14),
+                          std::max<int>(static_cast<int>(state.policy.realtimeExecuteBlockThreshold),
+                                static_cast<int>(state.policy.realtimeNonExecuteBlockThreshold)),
+                          99));
+    state.policy.realtimeObserveTelemetryThreshold =
+      static_cast<std::uint32_t>(std::clamp(sqlite3_column_int(policyStatement.get(), 15), 1, 95));
+    state.policy.realtimeObserveOnlyForNonExecute = sqlite3_column_int(policyStatement.get(), 16) != 0;
+    state.policy.archiveObserveOnly = sqlite3_column_int(policyStatement.get(), 17) != 0;
+    state.policy.networkObserveOnly = sqlite3_column_int(policyStatement.get(), 18) != 0;
+    state.policy.cloudLookupObserveOnly = sqlite3_column_int(policyStatement.get(), 19) != 0;
+    state.policy.requireSignerForSuppression = sqlite3_column_int(policyStatement.get(), 20) != 0;
+    state.policy.allowUnsignedSuppressionPathExecutables = sqlite3_column_int(policyStatement.get(), 21) != 0;
+    state.policy.enableCleanwareSignerDampening = sqlite3_column_int(policyStatement.get(), 22) != 0;
+    state.policy.enableKnownGoodHashDampening = sqlite3_column_int(policyStatement.get(), 23) != 0;
+    state.policy.suppressionPathRoots = SplitStrings(ColumnText(policyStatement.get(), 24));
+    state.policy.suppressionSha256 = SplitStrings(ColumnText(policyStatement.get(), 25));
+    state.policy.suppressionSignerNames = SplitStrings(ColumnText(policyStatement.get(), 26));
   }
 
   return true;
@@ -448,9 +585,16 @@ void RuntimeDatabase::SaveAgentState(const AgentState& state) const {
                                    "INSERT INTO policy_cache("
                                    " singleton, policy_id, policy_name, revision, realtime_protection_enabled,"
                                    " cloud_lookup_enabled, script_inspection_enabled, network_containment_enabled,"
-                                   " quarantine_on_malicious, suppression_path_roots, suppression_sha256,"
-                                   " suppression_signer_names)"
-                                   " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                                   " quarantine_on_malicious, scan_malicious_block_threshold,"
+                                   " scan_malicious_quarantine_threshold, scan_benign_dampening_score,"
+                                   " generic_rule_score_scale_percent, realtime_execute_block_threshold,"
+                                   " realtime_non_execute_block_threshold, realtime_quarantine_threshold,"
+                                   " realtime_observe_telemetry_threshold, realtime_observe_only_non_execute,"
+                                   " archive_observe_only, network_observe_only, cloud_lookup_observe_only,"
+                                   " require_signer_for_suppression, allow_unsigned_suppression_path_executables,"
+                                   " enable_cleanware_signer_dampening, enable_known_good_hash_dampening,"
+                                   " suppression_path_roots, suppression_sha256, suppression_signer_names)"
+                                   " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                                    " ON CONFLICT(singleton) DO UPDATE SET"
                                    " policy_id=excluded.policy_id, policy_name=excluded.policy_name,"
                                    " revision=excluded.revision,"
@@ -459,6 +603,22 @@ void RuntimeDatabase::SaveAgentState(const AgentState& state) const {
                                    " script_inspection_enabled=excluded.script_inspection_enabled,"
                                    " network_containment_enabled=excluded.network_containment_enabled,"
                                    " quarantine_on_malicious=excluded.quarantine_on_malicious,"
+                                   " scan_malicious_block_threshold=excluded.scan_malicious_block_threshold,"
+                                   " scan_malicious_quarantine_threshold=excluded.scan_malicious_quarantine_threshold,"
+                                   " scan_benign_dampening_score=excluded.scan_benign_dampening_score,"
+                                   " generic_rule_score_scale_percent=excluded.generic_rule_score_scale_percent,"
+                                   " realtime_execute_block_threshold=excluded.realtime_execute_block_threshold,"
+                                   " realtime_non_execute_block_threshold=excluded.realtime_non_execute_block_threshold,"
+                                   " realtime_quarantine_threshold=excluded.realtime_quarantine_threshold,"
+                                   " realtime_observe_telemetry_threshold=excluded.realtime_observe_telemetry_threshold,"
+                                   " realtime_observe_only_non_execute=excluded.realtime_observe_only_non_execute,"
+                                   " archive_observe_only=excluded.archive_observe_only,"
+                                   " network_observe_only=excluded.network_observe_only,"
+                                   " cloud_lookup_observe_only=excluded.cloud_lookup_observe_only,"
+                                   " require_signer_for_suppression=excluded.require_signer_for_suppression,"
+                                   " allow_unsigned_suppression_path_executables=excluded.allow_unsigned_suppression_path_executables,"
+                                   " enable_cleanware_signer_dampening=excluded.enable_cleanware_signer_dampening,"
+                                   " enable_known_good_hash_dampening=excluded.enable_known_good_hash_dampening,"
                                    " suppression_path_roots=excluded.suppression_path_roots,"
                                    " suppression_sha256=excluded.suppression_sha256,"
                                    " suppression_signer_names=excluded.suppression_signer_names;");
@@ -471,9 +631,25 @@ void RuntimeDatabase::SaveAgentState(const AgentState& state) const {
     sqlite3_bind_int(policyStatement.get(), 7, state.policy.scriptInspectionEnabled ? 1 : 0);
     sqlite3_bind_int(policyStatement.get(), 8, state.policy.networkContainmentEnabled ? 1 : 0);
     sqlite3_bind_int(policyStatement.get(), 9, state.policy.quarantineOnMalicious ? 1 : 0);
-    BindText(policyStatement.get(), 10, JoinStrings(state.policy.suppressionPathRoots));
-    BindText(policyStatement.get(), 11, JoinStrings(state.policy.suppressionSha256));
-    BindText(policyStatement.get(), 12, JoinStrings(state.policy.suppressionSignerNames));
+    sqlite3_bind_int(policyStatement.get(), 10, static_cast<int>(state.policy.scanMaliciousBlockThreshold));
+    sqlite3_bind_int(policyStatement.get(), 11, static_cast<int>(state.policy.scanMaliciousQuarantineThreshold));
+    sqlite3_bind_int(policyStatement.get(), 12, static_cast<int>(state.policy.scanBenignDampeningScore));
+    sqlite3_bind_int(policyStatement.get(), 13, static_cast<int>(state.policy.genericRuleScoreScalePercent));
+    sqlite3_bind_int(policyStatement.get(), 14, static_cast<int>(state.policy.realtimeExecuteBlockThreshold));
+    sqlite3_bind_int(policyStatement.get(), 15, static_cast<int>(state.policy.realtimeNonExecuteBlockThreshold));
+    sqlite3_bind_int(policyStatement.get(), 16, static_cast<int>(state.policy.realtimeQuarantineThreshold));
+    sqlite3_bind_int(policyStatement.get(), 17, static_cast<int>(state.policy.realtimeObserveTelemetryThreshold));
+    sqlite3_bind_int(policyStatement.get(), 18, state.policy.realtimeObserveOnlyForNonExecute ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 19, state.policy.archiveObserveOnly ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 20, state.policy.networkObserveOnly ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 21, state.policy.cloudLookupObserveOnly ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 22, state.policy.requireSignerForSuppression ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 23, state.policy.allowUnsignedSuppressionPathExecutables ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 24, state.policy.enableCleanwareSignerDampening ? 1 : 0);
+    sqlite3_bind_int(policyStatement.get(), 25, state.policy.enableKnownGoodHashDampening ? 1 : 0);
+    BindText(policyStatement.get(), 26, JoinStrings(state.policy.suppressionPathRoots));
+    BindText(policyStatement.get(), 27, JoinStrings(state.policy.suppressionSha256));
+    BindText(policyStatement.get(), 28, JoinStrings(state.policy.suppressionSignerNames));
     StepDone(db.get(), policyStatement.get());
 
     Commit(db.get());
@@ -1548,6 +1724,400 @@ void RuntimeDatabase::PurgeExpiredThreatIntelRecords(const std::wstring& referen
                            "DELETE FROM threat_intelligence_cache WHERE expires_at <> '' AND expires_at <= ?;");
   BindText(statement.get(), 1, referenceTimestamp);
   StepDone(db.get(), statement.get());
+}
+
+void RuntimeDatabase::UpsertTrustedSignerRecord(const TrustedSignerRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO trusted_signers("
+      " signer_name, publisher, trust_level, source, summary, details,"
+      " first_seen_at, last_seen_at, expires_at, prevalence, allow_suppression)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(signer_name) DO UPDATE SET"
+      " publisher=excluded.publisher, trust_level=excluded.trust_level, source=excluded.source,"
+      " summary=excluded.summary, details=excluded.details,"
+      " first_seen_at=COALESCE(trusted_signers.first_seen_at, excluded.first_seen_at),"
+      " last_seen_at=excluded.last_seen_at, expires_at=excluded.expires_at,"
+      " prevalence=excluded.prevalence, allow_suppression=excluded.allow_suppression;");
+  BindText(statement.get(), 1, record.signerName);
+  BindText(statement.get(), 2, record.publisher);
+  BindText(statement.get(), 3, record.trustLevel);
+  BindText(statement.get(), 4, record.source);
+  BindText(statement.get(), 5, record.summary);
+  BindText(statement.get(), 6, record.details);
+  BindText(statement.get(), 7, record.firstSeenAt);
+  BindText(statement.get(), 8, record.lastSeenAt);
+  BindText(statement.get(), 9, record.expiresAt);
+  sqlite3_bind_int(statement.get(), 10, static_cast<int>(record.prevalence));
+  sqlite3_bind_int(statement.get(), 11, record.allowSuppression ? 1 : 0);
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::TryGetTrustedSignerRecord(const std::wstring& signerName, TrustedSignerRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT signer_name, publisher, trust_level, source, summary, details,"
+      " first_seen_at, last_seen_at, expires_at, prevalence, allow_suppression"
+      " FROM trusted_signers WHERE signer_name=? LIMIT 1;");
+  BindText(statement.get(), 1, signerName);
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading trusted signer record failed");
+  }
+
+  record.signerName = ColumnText(statement.get(), 0);
+  record.publisher = ColumnText(statement.get(), 1);
+  record.trustLevel = ColumnText(statement.get(), 2);
+  record.source = ColumnText(statement.get(), 3);
+  record.summary = ColumnText(statement.get(), 4);
+  record.details = ColumnText(statement.get(), 5);
+  record.firstSeenAt = ColumnText(statement.get(), 6);
+  record.lastSeenAt = ColumnText(statement.get(), 7);
+  record.expiresAt = ColumnText(statement.get(), 8);
+  record.prevalence = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 9));
+  record.allowSuppression = sqlite3_column_int(statement.get(), 10) != 0;
+  return true;
+}
+
+std::vector<TrustedSignerRecord> RuntimeDatabase::ListTrustedSignerRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT signer_name, publisher, trust_level, source, summary, details,"
+      " first_seen_at, last_seen_at, expires_at, prevalence, allow_suppression"
+      " FROM trusted_signers ORDER BY prevalence DESC, last_seen_at DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<TrustedSignerRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing trusted signer records failed");
+    }
+    records.push_back(TrustedSignerRecord{
+        .signerName = ColumnText(statement.get(), 0),
+        .publisher = ColumnText(statement.get(), 1),
+        .trustLevel = ColumnText(statement.get(), 2),
+        .source = ColumnText(statement.get(), 3),
+        .summary = ColumnText(statement.get(), 4),
+        .details = ColumnText(statement.get(), 5),
+        .firstSeenAt = ColumnText(statement.get(), 6),
+        .lastSeenAt = ColumnText(statement.get(), 7),
+        .expiresAt = ColumnText(statement.get(), 8),
+        .prevalence = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 9)),
+        .allowSuppression = sqlite3_column_int(statement.get(), 10) != 0});
+  }
+  return records;
+}
+
+void RuntimeDatabase::UpsertKnownGoodHashRecord(const KnownGoodHashRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO known_good_hashes("
+      " sha256, source, summary, details, signer_name, first_seen_at, last_seen_at, expires_at, prevalence)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(sha256) DO UPDATE SET"
+      " source=excluded.source, summary=excluded.summary, details=excluded.details,"
+      " signer_name=excluded.signer_name,"
+      " first_seen_at=COALESCE(known_good_hashes.first_seen_at, excluded.first_seen_at),"
+      " last_seen_at=excluded.last_seen_at, expires_at=excluded.expires_at, prevalence=excluded.prevalence;");
+  BindText(statement.get(), 1, record.sha256);
+  BindText(statement.get(), 2, record.source);
+  BindText(statement.get(), 3, record.summary);
+  BindText(statement.get(), 4, record.details);
+  BindText(statement.get(), 5, record.signerName);
+  BindText(statement.get(), 6, record.firstSeenAt);
+  BindText(statement.get(), 7, record.lastSeenAt);
+  BindText(statement.get(), 8, record.expiresAt);
+  sqlite3_bind_int(statement.get(), 9, static_cast<int>(record.prevalence));
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::TryGetKnownGoodHashRecord(const std::wstring& sha256, KnownGoodHashRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT sha256, source, summary, details, signer_name, first_seen_at, last_seen_at, expires_at, prevalence"
+      " FROM known_good_hashes WHERE sha256=? LIMIT 1;");
+  BindText(statement.get(), 1, sha256);
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading known-good hash record failed");
+  }
+
+  record.sha256 = ColumnText(statement.get(), 0);
+  record.source = ColumnText(statement.get(), 1);
+  record.summary = ColumnText(statement.get(), 2);
+  record.details = ColumnText(statement.get(), 3);
+  record.signerName = ColumnText(statement.get(), 4);
+  record.firstSeenAt = ColumnText(statement.get(), 5);
+  record.lastSeenAt = ColumnText(statement.get(), 6);
+  record.expiresAt = ColumnText(statement.get(), 7);
+  record.prevalence = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 8));
+  return true;
+}
+
+std::vector<KnownGoodHashRecord> RuntimeDatabase::ListKnownGoodHashRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT sha256, source, summary, details, signer_name, first_seen_at, last_seen_at, expires_at, prevalence"
+      " FROM known_good_hashes ORDER BY prevalence DESC, last_seen_at DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<KnownGoodHashRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing known-good hash records failed");
+    }
+    records.push_back(KnownGoodHashRecord{
+        .sha256 = ColumnText(statement.get(), 0),
+        .source = ColumnText(statement.get(), 1),
+        .summary = ColumnText(statement.get(), 2),
+        .details = ColumnText(statement.get(), 3),
+        .signerName = ColumnText(statement.get(), 4),
+        .firstSeenAt = ColumnText(statement.get(), 5),
+        .lastSeenAt = ColumnText(statement.get(), 6),
+        .expiresAt = ColumnText(statement.get(), 7),
+        .prevalence = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 8))});
+  }
+  return records;
+}
+
+void RuntimeDatabase::UpsertThreatPrevalenceRecord(const ThreatPrevalenceRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO threat_prevalence("
+      " indicator_type, indicator_key, sighting_count, first_seen_at, last_seen_at, last_source)"
+      " VALUES(?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(indicator_type, indicator_key) DO UPDATE SET"
+      " sighting_count=excluded.sighting_count,"
+      " first_seen_at=COALESCE(threat_prevalence.first_seen_at, excluded.first_seen_at),"
+      " last_seen_at=excluded.last_seen_at, last_source=excluded.last_source;");
+  BindText(statement.get(), 1, ThreatIndicatorTypeToString(record.indicatorType));
+  BindText(statement.get(), 2, record.indicatorKey);
+  sqlite3_bind_int64(statement.get(), 3, static_cast<sqlite3_int64>(record.sightingCount));
+  BindText(statement.get(), 4, record.firstSeenAt);
+  BindText(statement.get(), 5, record.lastSeenAt);
+  BindText(statement.get(), 6, record.lastSource);
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::TryGetThreatPrevalenceRecord(const ThreatIndicatorType indicatorType,
+                                                   const std::wstring& indicatorKey,
+                                                   ThreatPrevalenceRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT indicator_type, indicator_key, sighting_count, first_seen_at, last_seen_at, last_source"
+      " FROM threat_prevalence WHERE indicator_type=? AND indicator_key=? LIMIT 1;");
+  BindText(statement.get(), 1, ThreatIndicatorTypeToString(indicatorType));
+  BindText(statement.get(), 2, indicatorKey);
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading threat prevalence record failed");
+  }
+
+  record.indicatorType = ThreatIndicatorTypeFromString(ColumnText(statement.get(), 0));
+  record.indicatorKey = ColumnText(statement.get(), 1);
+  record.sightingCount = static_cast<std::uint64_t>(sqlite3_column_int64(statement.get(), 2));
+  record.firstSeenAt = ColumnText(statement.get(), 3);
+  record.lastSeenAt = ColumnText(statement.get(), 4);
+  record.lastSource = ColumnText(statement.get(), 5);
+  return true;
+}
+
+void RuntimeDatabase::UpsertRealtimeFeedbackRecord(const RealtimeFeedbackRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO realtime_feedback("
+      " feedback_id, correlation_id, subject_path, sha256, disposition, action, reason_code,"
+      " feedback_source, operator_name, notes, confidence_delta, created_at)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(feedback_id) DO UPDATE SET"
+      " correlation_id=excluded.correlation_id, subject_path=excluded.subject_path,"
+      " sha256=excluded.sha256, disposition=excluded.disposition, action=excluded.action,"
+      " reason_code=excluded.reason_code, feedback_source=excluded.feedback_source,"
+      " operator_name=excluded.operator_name, notes=excluded.notes,"
+      " confidence_delta=excluded.confidence_delta, created_at=excluded.created_at;");
+  BindText(statement.get(), 1, record.feedbackId);
+  BindText(statement.get(), 2, record.correlationId);
+  BindPath(statement.get(), 3, record.subjectPath);
+  BindText(statement.get(), 4, record.sha256);
+  BindText(statement.get(), 5, record.disposition);
+  BindText(statement.get(), 6, record.action);
+  BindText(statement.get(), 7, record.reasonCode);
+  BindText(statement.get(), 8, record.feedbackSource);
+  BindText(statement.get(), 9, record.operatorName);
+  BindText(statement.get(), 10, record.notes);
+  sqlite3_bind_int(statement.get(), 11, record.confidenceDelta);
+  BindText(statement.get(), 12, record.createdAt);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<RealtimeFeedbackRecord> RuntimeDatabase::ListRealtimeFeedbackRecords(const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT feedback_id, correlation_id, subject_path, sha256, disposition, action, reason_code,"
+      " feedback_source, operator_name, notes, confidence_delta, created_at"
+      " FROM realtime_feedback ORDER BY created_at DESC LIMIT ?;");
+  sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
+
+  std::vector<RealtimeFeedbackRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing realtime feedback records failed");
+    }
+    records.push_back(RealtimeFeedbackRecord{
+        .feedbackId = ColumnText(statement.get(), 0),
+        .correlationId = ColumnText(statement.get(), 1),
+        .subjectPath = std::filesystem::path(ColumnText(statement.get(), 2)),
+        .sha256 = ColumnText(statement.get(), 3),
+        .disposition = ColumnText(statement.get(), 4),
+        .action = ColumnText(statement.get(), 5),
+        .reasonCode = ColumnText(statement.get(), 6),
+        .feedbackSource = ColumnText(statement.get(), 7),
+        .operatorName = ColumnText(statement.get(), 8),
+        .notes = ColumnText(statement.get(), 9),
+        .confidenceDelta = sqlite3_column_int(statement.get(), 10),
+        .createdAt = ColumnText(statement.get(), 11)});
+  }
+  return records;
+}
+
+void RuntimeDatabase::UpsertSelfTestOutcomeRecord(const SelfTestOutcomeRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO selftest_history("
+      " check_id, check_name, status, details, remediation, phase, build_version, recorded_at)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?);");
+  BindText(statement.get(), 1, record.checkId);
+  BindText(statement.get(), 2, record.checkName);
+  BindText(statement.get(), 3, record.status);
+  BindText(statement.get(), 4, record.details);
+  BindText(statement.get(), 5, record.remediation);
+  BindText(statement.get(), 6, record.phase);
+  BindText(statement.get(), 7, record.buildVersion);
+  BindText(statement.get(), 8, record.recordedAt);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<SelfTestOutcomeRecord> RuntimeDatabase::ListSelfTestOutcomeRecords(const std::wstring& phase,
+                                                                                const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT check_id, check_name, status, details, remediation, phase, build_version, recorded_at"
+      " FROM selftest_history WHERE (? = '' OR phase = ?) ORDER BY recorded_at DESC LIMIT ?;");
+  BindText(statement.get(), 1, phase);
+  BindText(statement.get(), 2, phase);
+  sqlite3_bind_int64(statement.get(), 3, static_cast<sqlite3_int64>(limit));
+
+  std::vector<SelfTestOutcomeRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing self-test history records failed");
+    }
+    records.push_back(SelfTestOutcomeRecord{
+        .checkId = ColumnText(statement.get(), 0),
+        .checkName = ColumnText(statement.get(), 1),
+        .status = ColumnText(statement.get(), 2),
+        .details = ColumnText(statement.get(), 3),
+        .remediation = ColumnText(statement.get(), 4),
+        .phase = ColumnText(statement.get(), 5),
+        .buildVersion = ColumnText(statement.get(), 6),
+        .recordedAt = ColumnText(statement.get(), 7)});
+  }
+  return records;
+}
+
+void RuntimeDatabase::UpsertRuleQualityRecord(const RuleQualityRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "INSERT INTO rule_quality("
+      " rule_code, phase, malicious_hits, benign_hits, total_evaluations, quality_score, summary, details, updated_at)"
+      " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      " ON CONFLICT(rule_code, phase) DO UPDATE SET"
+      " malicious_hits=excluded.malicious_hits, benign_hits=excluded.benign_hits,"
+      " total_evaluations=excluded.total_evaluations, quality_score=excluded.quality_score,"
+      " summary=excluded.summary, details=excluded.details, updated_at=excluded.updated_at;");
+  BindText(statement.get(), 1, record.ruleCode);
+  BindText(statement.get(), 2, record.phase);
+  sqlite3_bind_int(statement.get(), 3, static_cast<int>(record.maliciousHits));
+  sqlite3_bind_int(statement.get(), 4, static_cast<int>(record.benignHits));
+  sqlite3_bind_int(statement.get(), 5, static_cast<int>(record.totalEvaluations));
+  sqlite3_bind_int(statement.get(), 6, static_cast<int>(record.qualityScore));
+  BindText(statement.get(), 7, record.summary);
+  BindText(statement.get(), 8, record.details);
+  BindText(statement.get(), 9, record.updatedAt);
+  StepDone(db.get(), statement.get());
+}
+
+std::vector<RuleQualityRecord> RuntimeDatabase::ListRuleQualityRecords(const std::wstring& phase,
+                                                                       const std::size_t limit) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(
+      db.get(),
+      "SELECT rule_code, phase, malicious_hits, benign_hits, total_evaluations, quality_score,"
+      " summary, details, updated_at"
+      " FROM rule_quality WHERE (? = '' OR phase = ?) ORDER BY quality_score DESC, updated_at DESC LIMIT ?;");
+  BindText(statement.get(), 1, phase);
+  BindText(statement.get(), 2, phase);
+  sqlite3_bind_int64(statement.get(), 3, static_cast<sqlite3_int64>(limit));
+
+  std::vector<RuleQualityRecord> records;
+  for (;;) {
+    const auto step = sqlite3_step(statement.get());
+    if (step == SQLITE_DONE) {
+      break;
+    }
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db.get(), "listing rule quality records failed");
+    }
+    records.push_back(RuleQualityRecord{
+        .ruleCode = ColumnText(statement.get(), 0),
+        .phase = ColumnText(statement.get(), 1),
+        .maliciousHits = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 2)),
+        .benignHits = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 3)),
+        .totalEvaluations = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 4)),
+        .qualityScore = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 5)),
+        .summary = ColumnText(statement.get(), 6),
+        .details = ColumnText(statement.get(), 7),
+        .updatedAt = ColumnText(statement.get(), 8)});
+  }
+  return records;
 }
 
 void RuntimeDatabase::UpsertExclusionPolicyRecord(const ExclusionPolicyRecord& record) const {

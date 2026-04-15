@@ -1,0 +1,7 @@
+Fenrir Phase 2 cleanware sample
+
+This file contains routine office content for false-positive testing.
+Agenda:
+- Quarterly planning
+- Vendor invoice review
+- Staffing and onboarding notes

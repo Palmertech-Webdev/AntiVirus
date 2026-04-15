@@ -20,6 +20,17 @@ struct AgentConfig {
   std::filesystem::path elamDriverPath{};
   std::filesystem::path quarantineRootPath{std::filesystem::path(L"runtime") / L"quarantine"};
   std::filesystem::path evidenceRootPath{std::filesystem::path(L"runtime") / L"evidence"};
+  std::filesystem::path threatIntelPackPath{};
+  std::filesystem::path cleanwareSignerListPath{std::filesystem::path(L"signatures") /
+                                                L"default-cleanware-signers.tsv"};
+  std::filesystem::path knownGoodHashListPath{std::filesystem::path(L"signatures") /
+                                              L"default-known-good-hashes.tsv"};
+  std::filesystem::path observeOnlyRuleListPath{std::filesystem::path(L"signatures") /
+                                                L"default-observe-only.tsv"};
+  std::filesystem::path phase2CleanwareCorpusPath{};
+  std::filesystem::path phase2FalsePositiveCorpusPath{};
+  std::filesystem::path phase2RuleQualityReportPath{std::filesystem::path(L"runtime") /
+                                                    L"phase2-rule-quality.json"};
   std::wstring realtimeProtectionPortName{L"\\AntiVirusRealtimePort"};
   std::wstring agentVersion{L"0.1.0-alpha"};
   std::wstring platformVersion{L"platform-0.1.0"};
@@ -33,6 +44,15 @@ struct AgentConfig {
   int minFreeDiskMb{1024};
   bool deferHeavyActionsOnBattery{true};
   bool enforceReleasePromotionGates{true};
+  int phase2FalsePositiveBudgetPercent{2};
+  int phase2MaxFalsePositiveFindings{2};
+  int phase2MinRuleQualityScore{70};
+  int phase2MinMaliciousPassRatePercent{90};
+  int phase2MinCleanwarePassRatePercent{98};
+  int genericRuleScoreCap{34};
+  int benignContextDampeningScore{30};
+  int nonExecuteRealtimeBlockBias{10};
+  int reputationKnownGoodDampeningBonus{25};
   bool isolationAllowLoopback{true};
   std::vector<std::wstring> isolationAllowedRemoteAddresses{};
   std::vector<std::wstring> isolationAllowedApplications{};

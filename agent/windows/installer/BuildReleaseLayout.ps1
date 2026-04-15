@@ -3,6 +3,8 @@ param(
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
     [string]$InstallerOutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
     [string]$DriverArtifactRoot = '',
+    [string]$DriverPackageRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'driver\minifilter\package'),
+    [switch]$AllowMissingMinifilterPayload,
     [string]$WebView2RuntimeInstallerPath = '',
     [switch]$Clean
 )
@@ -68,6 +70,81 @@ function Assert-PathPresent {
 
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "Required release artifact is missing: $Path"
+    }
+}
+
+function Resolve-FirstExistingPath {
+    param([string[]]$Candidates)
+
+    foreach ($candidate in $Candidates) {
+        if (-not $candidate) {
+            continue
+        }
+
+        if (Test-Path -LiteralPath $candidate) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    return ''
+}
+
+function Stage-MinifilterPayload {
+    param(
+        [string]$WindowsRoot,
+        [string]$OutputRoot,
+        [string]$DriverArtifactRoot,
+        [string]$DriverPackageRoot,
+        [bool]$RequireCompletePayload
+    )
+
+    $driverSourceRoot = Join-Path $WindowsRoot 'driver\minifilter'
+    $driverOutputRoot = Join-Path $OutputRoot 'driver'
+    Ensure-Directory -Path $driverOutputRoot
+
+    Copy-IfPresent -Source (Join-Path $driverSourceRoot 'AntivirusMinifilter.inf') -Destination (Join-Path $driverOutputRoot 'AntivirusMinifilter.inf')
+    Copy-IfPresent -Source (Join-Path $driverSourceRoot 'README.md') -Destination (Join-Path $driverOutputRoot 'README.md')
+
+    $artifactRoot = ''
+    if ($DriverArtifactRoot) {
+        if (-not (Test-Path -LiteralPath $DriverArtifactRoot)) {
+            throw "Configured DriverArtifactRoot does not exist: $DriverArtifactRoot"
+        }
+        $artifactRoot = (Resolve-Path -LiteralPath $DriverArtifactRoot).Path
+    }
+
+    $packageRoot = ''
+    if ($DriverPackageRoot) {
+        $packageCandidate = $DriverPackageRoot
+        if (-not [System.IO.Path]::IsPathRooted($packageCandidate)) {
+            $packageCandidate = Join-Path $WindowsRoot $packageCandidate
+        }
+
+        $packageCandidate = [System.IO.Path]::GetFullPath($packageCandidate)
+        if (Test-Path -LiteralPath $packageCandidate) {
+            $packageRoot = $packageCandidate
+        }
+    }
+
+    foreach ($name in @('AntivirusMinifilter.sys', 'AntivirusMinifilter.cat')) {
+        $targetPath = Join-Path $driverOutputRoot $name
+        $sourcePath = Resolve-FirstExistingPath -Candidates @(
+            $(if ($artifactRoot) { Join-Path $artifactRoot $name } else { '' }),
+            $(if ($packageRoot) { Join-Path $packageRoot $name } else { '' })
+        )
+
+        if ($sourcePath) {
+            Copy-IfPresent -Source $sourcePath -Destination $targetPath
+            continue
+        }
+
+        if (Test-Path -LiteralPath $targetPath) {
+            continue
+        }
+
+        if ($RequireCompletePayload) {
+            throw "Required minifilter payload artifact is missing: $name. Supply -DriverArtifactRoot or provide a complete package under $DriverPackageRoot."
+        }
     }
 }
 
@@ -139,6 +216,7 @@ $serviceSourceRoot = Join-Path $windowsRoot 'service'
 $buildRoot = [System.IO.Path]::GetFullPath($BuildRoot)
 $outputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 $installerOutputRoot = [System.IO.Path]::GetFullPath($InstallerOutputRoot)
+$requireMinifilterPayload = -not $AllowMissingMinifilterPayload.IsPresent
 $webView2RuntimeInstallerFullPath = ''
 
 if ($WebView2RuntimeInstallerPath) {
@@ -153,12 +231,17 @@ if ($Clean -and (Test-Path -LiteralPath $outputRoot)) {
 }
 
 Ensure-Directory -Path $buildRoot
+Ensure-Directory -Path $outputRoot
+Ensure-Directory -Path (Join-Path $outputRoot 'driver')
+
+Stage-MinifilterPayload -WindowsRoot $windowsRoot -OutputRoot $outputRoot -DriverArtifactRoot $DriverArtifactRoot -DriverPackageRoot $DriverPackageRoot -RequireCompletePayload $requireMinifilterPayload
 
 $cmakeConfigureArgs = @(
     '-S', $serviceSourceRoot,
     '-B', $buildRoot,
     "-DANTIVIRUS_DEV_OUTPUT_ROOT=$outputRoot",
     "-DANTIVIRUS_INSTALL_OUTPUT_ROOT=$installerOutputRoot",
+    "-DANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD:BOOL=$(if ($requireMinifilterPayload) { 'ON' } else { 'OFF' })",
     "-DANTIVIRUS_WEBVIEW2_BOOTSTRAPPER:FILEPATH=$webView2RuntimeInstallerFullPath"
 )
 
@@ -198,9 +281,7 @@ $artifactMap = @(
     @{ Source = (Join-Path $windowsRoot 'service\README.md'); Target = (Join-Path $outputRoot 'docs\service-README.md') },
     @{ Source = (Join-Path $windowsRoot 'tools\endpointui\README.md'); Target = (Join-Path $outputRoot 'docs\endpoint-client-README.md') },
     @{ Source = (Join-Path $windowsRoot 'installer\README.md'); Target = (Join-Path $outputRoot 'docs\installer-README.md') },
-    @{ Source = (Join-Path $windowsRoot 'signatures\default-signatures.tsv'); Target = (Join-Path $outputRoot 'signatures\default-signatures.tsv') },
-    @{ Source = (Join-Path $windowsRoot 'driver\minifilter\AntivirusMinifilter.inf'); Target = (Join-Path $outputRoot 'driver\AntivirusMinifilter.inf') },
-    @{ Source = (Join-Path $windowsRoot 'driver\minifilter\README.md'); Target = (Join-Path $outputRoot 'driver\README.md') }
+    @{ Source = (Join-Path $windowsRoot 'signatures\default-signatures.tsv'); Target = (Join-Path $outputRoot 'signatures\default-signatures.tsv') }
 )
 
 foreach ($artifact in $artifactMap) {
@@ -211,16 +292,6 @@ $winpthreadRuntime = Find-MinGwRuntimeDll -BuildRoot $buildRoot -DllName 'libwin
 if ($winpthreadRuntime) {
     Copy-IfPresent -Source $winpthreadRuntime -Destination (Join-Path $outputRoot 'libwinpthread-1.dll')
     Copy-IfPresent -Source $winpthreadRuntime -Destination (Join-Path $outputRoot 'tools\libwinpthread-1.dll')
-}
-
-if ($DriverArtifactRoot) {
-    $driverRoot = (Resolve-Path $DriverArtifactRoot).Path
-    foreach ($name in @('AntivirusMinifilter.sys', 'AntivirusMinifilter.cat')) {
-        $source = Join-Path $driverRoot $name
-        if (Test-Path -LiteralPath $source) {
-            Copy-IfPresent -Source $source -Destination (Join-Path $outputRoot "driver\$name")
-        }
-    }
 }
 
 $inventory = @()

@@ -4,7 +4,7 @@ param(
   [string]$WorkingRoot = "./tmp-phase1-minifilter-package",
   [string]$ExpectedServiceName = "AntivirusMinifilter",
   [bool]$RequireSignedArtifacts = $true,
-  [switch]$RequireServiceInstalled
+  [bool]$RequireServiceInstalled = $true
 )
 
 $ErrorActionPreference = "Stop"

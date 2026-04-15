@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -95,6 +97,17 @@ bool GetBool(const std::map<std::string, std::string>& values, const std::string
   return fallback;
 }
 
+int GetInt(const std::map<std::string, std::string>& values, const std::string& key, const int fallback) {
+  if (const auto entry = values.find(key); entry != values.end()) {
+    try {
+      return std::stoi(entry->second);
+    } catch (...) {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
 std::vector<std::wstring> GetStringList(const std::map<std::string, std::string>& values, const std::string& key) {
   if (const auto entry = values.find(key); entry != values.end()) {
     std::vector<std::wstring> results;
@@ -143,6 +156,57 @@ AgentState ImportLegacyState(const std::filesystem::path& stateFilePath) {
       GetBool(values, "policy_network_containment_enabled", state.policy.networkContainmentEnabled);
   state.policy.quarantineOnMalicious =
       GetBool(values, "policy_quarantine_on_malicious", state.policy.quarantineOnMalicious);
+    state.policy.scanMaliciousBlockThreshold = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_scan_malicious_block_threshold",
+              static_cast<int>(state.policy.scanMaliciousBlockThreshold)),
+           1, 99));
+    state.policy.scanMaliciousQuarantineThreshold = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_scan_malicious_quarantine_threshold",
+              static_cast<int>(state.policy.scanMaliciousQuarantineThreshold)),
+           static_cast<int>(state.policy.scanMaliciousBlockThreshold), 99));
+    state.policy.scanBenignDampeningScore = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_scan_benign_dampening_score",
+              static_cast<int>(state.policy.scanBenignDampeningScore)),
+           0, 80));
+    state.policy.genericRuleScoreScalePercent = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_generic_rule_score_scale_percent",
+              static_cast<int>(state.policy.genericRuleScoreScalePercent)),
+           20, 100));
+    state.policy.realtimeExecuteBlockThreshold = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_realtime_execute_block_threshold",
+              static_cast<int>(state.policy.realtimeExecuteBlockThreshold)),
+           40, 99));
+    state.policy.realtimeNonExecuteBlockThreshold = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_realtime_non_execute_block_threshold",
+              static_cast<int>(state.policy.realtimeNonExecuteBlockThreshold)),
+           50, 99));
+    state.policy.realtimeQuarantineThreshold = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_realtime_quarantine_threshold",
+              static_cast<int>(state.policy.realtimeQuarantineThreshold)),
+           std::max<int>(static_cast<int>(state.policy.realtimeExecuteBlockThreshold),
+                   static_cast<int>(state.policy.realtimeNonExecuteBlockThreshold)),
+           99));
+    state.policy.realtimeObserveTelemetryThreshold = static_cast<std::uint32_t>(
+      std::clamp(GetInt(values, "policy_realtime_observe_telemetry_threshold",
+              static_cast<int>(state.policy.realtimeObserveTelemetryThreshold)),
+           1, 95));
+    state.policy.realtimeObserveOnlyForNonExecute =
+      GetBool(values, "policy_realtime_observe_only_non_execute", state.policy.realtimeObserveOnlyForNonExecute);
+    state.policy.archiveObserveOnly =
+      GetBool(values, "policy_archive_observe_only", state.policy.archiveObserveOnly);
+    state.policy.networkObserveOnly =
+      GetBool(values, "policy_network_observe_only", state.policy.networkObserveOnly);
+    state.policy.cloudLookupObserveOnly =
+      GetBool(values, "policy_cloud_lookup_observe_only", state.policy.cloudLookupObserveOnly);
+    state.policy.requireSignerForSuppression =
+      GetBool(values, "policy_require_signer_for_suppression", state.policy.requireSignerForSuppression);
+    state.policy.allowUnsignedSuppressionPathExecutables =
+      GetBool(values, "policy_allow_unsigned_suppression_path_executables",
+          state.policy.allowUnsignedSuppressionPathExecutables);
+    state.policy.enableCleanwareSignerDampening =
+      GetBool(values, "policy_enable_cleanware_signer_dampening", state.policy.enableCleanwareSignerDampening);
+    state.policy.enableKnownGoodHashDampening =
+      GetBool(values, "policy_enable_known_good_hash_dampening", state.policy.enableKnownGoodHashDampening);
   state.policy.suppressionPathRoots = GetStringList(values, "policy_suppression_path_roots");
   state.policy.suppressionSha256 = GetStringList(values, "policy_suppression_sha256");
   state.policy.suppressionSignerNames = GetStringList(values, "policy_suppression_signer_names");

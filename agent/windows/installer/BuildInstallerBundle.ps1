@@ -2,6 +2,9 @@ param(
     [string]$BuildRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev\build'),
     [string]$DevOutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\dev'),
     [string]$OutputRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'out\install'),
+    [string]$DriverArtifactRoot = '',
+    [string]$DriverPackageRoot = (Join-Path (Split-Path $PSScriptRoot -Parent) 'driver\minifilter\package'),
+    [switch]$AllowMissingMinifilterPayload,
     [string]$WebView2RuntimeInstallerPath = '',
     [switch]$Clean
 )
@@ -12,6 +15,95 @@ function Ensure-Directory {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path | Out-Null
+    }
+}
+
+function Copy-IfPresent {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+
+    if (-not (Test-Path -LiteralPath $Source)) {
+        throw "Required installer payload is missing: $Source"
+    }
+
+    Ensure-Directory -Path (Split-Path -Parent $Destination)
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+}
+
+function Resolve-FirstExistingPath {
+    param([string[]]$Candidates)
+
+    foreach ($candidate in $Candidates) {
+        if (-not $candidate) {
+            continue
+        }
+
+        if (Test-Path -LiteralPath $candidate) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    return ''
+}
+
+function Stage-MinifilterPayload {
+    param(
+        [string]$WindowsRoot,
+        [string]$DevOutputRoot,
+        [string]$DriverArtifactRoot,
+        [string]$DriverPackageRoot,
+        [bool]$RequireCompletePayload
+    )
+
+    $driverSourceRoot = Join-Path $WindowsRoot 'driver\minifilter'
+    $driverOutputRoot = Join-Path $DevOutputRoot 'driver'
+    Ensure-Directory -Path $driverOutputRoot
+
+    Copy-IfPresent -Source (Join-Path $driverSourceRoot 'AntivirusMinifilter.inf') -Destination (Join-Path $driverOutputRoot 'AntivirusMinifilter.inf')
+    Copy-IfPresent -Source (Join-Path $driverSourceRoot 'README.md') -Destination (Join-Path $driverOutputRoot 'README.md')
+
+    $artifactRoot = ''
+    if ($DriverArtifactRoot) {
+        if (-not (Test-Path -LiteralPath $DriverArtifactRoot)) {
+            throw "Configured DriverArtifactRoot does not exist: $DriverArtifactRoot"
+        }
+        $artifactRoot = (Resolve-Path -LiteralPath $DriverArtifactRoot).Path
+    }
+
+    $packageRoot = ''
+    if ($DriverPackageRoot) {
+        $packageCandidate = $DriverPackageRoot
+        if (-not [System.IO.Path]::IsPathRooted($packageCandidate)) {
+            $packageCandidate = Join-Path $WindowsRoot $packageCandidate
+        }
+
+        $packageCandidate = [System.IO.Path]::GetFullPath($packageCandidate)
+        if (Test-Path -LiteralPath $packageCandidate) {
+            $packageRoot = $packageCandidate
+        }
+    }
+
+    foreach ($name in @('AntivirusMinifilter.sys', 'AntivirusMinifilter.cat')) {
+        $targetPath = Join-Path $driverOutputRoot $name
+        $sourcePath = Resolve-FirstExistingPath -Candidates @(
+            $(if ($artifactRoot) { Join-Path $artifactRoot $name } else { '' }),
+            $(if ($packageRoot) { Join-Path $packageRoot $name } else { '' })
+        )
+
+        if ($sourcePath) {
+            Copy-IfPresent -Source $sourcePath -Destination $targetPath
+            continue
+        }
+
+        if (Test-Path -LiteralPath $targetPath) {
+            continue
+        }
+
+        if ($RequireCompletePayload) {
+            throw "Required minifilter payload artifact is missing: $name. Supply -DriverArtifactRoot or provide a complete package under $DriverPackageRoot."
+        }
     }
 }
 
@@ -42,6 +134,7 @@ $serviceSourceRoot = Join-Path $windowsRoot 'service'
 $buildRootFull = [System.IO.Path]::GetFullPath($BuildRoot)
 $devOutputRootFull = [System.IO.Path]::GetFullPath($DevOutputRoot)
 $outputRootFull = [System.IO.Path]::GetFullPath($OutputRoot)
+$requireMinifilterPayload = -not $AllowMissingMinifilterPayload.IsPresent
 $webView2RuntimeInstallerFullPath = ''
 
 if ($WebView2RuntimeInstallerPath) {
@@ -56,13 +149,17 @@ if ($Clean -and (Test-Path -LiteralPath $outputRootFull)) {
 }
 
 Ensure-Directory -Path $buildRootFull
+Ensure-Directory -Path $devOutputRootFull
 Ensure-Directory -Path $outputRootFull
+
+Stage-MinifilterPayload -WindowsRoot $windowsRoot -DevOutputRoot $devOutputRootFull -DriverArtifactRoot $DriverArtifactRoot -DriverPackageRoot $DriverPackageRoot -RequireCompletePayload $requireMinifilterPayload
 
 $cmakeConfigureArgs = @(
     '-S', $serviceSourceRoot,
     '-B', $buildRootFull,
     "-DANTIVIRUS_DEV_OUTPUT_ROOT=$devOutputRootFull",
     "-DANTIVIRUS_INSTALL_OUTPUT_ROOT=$outputRootFull",
+    "-DANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD:BOOL=$(if ($requireMinifilterPayload) { 'ON' } else { 'OFF' })",
     "-DANTIVIRUS_WEBVIEW2_BOOTSTRAPPER:FILEPATH=$webView2RuntimeInstallerFullPath"
 )
 

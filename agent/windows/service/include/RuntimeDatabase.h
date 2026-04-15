@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -87,6 +88,79 @@ struct LocalAdminBaselineMemberRecord {
   bool managedCandidate{false};
 };
 
+struct TrustedSignerRecord {
+  std::wstring signerName;
+  std::wstring publisher;
+  std::wstring trustLevel;
+  std::wstring source;
+  std::wstring summary;
+  std::wstring details;
+  std::wstring firstSeenAt;
+  std::wstring lastSeenAt;
+  std::wstring expiresAt;
+  std::uint32_t prevalence{0};
+  bool allowSuppression{true};
+};
+
+struct KnownGoodHashRecord {
+  std::wstring sha256;
+  std::wstring source;
+  std::wstring summary;
+  std::wstring details;
+  std::wstring signerName;
+  std::wstring firstSeenAt;
+  std::wstring lastSeenAt;
+  std::wstring expiresAt;
+  std::uint32_t prevalence{0};
+};
+
+struct ThreatPrevalenceRecord {
+  ThreatIndicatorType indicatorType{ThreatIndicatorType::Unknown};
+  std::wstring indicatorKey;
+  std::uint64_t sightingCount{0};
+  std::wstring firstSeenAt;
+  std::wstring lastSeenAt;
+  std::wstring lastSource;
+};
+
+struct RealtimeFeedbackRecord {
+  std::wstring feedbackId;
+  std::wstring correlationId;
+  std::filesystem::path subjectPath;
+  std::wstring sha256;
+  std::wstring disposition;
+  std::wstring action;
+  std::wstring reasonCode;
+  std::wstring feedbackSource;
+  std::wstring operatorName;
+  std::wstring notes;
+  int confidenceDelta{0};
+  std::wstring createdAt;
+};
+
+struct SelfTestOutcomeRecord {
+  std::wstring checkId;
+  std::wstring checkName;
+  std::wstring status;
+  std::wstring details;
+  std::wstring remediation;
+  std::wstring phase;
+  std::wstring buildVersion;
+  std::wstring recordedAt;
+};
+
+struct RuleQualityRecord {
+  std::wstring ruleCode;
+  std::wstring phase;
+  std::uint32_t maliciousHits{0};
+  std::uint32_t benignHits{0};
+  std::uint32_t totalEvaluations{0};
+  std::uint32_t qualityScore{0};
+  std::wstring summary;
+  std::wstring details;
+  std::wstring updatedAt;
+};
+
 class RuntimeDatabase {
  public:
   explicit RuntimeDatabase(std::filesystem::path databasePath);
@@ -134,6 +208,23 @@ class RuntimeDatabase {
                                ThreatIntelRecord& record) const;
   std::vector<ThreatIntelRecord> ListThreatIntelRecords(std::size_t limit = 200) const;
   void PurgeExpiredThreatIntelRecords(const std::wstring& referenceTimestamp) const;
+  void UpsertTrustedSignerRecord(const TrustedSignerRecord& record) const;
+  bool TryGetTrustedSignerRecord(const std::wstring& signerName, TrustedSignerRecord& record) const;
+  std::vector<TrustedSignerRecord> ListTrustedSignerRecords(std::size_t limit = 200) const;
+  void UpsertKnownGoodHashRecord(const KnownGoodHashRecord& record) const;
+  bool TryGetKnownGoodHashRecord(const std::wstring& sha256, KnownGoodHashRecord& record) const;
+  std::vector<KnownGoodHashRecord> ListKnownGoodHashRecords(std::size_t limit = 200) const;
+  void UpsertThreatPrevalenceRecord(const ThreatPrevalenceRecord& record) const;
+  bool TryGetThreatPrevalenceRecord(ThreatIndicatorType indicatorType, const std::wstring& indicatorKey,
+                                    ThreatPrevalenceRecord& record) const;
+  void UpsertRealtimeFeedbackRecord(const RealtimeFeedbackRecord& record) const;
+  std::vector<RealtimeFeedbackRecord> ListRealtimeFeedbackRecords(std::size_t limit = 200) const;
+  void UpsertSelfTestOutcomeRecord(const SelfTestOutcomeRecord& record) const;
+  std::vector<SelfTestOutcomeRecord> ListSelfTestOutcomeRecords(const std::wstring& phase = {},
+                                                                std::size_t limit = 200) const;
+  void UpsertRuleQualityRecord(const RuleQualityRecord& record) const;
+  std::vector<RuleQualityRecord> ListRuleQualityRecords(const std::wstring& phase = {},
+                                                        std::size_t limit = 200) const;
   void UpsertExclusionPolicyRecord(const ExclusionPolicyRecord& record) const;
   std::vector<ExclusionPolicyRecord> ListExclusionPolicyRecords(std::size_t limit = 200) const;
   void UpsertQuarantineApprovalRecord(const QuarantineApprovalRecord& record) const;

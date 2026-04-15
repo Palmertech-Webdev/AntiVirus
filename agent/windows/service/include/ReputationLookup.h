@@ -13,14 +13,18 @@ struct ReputationLookupResult {
   bool lookupSucceeded{false};
   bool knownGood{false};
   bool malicious{false};
+  bool trustedSigner{false};
+  bool observeOnly{false};
   bool fromCache{false};
   bool localOnly{false};
   std::uint32_t trustScore{0};
   std::uint32_t providerWeight{0};
+  std::uint32_t prevalence{0};
   ThreatIndicatorType indicatorType{ThreatIndicatorType::Unknown};
   std::wstring indicatorKey;
   std::wstring provider;
   std::wstring source;
+  std::wstring publisher;
   std::wstring summary;
   std::wstring details;
   std::wstring verdict;
@@ -41,6 +45,10 @@ ReputationLookupResult LookupThreatIntel(ThreatIndicatorType indicatorType, cons
                                          const std::filesystem::path& databasePath = {});
 ReputationLookupResult LookupPublicFileReputation(const std::wstring& sha256,
                                                   const std::filesystem::path& databasePath = {});
+ReputationLookupResult LookupKnownGoodHash(const std::wstring& sha256,
+                                           const std::filesystem::path& databasePath = {});
+ReputationLookupResult LookupSignerReputation(const std::wstring& signer,
+                                              const std::filesystem::path& databasePath = {});
 ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator,
                                                    const std::filesystem::path& databasePath = {});
 ThreatIntelPackIngestResult IngestSignedThreatIntelPack(const std::filesystem::path& packPath,

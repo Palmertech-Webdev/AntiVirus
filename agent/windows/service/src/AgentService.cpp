@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <regex>
@@ -4765,9 +4766,159 @@ void AgentService::DrainRealtimeProtectionTelemetry() {
   }
 
   const auto telemetry = realtimeProtectionBroker_->DrainTelemetry();
-  if (!telemetry.empty()) {
-    QueueTelemetryRecords(telemetry);
+  if (telemetry.empty()) {
+    return;
   }
+
+  struct RealtimeSummary {
+    int totalActions{0};
+    int blockActions{0};
+    int allowActions{0};
+    int executeActions{0};
+    int nonExecuteActions{0};
+    int executeBlocks{0};
+    int nonExecuteBlocks{0};
+    int cleanwareCorpusActions{0};
+    int cleanwareCorpusBlocks{0};
+    int falsePositiveCorpusActions{0};
+    int falsePositiveCorpusBlocks{0};
+  } summary;
+
+  std::map<std::wstring, std::pair<std::uint32_t, std::uint32_t>> ruleQualityCounters;
+  const auto cleanwareCorpusRoot = config_.phase2CleanwareCorpusPath.wstring();
+  const auto falsePositiveCorpusRoot = config_.phase2FalsePositiveCorpusPath.wstring();
+
+  for (const auto& record : telemetry) {
+    if (record.eventType != L"realtime.protection.action") {
+      continue;
+    }
+
+    const auto action = ToLowerCopy(ExtractPayloadString(record.payloadJson, "action").value_or(L""));
+    const auto operation = ToLowerCopy(ExtractPayloadString(record.payloadJson, "operation").value_or(L""));
+    const auto path = ExtractPayloadString(record.payloadJson, "path").value_or(L"");
+    const auto reasonCodes = ExtractPayloadStringArray(record.payloadJson, "reasonCodes");
+    const auto blocked = action == L"block";
+
+    ++summary.totalActions;
+    if (blocked) {
+      ++summary.blockActions;
+    } else {
+      ++summary.allowActions;
+    }
+
+    const auto executeLike = operation == L"execute" || operation == L"section-map" || operation == L"create";
+    if (executeLike) {
+      ++summary.executeActions;
+      if (blocked) {
+        ++summary.executeBlocks;
+      }
+    } else {
+      ++summary.nonExecuteActions;
+      if (blocked) {
+        ++summary.nonExecuteBlocks;
+      }
+    }
+
+    if (!cleanwareCorpusRoot.empty() && !path.empty() && PathStartsWith(path, cleanwareCorpusRoot)) {
+      ++summary.cleanwareCorpusActions;
+      if (blocked) {
+        ++summary.cleanwareCorpusBlocks;
+      }
+    }
+
+    if (!falsePositiveCorpusRoot.empty() && !path.empty() && PathStartsWith(path, falsePositiveCorpusRoot)) {
+      ++summary.falsePositiveCorpusActions;
+      if (blocked) {
+        ++summary.falsePositiveCorpusBlocks;
+      }
+    }
+
+    for (const auto& reasonCode : reasonCodes) {
+      if (reasonCode.empty()) {
+        continue;
+      }
+
+      auto& counters = ruleQualityCounters[reasonCode];
+      if (blocked) {
+        ++counters.first;
+      } else {
+        ++counters.second;
+      }
+    }
+  }
+
+  if (summary.totalActions > 0) {
+    const auto blockRatePercent = (summary.blockActions * 100.0) / static_cast<double>(summary.totalActions);
+    const auto nonExecuteBlockRatePercent =
+        summary.nonExecuteActions == 0
+            ? 0.0
+            : (summary.nonExecuteBlocks * 100.0) / static_cast<double>(summary.nonExecuteActions);
+    const auto cleanwareFalsePositiveRatePercent =
+        summary.cleanwareCorpusActions == 0
+            ? 0.0
+            : (summary.cleanwareCorpusBlocks * 100.0) / static_cast<double>(summary.cleanwareCorpusActions);
+
+    auto overallRuleQualityScore =
+        static_cast<int>(std::clamp(100.0 - cleanwareFalsePositiveRatePercent * 1.4 - nonExecuteBlockRatePercent * 0.35,
+                                    0.0, 100.0));
+    if (!ruleQualityCounters.empty()) {
+      try {
+        RuntimeDatabase database(config_.runtimeDatabasePath);
+        std::uint64_t scoreAccumulator = 0;
+        for (const auto& [ruleCode, counters] : ruleQualityCounters) {
+          const auto maliciousHits = counters.first;
+          const auto benignHits = counters.second;
+          const auto total = maliciousHits + benignHits;
+          if (total == 0) {
+            continue;
+          }
+
+          const auto qualityScore = static_cast<std::uint32_t>(
+              std::clamp(static_cast<int>((maliciousHits * 100u) / total), 0, 100));
+          scoreAccumulator += qualityScore;
+          database.UpsertRuleQualityRecord(RuleQualityRecord{
+              .ruleCode = ruleCode,
+              .phase = L"phase2",
+              .maliciousHits = maliciousHits,
+              .benignHits = benignHits,
+              .totalEvaluations = total,
+              .qualityScore = qualityScore,
+              .summary = L"Realtime protection rule quality from current telemetry drain.",
+              .details = L"maliciousHits=" + std::to_wstring(maliciousHits) + L", benignHits=" +
+                  std::to_wstring(benignHits),
+              .updatedAt = CurrentUtcTimestamp()});
+        }
+
+        if (!ruleQualityCounters.empty()) {
+          overallRuleQualityScore = static_cast<int>(scoreAccumulator / ruleQualityCounters.size());
+        }
+      } catch (const std::exception& error) {
+        const auto errorMessage = Utf8ToWide(error.what());
+        QueueTelemetryEvent(L"realtime.protection.rule_quality.persist_failed", L"realtime-protection",
+                            L"Fenrir failed to persist realtime rule quality aggregates.",
+                            std::wstring(L"{\"error\":\"") + Utf8ToWide(EscapeJsonString(errorMessage)) +
+                                L"\"}");
+      }
+    }
+
+    QueueTelemetryEvent(
+        L"realtime.protection.summary", L"realtime-protection",
+        L"Fenrir summarized realtime protection confidence, corpus outcomes, and rule quality for this cycle.",
+        std::wstring(L"{\"totalActions\":") + std::to_wstring(summary.totalActions) +
+            L",\"blockActions\":" + std::to_wstring(summary.blockActions) +
+            L",\"allowActions\":" + std::to_wstring(summary.allowActions) +
+            L",\"blockRatePercent\":" + std::to_wstring(blockRatePercent) +
+            L",\"nonExecuteBlockRatePercent\":" + std::to_wstring(nonExecuteBlockRatePercent) +
+            L",\"cleanwareCorpusActions\":" + std::to_wstring(summary.cleanwareCorpusActions) +
+            L",\"cleanwareCorpusBlocks\":" + std::to_wstring(summary.cleanwareCorpusBlocks) +
+            L",\"cleanwareFalsePositiveRatePercent\":" + std::to_wstring(cleanwareFalsePositiveRatePercent) +
+            L",\"falsePositiveCorpusActions\":" + std::to_wstring(summary.falsePositiveCorpusActions) +
+            L",\"falsePositiveCorpusBlocks\":" + std::to_wstring(summary.falsePositiveCorpusBlocks) +
+            L",\"ruleQualityScore\":" + std::to_wstring(overallRuleQualityScore) +
+            L",\"ruleCount\":" + std::to_wstring(ruleQualityCounters.size()) + L"}");
+  }
+
+  QueueTelemetryRecords(telemetry);
 }
 
 void AgentService::DrainNetworkTelemetry() {
@@ -4782,6 +4933,7 @@ void AgentService::DrainNetworkTelemetry() {
 
   if (realtimeProtectionBroker_) {
     const auto enforceDestinationReputation = DestinationReputationEnforcementEnabled();
+    const auto networkObserveOnly = policy_.networkObserveOnly;
     const auto trustBlockThreshold = ResolveDestinationReputationTrustThreshold();
     bool isolationAttempted = false;
 
@@ -4810,7 +4962,7 @@ void AgentService::DrainNetworkTelemetry() {
                                 L",\"providerWeight\":" + std::to_wstring(intel.providerWeight) +
                                 L",\"localOnly\":" + (intel.localOnly ? L"true" : L"false") + L"}");
 
-        if (!isolationAttempted && enforceDestinationReputation && intel.malicious &&
+        if (!isolationAttempted && enforceDestinationReputation && !networkObserveOnly && intel.malicious &&
             intel.trustScore <= static_cast<std::uint32_t>(trustBlockThreshold)) {
           isolationAttempted = true;
           std::wstring isolationError;
@@ -4826,6 +4978,15 @@ void AgentService::DrainNetworkTelemetry() {
                   L"\",\"trustScore\":" + std::to_wstring(intel.trustScore) +
                   L",\"threshold\":" + std::to_wstring(trustBlockThreshold) + L",\"error\":\"" +
                   Utf8ToWide(EscapeJsonString(isolationError)) + L"\"}");
+        }
+
+        if (!isolationAttempted && enforceDestinationReputation && networkObserveOnly && intel.malicious) {
+          QueueTelemetryEvent(
+              L"network.destination.reputation.observe_only", L"network-wfp",
+              L"Fenrir observed a malicious destination but skipped isolation because policy is observe-only.",
+              std::wstring(L"{\"remoteAddress\":\"") + Utf8ToWide(EscapeJsonString(remoteAddress)) +
+                  L"\",\"trustScore\":" + std::to_wstring(intel.trustScore) +
+                  L",\"threshold\":" + std::to_wstring(trustBlockThreshold) + L"}");
         }
       }
     }

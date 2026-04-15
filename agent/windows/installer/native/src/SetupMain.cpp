@@ -47,6 +47,8 @@ constexpr wchar_t kWebView2RuntimeInstallerName[] = L"MicrosoftEdgeWebView2Setup
 constexpr wchar_t kSetupExeName[] = L"FenrirSetup.exe";
 constexpr wchar_t kSignatureBundleRelativePath[] = L"signatures\\default-signatures.tsv";
 constexpr wchar_t kDriverInfRelativePath[] = L"driver\\AntivirusMinifilter.inf";
+constexpr wchar_t kDriverSysRelativePath[] = L"driver\\AntivirusMinifilter.sys";
+constexpr wchar_t kDriverCatRelativePath[] = L"driver\\AntivirusMinifilter.cat";
 constexpr wchar_t kDriverReadmeRelativePath[] = L"driver\\README.md";
 constexpr wchar_t kToolsRelativePath[] = L"tools\\fenrir-scannercli.exe";
 constexpr wchar_t kToolsAmsiTestCliRelativePath[] = L"tools\\fenrir-amsitestcli.exe";
@@ -987,7 +989,9 @@ bool InstallPayloadFiles(HWND hwnd, UiContext* context, const bool repair, std::
       {IDR_PAYLOAD_WEBVIEW2_LOADER, kWebView2LoaderDllName, 80, L"Installing WebView2 runtime loader"},
       {IDR_PAYLOAD_SIGNATURES, kSignatureBundleRelativePath, 84, L"Installing signature bundle"},
       {IDR_PAYLOAD_DRIVER_INF, kDriverInfRelativePath, 88, L"Installing minifilter deployment metadata"},
-      {IDR_PAYLOAD_DRIVER_README, kDriverReadmeRelativePath, 90, L"Installing minifilter documentation"},
+        {IDR_PAYLOAD_DRIVER_SYS, kDriverSysRelativePath, 90, L"Installing minifilter driver payload"},
+        {IDR_PAYLOAD_DRIVER_CAT, kDriverCatRelativePath, 92, L"Installing minifilter catalog payload"},
+        {IDR_PAYLOAD_DRIVER_README, kDriverReadmeRelativePath, 94, L"Installing minifilter documentation"},
   };
 
   for (const auto& item : payloadItems) {

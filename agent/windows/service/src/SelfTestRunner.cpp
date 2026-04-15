@@ -520,6 +520,18 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                                              L"compiled heuristics only.",
            L"Ship signatures\\default-signatures.tsv with the release layout or set ANTIVIRUS_SIGNATURE_BUNDLE_PATH.");
 
+  const auto cleanwareSignerCatalogPath = config.cleanwareSignerListPath;
+  const auto knownGoodHashCatalogPath = config.knownGoodHashListPath;
+  const auto observeOnlyCatalogPath = config.observeOnlyRuleListPath;
+  const auto intelCatalogsPresent = PathExists(cleanwareSignerCatalogPath) && PathExists(knownGoodHashCatalogPath) &&
+                                    PathExists(observeOnlyCatalogPath);
+  AddCheck(report, L"phase2_intel_catalogs", L"Phase 2 local intelligence catalogs",
+           intelCatalogsPresent ? SelfTestStatus::Pass : SelfTestStatus::Warning,
+           L"Cleanware signers: " + cleanwareSignerCatalogPath.wstring() + L"; known-good hashes: " +
+               knownGoodHashCatalogPath.wstring() + L"; observe-only rules: " + observeOnlyCatalogPath.wstring() +
+               L".",
+           L"Ship default-cleanware-signers.tsv, default-known-good-hashes.tsv, and default-observe-only.tsv with the signatures bundle.");
+
   const auto amsiProviderKey = FindAmsiProviderKey();
   AddCheck(report, L"amsi_registration", L"AMSI provider registration",
            amsiProviderKey.has_value() ? SelfTestStatus::Pass : SelfTestStatus::Warning,
@@ -1154,14 +1166,48 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                  SelfTestStatus::Fail,
                  L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
                  L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_ransomware_extension_burst", L"Phase 2 ransomware extension-burst detection",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_ransomware_staged_impact_chain", L"Phase 2 ransomware staged-impact chain",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
         AddCheck(report, L"phase2_ransomware_false_positive_bulk_io",
                  L"Phase 2 benign bulk-I/O false-positive resistance", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_ransomware_false_positive_photo_export",
+                 L"Phase 2 benign photo/video export false-positive resistance", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_ransomware_false_positive_developer_build",
+                 L"Phase 2 developer build false-positive resistance", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_rule_quality_budget", L"Phase 2 rule-quality and false-positive budget",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_cleanware_corpus_awareness", L"Phase 2 cleanware corpus awareness",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
+                 L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
+        AddCheck(report, L"phase2_false_positive_corpus_awareness", L"Phase 2 false-positive corpus awareness",
+                 SelfTestStatus::Fail,
                  L"Self-test could not prepare isolated Phase 2 runtime paths under " + phaseValidationRoot.wstring() + L".",
                  L"Ensure runtime, quarantine, and evidence roots are writable before running Phase 2 behavior checks.");
       } else {
         auto phase2Policy = CreateDefaultPolicySnapshot();
         phase2Policy.cloudLookupEnabled = false;
         phase2Policy.quarantineOnMalicious = false;
+        phase2Policy.realtimeExecuteBlockThreshold = 45;
+        phase2Policy.realtimeNonExecuteBlockThreshold = 55;
+        phase2Policy.realtimeQuarantineThreshold = 70;
+        phase2Policy.realtimeObserveTelemetryThreshold = 30;
+        phase2Policy.realtimeObserveOnlyForNonExecute = false;
+        phase2Policy.archiveObserveOnly = false;
 
         RealtimeProtectionBroker broker(phase2Config);
         broker.SetPolicy(phase2Policy);
@@ -1462,6 +1508,100 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                        developerBuildScenario.details,
                    L"Prevent broad cross-directory churn heuristics from tripping on normal build output workflows.");
         }
+
+        const auto detectionPassCount = static_cast<int>(maliciousScenario.blocked) +
+                                        static_cast<int>(extensionBurstScenario.blocked) +
+                                        static_cast<int>(stagedImpactScenario.blocked);
+        const auto benignFailCount = static_cast<int>(benignScenario.blocked) +
+                                     static_cast<int>(photoExportScenario.blocked) +
+                                     static_cast<int>(developerBuildScenario.blocked);
+        constexpr int kDetectionScenarioCount = 3;
+        constexpr int kBenignScenarioCount = 3;
+
+        const auto maliciousPassRatePercent =
+            static_cast<double>(detectionPassCount) * 100.0 / static_cast<double>(kDetectionScenarioCount);
+        const auto cleanwarePassRatePercent =
+            static_cast<double>(kBenignScenarioCount - benignFailCount) * 100.0 / static_cast<double>(kBenignScenarioCount);
+        const auto falsePositiveRatePercent =
+            static_cast<double>(benignFailCount) * 100.0 / static_cast<double>(kBenignScenarioCount);
+        const auto ruleQualityScore = std::clamp(
+            static_cast<int>(maliciousPassRatePercent - falsePositiveRatePercent * 0.75), 0, 100);
+
+        const auto budgetPass = maliciousPassRatePercent >= config.phase2MinMaliciousPassRatePercent &&
+                                cleanwarePassRatePercent >= config.phase2MinCleanwarePassRatePercent &&
+                                falsePositiveRatePercent <= config.phase2FalsePositiveBudgetPercent &&
+                                benignFailCount <= config.phase2MaxFalsePositiveFindings &&
+                                ruleQualityScore >= config.phase2MinRuleQualityScore;
+        AddCheck(
+            report, L"phase2_rule_quality_budget", L"Phase 2 rule-quality and false-positive budget",
+            budgetPass ? SelfTestStatus::Pass : SelfTestStatus::Fail,
+            L"ruleQualityScore=" + std::to_wstring(ruleQualityScore) +
+                L", maliciousPassRatePercent=" + std::to_wstring(maliciousPassRatePercent) +
+                L", cleanwarePassRatePercent=" + std::to_wstring(cleanwarePassRatePercent) +
+                L", falsePositiveRatePercent=" + std::to_wstring(falsePositiveRatePercent) +
+                L", benignFailures=" + std::to_wstring(benignFailCount) + L".",
+            L"Retune confidence ladders and cleanware dampening so Phase 2 preserves ransomware catch-rate while holding false positives inside budget.");
+
+        const auto evaluateOptionalPhase2Corpus = [&report, &phase2Policy](const std::filesystem::path& corpusRoot,
+                                                                            const std::wstring& checkId,
+                                                                            const std::wstring& checkName,
+                                                                            const std::wstring& corpusLabel) {
+          if (corpusRoot.empty()) {
+            AddCheck(report, checkId, checkName, SelfTestStatus::Warning,
+                     corpusLabel + L" corpus path is not configured for this self-test run.",
+                     L"Set the corresponding ANTIVIRUS_PHASE2_*_CORPUS_PATH value and rerun self-test.");
+            return;
+          }
+
+          std::error_code error;
+          if (!std::filesystem::exists(corpusRoot, error) || error) {
+            AddCheck(report, checkId, checkName, SelfTestStatus::Fail,
+                     corpusLabel + L" corpus path does not exist: " + corpusRoot.wstring() + L".",
+                     L"Provide an existing Phase 2 corpus path before rerunning self-test.");
+            return;
+          }
+
+          bool truncated = false;
+          const auto samples = CollectCorpusSampleFiles(corpusRoot, ResolveCorpusFileLimit(), &truncated);
+          if (samples.empty()) {
+            AddCheck(report, checkId, checkName, SelfTestStatus::Fail,
+                     corpusLabel + L" corpus did not yield readable files: " + corpusRoot.wstring() + L".",
+                     L"Populate the Phase 2 corpus with readable files and rerun self-test.");
+            return;
+          }
+
+          auto policy = phase2Policy;
+          policy.cloudLookupEnabled = false;
+          policy.quarantineOnMalicious = false;
+          const auto findings = ScanTargets(samples, policy);
+          const auto findingCount = findings.size();
+          if (findingCount == 0) {
+            AddCheck(report, checkId, checkName, SelfTestStatus::Pass,
+                     L"Validated " + std::to_wstring(samples.size()) + L" " + corpusLabel +
+                         L" file(s) with zero false-positive findings." +
+                         (truncated ? L" Scan was sample-limited." : L""));
+            return;
+          }
+
+          std::wstring detail = L"Detected " + std::to_wstring(findingCount) + L" false-positive candidate(s) in " +
+                                corpusLabel + L" corpus.";
+          const auto sampleCount = std::min<std::size_t>(findingCount, 3);
+          for (std::size_t index = 0; index < sampleCount; ++index) {
+            detail += L" Sample " + std::to_wstring(index + 1) + L": " + findings[index].path.wstring() +
+                      L" (" + VerdictDispositionToString(findings[index].verdict.disposition) + L", reason " +
+                      FirstReasonCode(findings[index]) + L").";
+          }
+
+          AddCheck(report, checkId, checkName, SelfTestStatus::Fail, detail,
+                   L"Retune cleanware dampening and observe-only controls for this benign corpus before widening rollout.");
+        };
+
+        evaluateOptionalPhase2Corpus(config.phase2CleanwareCorpusPath, L"phase2_cleanware_corpus_awareness",
+                                     L"Phase 2 cleanware corpus awareness", L"Phase 2 cleanware");
+        evaluateOptionalPhase2Corpus(config.phase2FalsePositiveCorpusPath,
+                                     L"phase2_false_positive_corpus_awareness",
+                                     L"Phase 2 false-positive corpus awareness",
+                                     L"Phase 2 false-positive");
       }
     } catch (const std::exception& error) {
       AddCheck(report, L"phase2_ransomware_behavior_chain", L"Phase 2 ransomware behavior chain",
@@ -1485,6 +1625,18 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                L"Phase 2 developer build false-positive resistance", SelfTestStatus::Fail,
                L"Phase 2 developer build simulation failed: " + Utf8ToWide(error.what()),
                L"Validate local runtime/evidence paths and rerun self-test in the endpoint service context.");
+      AddCheck(report, L"phase2_rule_quality_budget", L"Phase 2 rule-quality and false-positive budget",
+           SelfTestStatus::Fail,
+           L"Phase 2 quality-budget aggregation failed: " + Utf8ToWide(error.what()),
+           L"Re-run self-test after resolving simulation/runtime errors so rule-quality budgets can be computed.");
+      AddCheck(report, L"phase2_cleanware_corpus_awareness", L"Phase 2 cleanware corpus awareness",
+           SelfTestStatus::Fail,
+           L"Phase 2 cleanware corpus validation failed: " + Utf8ToWide(error.what()),
+           L"Validate cleanware corpus configuration and rerun self-test.");
+      AddCheck(report, L"phase2_false_positive_corpus_awareness", L"Phase 2 false-positive corpus awareness",
+           SelfTestStatus::Fail,
+           L"Phase 2 false-positive corpus validation failed: " + Utf8ToWide(error.what()),
+           L"Validate false-positive corpus configuration and rerun self-test.");
     }
 
     try {
@@ -2576,13 +2728,12 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
   const auto minifilterServiceState = QueryServiceState(kMinifilterServiceName);
   const auto minifilterArtifactsPresent = PathExists(minifilterInf) || PathExists(minifilterSys) || PathExists(minifilterCat);
   AddCheck(report, L"minifilter", L"Minifilter package",
-           !minifilterServiceState.empty() ? SelfTestStatus::Pass
-                                           : (minifilterArtifactsPresent ? SelfTestStatus::Warning : SelfTestStatus::Fail),
+         !minifilterServiceState.empty() ? SelfTestStatus::Pass : SelfTestStatus::Fail,
            !minifilterServiceState.empty()
                ? L"The minifilter service is registered with state " + minifilterServiceState + L"."
                : (minifilterArtifactsPresent ? L"Driver packaging artifacts are present, but the minifilter service is not installed."
                                             : L"No built minifilter artifacts were found beside the agent binaries."),
-           L"Build the driver with the WDK, sign the .sys/.cat, and stage AntivirusMinifilter.inf/.sys into the release package.");
+         L"Build and sign the minifilter, stage AntivirusMinifilter.inf/.sys/.cat into the release package, and install the minifilter service.");
 
   const auto minifilterInfPresent = PathExists(minifilterInf);
   const auto minifilterSysPresent = PathExists(minifilterSys);
@@ -2613,13 +2764,17 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
     const auto sysSigner = minifilterSysPresent ? QueryFileSignerSubject(minifilterSys) : std::wstring();
     const auto catSigner = minifilterCatPresent ? QueryFileSignerSubject(minifilterCat) : std::wstring();
 
-    const auto signingStatus = (sysSigned && catSigned) ? SelfTestStatus::Pass : SelfTestStatus::Warning;
+    const auto signingStatus = (sysSigned && catSigned) ? SelfTestStatus::Pass : SelfTestStatus::Fail;
     AddCheck(report, L"minifilter_signing", L"Minifilter signing posture", signingStatus,
              L"SYS signed=" + std::wstring(sysSigned ? L"true" : L"false") +
                  L" (signer=" + (sysSigner.empty() ? L"(none)" : sysSigner) + L"); CAT signed=" +
                  std::wstring(catSigned ? L"true" : L"false") +
                  L" (signer=" + (catSigner.empty() ? L"(none)" : catSigner) + L").",
              L"Sign both AntivirusMinifilter.sys and AntivirusMinifilter.cat with the release signing chain before production rollout.");
+  } else {
+    AddCheck(report, L"minifilter_signing", L"Minifilter signing posture", SelfTestStatus::Fail,
+             L"Minifilter SYS/CAT payloads were not present, so signing posture could not be validated.",
+             L"Stage signed AntivirusMinifilter.sys and AntivirusMinifilter.cat into the release package before self-test.");
   }
 
   const auto serviceState = QueryServiceState(L"FenrirAgent");
@@ -2661,6 +2816,57 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
   const auto warnings = std::count_if(report.checks.begin(), report.checks.end(),
                                       [](const auto& check) { return check.status == SelfTestStatus::Warning; });
   report.overallStatus = failures > 0 ? L"fail" : warnings > 0 ? L"warning" : L"pass";
+
+  try {
+    RuntimeDatabase database(config.runtimeDatabasePath);
+    const auto derivePhase = [](const std::wstring& checkId) {
+      if (checkId.starts_with(L"phase")) {
+        const auto separator = checkId.find(L'_');
+        return separator == std::wstring::npos ? checkId : checkId.substr(0, separator);
+      }
+      return std::wstring(L"core");
+    };
+
+    for (const auto& check : report.checks) {
+      database.UpsertSelfTestOutcomeRecord(SelfTestOutcomeRecord{
+          .checkId = check.id,
+          .checkName = check.name,
+          .status = StatusToString(check.status),
+          .details = check.details,
+          .remediation = check.remediation,
+          .phase = derivePhase(check.id),
+          .buildVersion = config.agentVersion,
+          .recordedAt = report.generatedAt});
+    }
+
+    const auto phase2Total = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+      return check.id.starts_with(L"phase2_");
+    });
+    const auto phase2Pass = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+      return check.id.starts_with(L"phase2_") && check.status == SelfTestStatus::Pass;
+    });
+    const auto phase2Fail = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+      return check.id.starts_with(L"phase2_") && check.status == SelfTestStatus::Fail;
+    });
+
+    if (phase2Total > 0) {
+      const auto qualityScore = static_cast<std::uint32_t>(std::clamp(
+          static_cast<int>((phase2Pass * 100) / phase2Total), 0, 100));
+      database.UpsertRuleQualityRecord(RuleQualityRecord{
+          .ruleCode = L"phase2_selftest_summary",
+          .phase = L"phase2",
+          .maliciousHits = static_cast<std::uint32_t>(phase2Pass),
+          .benignHits = static_cast<std::uint32_t>(phase2Fail),
+          .totalEvaluations = static_cast<std::uint32_t>(phase2Total),
+          .qualityScore = qualityScore,
+          .summary = L"Aggregated Phase 2 self-test quality snapshot.",
+          .details = L"phase2Pass=" + std::to_wstring(phase2Pass) + L", phase2Fail=" +
+              std::to_wstring(phase2Fail),
+          .updatedAt = report.generatedAt});
+    }
+  } catch (...) {
+  }
+
   return report;
 }
 
@@ -2676,7 +2882,39 @@ std::wstring SelfTestReportToJson(const SelfTestReport& report) {
             JsonEscape(StatusToString(check.status)) + L"\",\"details\":\"" + JsonEscape(check.details) +
             L"\",\"remediation\":\"" + JsonEscape(check.remediation) + L"\"}";
   }
-  json += L"]}";
+
+  const auto totalChecks = report.checks.size();
+  const auto passCount = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.status == SelfTestStatus::Pass;
+  });
+  const auto warningCount = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.status == SelfTestStatus::Warning;
+  });
+  const auto failCount = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.status == SelfTestStatus::Fail;
+  });
+
+  const auto phase2Total = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.id.starts_with(L"phase2_");
+  });
+  const auto phase2Pass = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.id.starts_with(L"phase2_") && check.status == SelfTestStatus::Pass;
+  });
+  const auto phase2Warning = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.id.starts_with(L"phase2_") && check.status == SelfTestStatus::Warning;
+  });
+  const auto phase2Fail = std::count_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+    return check.id.starts_with(L"phase2_") && check.status == SelfTestStatus::Fail;
+  });
+  const auto phase2PassRatePercent =
+      phase2Total == 0 ? 0.0 : (static_cast<double>(phase2Pass + phase2Warning) * 100.0 / static_cast<double>(phase2Total));
+
+  json += L"],\"summary\":{\"totalChecks\":" + std::to_wstring(totalChecks) + L",\"pass\":" +
+          std::to_wstring(passCount) + L",\"warning\":" + std::to_wstring(warningCount) + L",\"fail\":" +
+          std::to_wstring(failCount) + L",\"phase2\":{\"total\":" + std::to_wstring(phase2Total) +
+          L",\"pass\":" + std::to_wstring(phase2Pass) + L",\"warning\":" +
+          std::to_wstring(phase2Warning) + L",\"fail\":" + std::to_wstring(phase2Fail) +
+          L",\"passRatePercent\":" + std::to_wstring(phase2PassRatePercent) + L"}}}";
   return json;
 }
 
