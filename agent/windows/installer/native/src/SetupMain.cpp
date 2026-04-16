@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <strsafe.h>
 #include <tlhelp32.h>
+#include <wincrypt.h>
 #include <wrl/client.h>
 
 #include <array>
@@ -56,6 +57,8 @@ constexpr wchar_t kToolsAmsiTestCliRelativePath[] = L"tools\\fenrir-amsitestcli.
 constexpr wchar_t kToolsEtwTestCliRelativePath[] = L"tools\\fenrir-etwtestcli.exe";
 constexpr wchar_t kToolsWfpTestCliRelativePath[] = L"tools\\fenrir-wfptestcli.exe";
 constexpr wchar_t kToolsWinpthreadRelativePath[] = L"tools\\libwinpthread-1.dll";
+constexpr DWORD kPnpUtilUntrustedRootExitCode = static_cast<DWORD>(CERT_E_UNTRUSTEDROOT);
+constexpr DWORD kPnpUtilNoMoreItemsExitCode = ERROR_NO_MORE_ITEMS;
 
 constexpr UINT kInstallerLogMessage = WM_APP + 1;
 constexpr UINT kInstallerStatusMessage = WM_APP + 2;
@@ -173,6 +176,184 @@ std::wstring HresultToHexString(const HRESULT value) {
   stream << L"0x" << std::hex << std::uppercase << std::setw(8) << std::setfill(L'0')
          << static_cast<unsigned long>(value);
   return stream.str();
+}
+
+std::wstring FormatWin32ErrorMessage(const DWORD errorCode) {
+  LPWSTR messageBuffer = nullptr;
+  const auto messageLength =
+      FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                     nullptr, errorCode, 0, reinterpret_cast<LPWSTR>(&messageBuffer), 0, nullptr);
+  if (messageLength == 0 || messageBuffer == nullptr) {
+    return {};
+  }
+
+  std::wstring message(messageBuffer, messageLength);
+  LocalFree(messageBuffer);
+  return TrimCopy(message);
+}
+
+std::wstring QueryCertificateSubject(PCCERT_CONTEXT certificateContext) {
+  if (certificateContext == nullptr) {
+    return {};
+  }
+
+  const auto subjectLength =
+      CertGetNameStringW(certificateContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, nullptr, 0);
+  if (subjectLength <= 1) {
+    return {};
+  }
+
+  std::wstring subject(static_cast<std::size_t>(subjectLength - 1), L'\0');
+  CertGetNameStringW(certificateContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, subject.data(), subjectLength);
+  return subject;
+}
+
+bool ResolveSignerCertificateFromSignedFile(const std::filesystem::path& signedFile,
+                                            PCCERT_CONTEXT* signerContext,
+                                            std::wstring* signerSubject,
+                                            std::wstring* errorMessage) {
+  if (signerContext == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Internal certificate resolution failure.";
+    }
+    return false;
+  }
+
+  *signerContext = nullptr;
+  HCERTSTORE certificateStore = nullptr;
+  HCRYPTMSG cryptMessage = nullptr;
+
+  DWORD encoding = 0;
+  DWORD contentType = 0;
+  DWORD formatType = 0;
+  if (CryptQueryObject(CERT_QUERY_OBJECT_FILE, signedFile.c_str(),
+                       CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED | CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED,
+                       CERT_QUERY_FORMAT_FLAG_BINARY, 0, &encoding, &contentType, &formatType,
+                       &certificateStore, &cryptMessage, nullptr) == FALSE) {
+    if (errorMessage != nullptr) {
+      const auto error = GetLastError();
+      *errorMessage = L"Could not inspect minifilter catalog signature metadata (error " +
+                      std::to_wstring(error) + L"). " + FormatWin32ErrorMessage(error);
+    }
+    return false;
+  }
+
+  DWORD signerInfoBytes = 0;
+  if (CryptMsgGetParam(cryptMessage, CMSG_SIGNER_INFO_PARAM, 0, nullptr, &signerInfoBytes) == FALSE ||
+      signerInfoBytes == 0) {
+    if (errorMessage != nullptr) {
+      const auto error = GetLastError();
+      *errorMessage = L"Could not read signer metadata from minifilter catalog (error " +
+                      std::to_wstring(error) + L"). " + FormatWin32ErrorMessage(error);
+    }
+    if (cryptMessage != nullptr) {
+      CryptMsgClose(cryptMessage);
+    }
+    if (certificateStore != nullptr) {
+      CertCloseStore(certificateStore, 0);
+    }
+    return false;
+  }
+
+  std::vector<std::uint8_t> signerInfoBuffer(signerInfoBytes);
+  if (CryptMsgGetParam(cryptMessage, CMSG_SIGNER_INFO_PARAM, 0, signerInfoBuffer.data(),
+                       &signerInfoBytes) == FALSE) {
+    if (errorMessage != nullptr) {
+      const auto error = GetLastError();
+      *errorMessage = L"Could not decode signer metadata from minifilter catalog (error " +
+                      std::to_wstring(error) + L"). " + FormatWin32ErrorMessage(error);
+    }
+    CryptMsgClose(cryptMessage);
+    CertCloseStore(certificateStore, 0);
+    return false;
+  }
+
+  const auto signerInfo = reinterpret_cast<PCMSG_SIGNER_INFO>(signerInfoBuffer.data());
+  CERT_INFO certInfo{};
+  certInfo.Issuer = signerInfo->Issuer;
+  certInfo.SerialNumber = signerInfo->SerialNumber;
+
+  const auto certificateContext = CertFindCertificateInStore(
+      certificateStore, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_SUBJECT_CERT,
+      &certInfo, nullptr);
+  if (certificateContext == nullptr) {
+    if (errorMessage != nullptr) {
+      const auto error = GetLastError();
+      *errorMessage = L"Could not locate minifilter signer certificate in the catalog store (error " +
+                      std::to_wstring(error) + L"). " + FormatWin32ErrorMessage(error);
+    }
+    CryptMsgClose(cryptMessage);
+    CertCloseStore(certificateStore, 0);
+    return false;
+  }
+
+  if (signerSubject != nullptr) {
+    *signerSubject = QueryCertificateSubject(certificateContext);
+  }
+
+  *signerContext = CertDuplicateCertificateContext(certificateContext);
+  CertFreeCertificateContext(certificateContext);
+  CryptMsgClose(cryptMessage);
+  CertCloseStore(certificateStore, 0);
+  return *signerContext != nullptr;
+}
+
+bool EnsureCertificateInMachineStore(PCCERT_CONTEXT certificateContext, const wchar_t* storeName,
+                                     std::wstring* errorMessage) {
+  const auto store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, static_cast<HCRYPTPROV_LEGACY>(0),
+                                   CERT_SYSTEM_STORE_LOCAL_MACHINE, storeName);
+  if (store == nullptr) {
+    if (errorMessage != nullptr) {
+      const auto error = GetLastError();
+      *errorMessage = L"Could not open machine certificate store '" + std::wstring(storeName) +
+                      L"' (error " + std::to_wstring(error) + L"). " + FormatWin32ErrorMessage(error);
+    }
+    return false;
+  }
+
+  const auto added =
+      CertAddCertificateContextToStore(store, certificateContext, CERT_STORE_ADD_REPLACE_EXISTING,
+                                       nullptr) != FALSE;
+  const auto addError = added ? ERROR_SUCCESS : GetLastError();
+  CertCloseStore(store, 0);
+
+  if (!added) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not add the minifilter signer certificate to machine store '" +
+                      std::wstring(storeName) + L"' (error " + std::to_wstring(addError) +
+                      L"). " + FormatWin32ErrorMessage(addError);
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool BootstrapMinifilterSigningTrust(const std::filesystem::path& driverCatPath,
+                                     std::wstring* signerSubject,
+                                     std::wstring* errorMessage) {
+  PCCERT_CONTEXT signerCertificate = nullptr;
+  std::wstring resolvedSignerSubject;
+  if (!ResolveSignerCertificateFromSignedFile(driverCatPath, &signerCertificate,
+                                              &resolvedSignerSubject, errorMessage)) {
+    return false;
+  }
+
+  const auto trustedPublisherOk =
+      EnsureCertificateInMachineStore(signerCertificate, L"TrustedPublisher", errorMessage);
+  const auto trustedRootOk =
+      EnsureCertificateInMachineStore(signerCertificate, L"ROOT", errorMessage);
+
+  CertFreeCertificateContext(signerCertificate);
+
+  if (!trustedPublisherOk || !trustedRootOk) {
+    return false;
+  }
+
+  if (signerSubject != nullptr) {
+    *signerSubject = resolvedSignerSubject;
+  }
+  return true;
 }
 
 bool HasEmbeddedPayloadResource(HINSTANCE instance, const int resourceId) {
@@ -701,6 +882,38 @@ bool StartInstalledService(std::wstring* errorMessage) {
   return StartServiceByName(kServiceName, 20'000, errorMessage);
 }
 
+bool RegisterMinifilterWithSetupApi(const std::filesystem::path& windowsRoot,
+                                    const std::filesystem::path& driverInfPath,
+                                    const std::filesystem::path& installRoot,
+                                    DWORD* setupApiExitCode,
+                                    std::wstring* errorMessage) {
+  const auto rundll32Path = windowsRoot / L"System32" / L"rundll32.exe";
+  if (!std::filesystem::exists(rundll32Path)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"rundll32.exe is unavailable on this host; cannot invoke SetupAPI fallback.";
+    }
+    return false;
+  }
+
+  DWORD localExitCode = 0;
+  std::wstring localError;
+  const auto setupApiArgs = std::wstring(L"setupapi.dll,InstallHinfSection DefaultInstall 132 ") +
+                            QuotePath(driverInfPath);
+  const auto success = RunProcessHidden(rundll32Path, setupApiArgs, installRoot, &localExitCode, &localError);
+  if (setupApiExitCode != nullptr) {
+    *setupApiExitCode = localExitCode;
+  }
+
+  if (!success) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"SetupAPI INF install fallback failed. " + localError;
+    }
+    return false;
+  }
+
+  return true;
+}
+
 bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const bool repair, std::wstring* errorMessage) {
   const auto driverInfPath = installRoot / kDriverInfRelativePath;
   const auto driverSysPath = installRoot / kDriverSysRelativePath;
@@ -744,9 +957,53 @@ bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const boo
   DWORD pnputilExitCode = 0;
   std::wstring pnputilError;
   const auto pnputilArgs = std::wstring(L"/add-driver ") + QuotePath(driverInfPath) + L" /install";
-  const auto pnputilSucceeded =
+  const auto pnputilInitialSucceeded =
       RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+  auto pnputilSucceeded = pnputilInitialSucceeded;
+  const auto pnputilExitCodeAccepted = [&](const DWORD exitCode) {
+    return exitCode == ERROR_SUCCESS_REBOOT_REQUIRED || exitCode == kPnpUtilNoMoreItemsExitCode;
+  };
   if (!pnputilSucceeded && pnputilExitCode != ERROR_SUCCESS_REBOOT_REQUIRED) {
+    if (pnputilExitCode == kPnpUtilUntrustedRootExitCode) {
+      std::wstring signerSubject;
+      std::wstring trustBootstrapError;
+      if (!BootstrapMinifilterSigningTrust(driverCatPath, &signerSubject, &trustBootstrapError)) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Could not register AntivirusMinifilter with pnputil because the minifilter signing "
+                          L"certificate is not trusted on this host (CERT_E_UNTRUSTEDROOT / 0x800B0109). " +
+                          trustBootstrapError;
+        }
+        return false;
+      }
+
+      pnputilError.clear();
+      pnputilExitCode = 0;
+      pnputilSucceeded =
+          RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+      if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Could not register AntivirusMinifilter with pnputil after trusting signer certificate" +
+                          std::wstring(signerSubject.empty() ? L"" : (L" '" + signerSubject + L"'")) +
+                          L". " + pnputilError;
+        }
+        return false;
+      }
+    } else {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Could not register AntivirusMinifilter with pnputil. " + pnputilError;
+      }
+      return false;
+    }
+  }
+
+  if (pnputilExitCode == ERROR_SUCCESS_REBOOT_REQUIRED) {
+    // PnP package registration is complete, but a reboot may be required before the driver can load.
+    if (errorMessage != nullptr) {
+      *errorMessage = L"AntivirusMinifilter driver registration completed and requested a reboot.";
+    }
+  }
+
+  if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
     if (errorMessage != nullptr) {
       *errorMessage = L"Could not register AntivirusMinifilter with pnputil. " + pnputilError;
     }
@@ -755,10 +1012,27 @@ bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const boo
 
   auto minifilterState = QueryServiceStateByName(kMinifilterServiceName);
   if (minifilterState == L"missing") {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Minifilter service 'AntivirusMinifilter' was not registered after driver install.";
+    DWORD setupApiExitCode = 0;
+    std::wstring setupApiError;
+    if (!RegisterMinifilterWithSetupApi(windowsRoot, driverInfPath, installRoot, &setupApiExitCode,
+                                        &setupApiError)) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Minifilter service 'AntivirusMinifilter' was not registered after driver install. " +
+                        setupApiError;
+      }
+      return false;
     }
-    return false;
+
+    minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+    if (minifilterState == L"missing") {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Minifilter service 'AntivirusMinifilter' was not registered after driver install "
+                        L"(pnputil exit code " +
+                        std::to_wstring(pnputilExitCode) +
+                        L", SetupAPI exit code " + std::to_wstring(setupApiExitCode) + L").";
+      }
+      return false;
+    }
   }
 
   if (minifilterState == L"scm-unavailable" || minifilterState == L"open-failed" ||

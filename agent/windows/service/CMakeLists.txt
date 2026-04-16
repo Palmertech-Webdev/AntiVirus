@@ -368,7 +368,7 @@ add_dependencies(antivirus-setup
 target_include_directories(antivirus-setup PRIVATE
   ${INSTALLER_NATIVE_DIR}/include
 )
-target_link_libraries(antivirus-setup PRIVATE comctl32 ole32 shell32 advapi32)
+target_link_libraries(antivirus-setup PRIVATE comctl32 ole32 shell32 advapi32 crypt32)
 if(MINGW)
   target_link_libraries(antivirus-setup PRIVATE -Wl,-Bstatic stdc++ -Wl,-Bdynamic)
 endif()
