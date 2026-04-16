@@ -249,32 +249,19 @@ struct SnapshotConnection {
 
 std::wstring TcpStateToString(const DWORD state) {
   switch (state) {
-    case MIB_TCP_STATE_CLOSED:
-      return L"closed";
-    case MIB_TCP_STATE_LISTEN:
-      return L"listen";
-    case MIB_TCP_STATE_SYN_SENT:
-      return L"syn-sent";
-    case MIB_TCP_STATE_SYN_RCVD:
-      return L"syn-recv";
-    case MIB_TCP_STATE_ESTAB:
-      return L"established";
-    case MIB_TCP_STATE_FIN_WAIT1:
-      return L"fin-wait-1";
-    case MIB_TCP_STATE_FIN_WAIT2:
-      return L"fin-wait-2";
-    case MIB_TCP_STATE_CLOSE_WAIT:
-      return L"close-wait";
-    case MIB_TCP_STATE_CLOSING:
-      return L"closing";
-    case MIB_TCP_STATE_LAST_ACK:
-      return L"last-ack";
-    case MIB_TCP_STATE_TIME_WAIT:
-      return L"time-wait";
-    case MIB_TCP_STATE_DELETE_TCB:
-      return L"delete-tcb";
-    default:
-      return L"unknown";
+    case MIB_TCP_STATE_CLOSED: return L"closed";
+    case MIB_TCP_STATE_LISTEN: return L"listen";
+    case MIB_TCP_STATE_SYN_SENT: return L"syn-sent";
+    case MIB_TCP_STATE_SYN_RCVD: return L"syn-recv";
+    case MIB_TCP_STATE_ESTAB: return L"established";
+    case MIB_TCP_STATE_FIN_WAIT1: return L"fin-wait-1";
+    case MIB_TCP_STATE_FIN_WAIT2: return L"fin-wait-2";
+    case MIB_TCP_STATE_CLOSE_WAIT: return L"close-wait";
+    case MIB_TCP_STATE_CLOSING: return L"closing";
+    case MIB_TCP_STATE_LAST_ACK: return L"last-ack";
+    case MIB_TCP_STATE_TIME_WAIT: return L"time-wait";
+    case MIB_TCP_STATE_DELETE_TCB: return L"delete-tcb";
+    default: return L"unknown";
   }
 }
 
@@ -282,16 +269,13 @@ std::wstring FileTimeToUtcString(const ULONGLONG rawValue) {
   if (rawValue == 0) {
     return {};
   }
-
   FILETIME fileTime{};
   fileTime.dwLowDateTime = static_cast<DWORD>(rawValue & 0xffffffffULL);
   fileTime.dwHighDateTime = static_cast<DWORD>((rawValue >> 32U) & 0xffffffffULL);
-
   SYSTEMTIME systemTime{};
   if (FileTimeToSystemTime(&fileTime, &systemTime) == FALSE) {
     return {};
   }
-
   wchar_t buffer[32] = {};
   swprintf(buffer, 32, L"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ", systemTime.wYear, systemTime.wMonth,
            systemTime.wDay, systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
@@ -301,10 +285,9 @@ std::wstring FileTimeToUtcString(const ULONGLONG rawValue) {
 bool IsInterestingNetworkProcess(const std::wstring& pathValue) {
   const auto imageName = NormalizeAppIdPath(BaseNameFromPath(pathValue));
   static const std::array<const wchar_t*, 10> interesting = {
-      L"powershell.exe", L"pwsh.exe",     L"cmd.exe",      L"wscript.exe", L"cscript.exe",
-      L"mshta.exe",      L"rundll32.exe", L"regsvr32.exe", L"outlook.exe", L"chrome.exe",
+      L"powershell.exe", L"pwsh.exe", L"cmd.exe", L"wscript.exe", L"cscript.exe",
+      L"mshta.exe", L"rundll32.exe", L"regsvr32.exe", L"outlook.exe", L"chrome.exe",
   };
-
   return std::any_of(interesting.begin(), interesting.end(),
                      [&imageName](const auto* candidate) { return imageName == candidate; });
 }
@@ -329,13 +312,11 @@ FilterConditionHolder BuildAppIdCondition(const std::wstring& applicationPath) {
   FilterConditionHolder holder{};
   holder.condition.fieldKey = kConditionAleAppId;
   holder.condition.matchType = FWP_MATCH_EQUAL_CASE_INSENSITIVE;
-
   FWP_BYTE_BLOB* appIdBlob = nullptr;
   const auto status = FwpmGetAppIdFromFileName0(applicationPath.c_str(), &appIdBlob);
   if (status != ERROR_SUCCESS || appIdBlob == nullptr) {
     throw std::runtime_error("Unable to compute a WFP AppId blob (status " + std::to_string(status) + ")");
   }
-
   holder.byteBlob.reset(appIdBlob);
   holder.condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
   holder.condition.conditionValue.byteBlob = holder.byteBlob.get();
@@ -346,24 +327,20 @@ FilterConditionHolder BuildRemoteAddressCondition(const std::wstring& remoteAddr
   FilterConditionHolder holder{};
   holder.condition.fieldKey = ipv6 ? kConditionIpRemoteAddressV6 : kConditionIpRemoteAddressV4;
   holder.condition.matchType = FWP_MATCH_EQUAL;
-
   if (ipv6) {
     const auto parsed = ParseIpv6Address(remoteAddress);
     if (!parsed.has_value()) {
       throw std::runtime_error("Unable to parse an IPv6 allow address");
     }
-
     holder.byteArray16 = std::make_unique<FWP_BYTE_ARRAY16>(*parsed);
     holder.condition.conditionValue.type = FWP_BYTE_ARRAY16_TYPE;
     holder.condition.conditionValue.byteArray16 = holder.byteArray16.get();
     return holder;
   }
-
   const auto parsed = ParseIpv4Address(remoteAddress);
   if (!parsed.has_value()) {
     throw std::runtime_error("Unable to parse an IPv4 allow address");
   }
-
   holder.condition.conditionValue.type = FWP_UINT32;
   holder.condition.conditionValue.uint32 = *parsed;
   return holder;
@@ -371,20 +348,14 @@ FilterConditionHolder BuildRemoteAddressCondition(const std::wstring& remoteAddr
 
 const GUID& LayerKeyForIndex(const int index) {
   switch (index) {
-    case 0:
-      return kLayerAleAuthConnectV4;
-    case 1:
-      return kLayerAleAuthConnectV6;
-    case 2:
-      return kLayerAleAuthRecvAcceptV4;
-    default:
-      return kLayerAleAuthRecvAcceptV6;
+    case 0: return kLayerAleAuthConnectV4;
+    case 1: return kLayerAleAuthConnectV6;
+    case 2: return kLayerAleAuthRecvAcceptV4;
+    default: return kLayerAleAuthRecvAcceptV6;
   }
 }
 
-bool LayerUsesIpv6(const int index) {
-  return index == 1 || index == 3;
-}
+bool LayerUsesIpv6(const int index) { return index == 1 || index == 3; }
 
 std::wstring FilterNameFor(const std::wstring& prefix, const int index) {
   static const std::array<const wchar_t*, 4> suffixes = {L"connect-v4", L"connect-v6", L"recv-v4", L"recv-v6"};
@@ -405,21 +376,16 @@ std::wstring ConnectionPayloadJson(const SnapshotConnection& connection) {
 }  // namespace
 
 NetworkIsolationManager::NetworkIsolationManager(AgentConfig config) : config_(std::move(config)) {}
-
-NetworkIsolationManager::~NetworkIsolationManager() {
-  Stop();
-}
+NetworkIsolationManager::~NetworkIsolationManager() { Stop(); }
 
 void NetworkIsolationManager::Start() {
   if (engineReady_) {
     return;
   }
-
   FWPM_SESSION0 session{};
   session.flags = FWPM_SESSION_FLAG_DYNAMIC;
   session.displayData.name = const_cast<wchar_t*>(L"AntiVirus WFP Session");
   session.displayData.description = const_cast<wchar_t*>(L"Endpoint isolation and network telemetry");
-
   const auto status = FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, &session, &engineHandle_);
   if (status != ERROR_SUCCESS || engineHandle_ == nullptr) {
     QueueStateEvent(L"network.wfp.failed",
@@ -430,16 +396,15 @@ void NetworkIsolationManager::Start() {
     engineHandle_ = nullptr;
     return;
   }
-
   FWP_VALUE0 enableNetEvents{};
   enableNetEvents.type = FWP_UINT32;
   enableNetEvents.uint32 = 1;
   FwpmEngineSetOption0(engineHandle_, FWPM_ENGINE_COLLECT_NET_EVENTS, &enableNetEvents);
-
   try {
     EnsureProviderAndSubLayer();
     SubscribeNetEvents();
     engineReady_ = true;
+    RegisterDestinationEnforcementHandler(&NetworkIsolationManager::DestinationEnforcementThunk, this);
     QueueStateEvent(L"network.wfp.started", L"The WFP isolation manager opened the filtering engine and subscribed to net events.",
                     L"{\"mode\":\"user-mode\"}");
   } catch (const std::exception& error) {
@@ -451,14 +416,14 @@ void NetworkIsolationManager::Start() {
 }
 
 void NetworkIsolationManager::Stop() {
+  RegisterDestinationEnforcementHandler(nullptr, nullptr);
+  RemoveDestinationBlockFilters();
   RemoveIsolationFilters();
   UnsubscribeNetEvents();
-
   if (engineHandle_ != nullptr) {
     FwpmEngineClose0(engineHandle_);
     engineHandle_ = nullptr;
   }
-
   engineReady_ = false;
   isolationActive_ = false;
 }
@@ -467,14 +432,8 @@ void NetworkIsolationManager::SetDeviceId(std::wstring deviceId) {
   const std::scoped_lock lock(stateMutex_);
   deviceId_ = std::move(deviceId);
 }
-
-bool NetworkIsolationManager::EngineReady() const {
-  return engineReady_;
-}
-
-bool NetworkIsolationManager::IsolationActive() const {
-  return isolationActive_;
-}
+bool NetworkIsolationManager::EngineReady() const { return engineReady_; }
+bool NetworkIsolationManager::IsolationActive() const { return isolationActive_; }
 
 std::vector<TelemetryRecord> NetworkIsolationManager::DrainTelemetry() {
   const std::scoped_lock lock(telemetryMutex_);
@@ -490,13 +449,60 @@ void NetworkIsolationManager::QueueTelemetry(const TelemetryRecord& record) {
 
 void NetworkIsolationManager::QueueStateEvent(const std::wstring& eventType, const std::wstring& summary,
                                               const std::wstring& payloadJson) {
-  QueueTelemetry(TelemetryRecord{
-      .eventId = GenerateGuidString(),
-      .eventType = eventType,
-      .source = L"network-wfp",
-      .summary = summary,
-      .occurredAt = CurrentUtcTimestamp(),
-      .payloadJson = payloadJson});
+  QueueTelemetry(TelemetryRecord{.eventId = GenerateGuidString(), .eventType = eventType, .source = L"network-wfp",
+                                 .summary = summary, .occurredAt = CurrentUtcTimestamp(), .payloadJson = payloadJson});
+}
+
+bool NetworkIsolationManager::DestinationEnforcementThunk(void* context,
+                                                          const DestinationEnforcementRequest& request,
+                                                          std::wstring* errorMessage) {
+  if (context == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Network isolation manager is unavailable.";
+    }
+    return false;
+  }
+  return reinterpret_cast<NetworkIsolationManager*>(context)->ApplyDestinationBlock(request, errorMessage);
+}
+
+bool NetworkIsolationManager::ApplyDestinationBlock(const DestinationEnforcementRequest& request,
+                                                    std::wstring* errorMessage) {
+  if (!engineReady_) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"The WFP engine is not available on this host context.";
+    }
+    return false;
+  }
+  if (request.remoteAddresses.empty()) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"No remote address was supplied for destination enforcement.";
+    }
+    return false;
+  }
+  const auto beginStatus = FwpmTransactionBegin0(engineHandle_, 0);
+  if (beginStatus != ERROR_SUCCESS) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Unable to start a WFP transaction for destination enforcement.";
+    }
+    return false;
+  }
+  try {
+    AddDestinationBlockFilters(request);
+    const auto commitStatus = FwpmTransactionCommit0(engineHandle_);
+    if (commitStatus != ERROR_SUCCESS) {
+      throw std::runtime_error("Unable to commit destination block filters");
+    }
+    return true;
+  } catch (const std::exception& error) {
+    FwpmTransactionAbort0(engineHandle_);
+    if (errorMessage != nullptr) {
+      *errorMessage = Utf8ToWide(error.what());
+    }
+    QueueStateEvent(L"network.destination.block.failed",
+                    L"The endpoint could not apply the requested destination block filters.",
+                    std::wstring(L"{\"errorMessage\":\"") + Utf8ToWide(EscapeJsonString(Utf8ToWide(error.what()))) + L"\"}");
+    return false;
+  }
 }
 
 void NetworkIsolationManager::EnsureProviderAndSubLayer() {
@@ -504,19 +510,16 @@ void NetworkIsolationManager::EnsureProviderAndSubLayer() {
   provider.providerKey = kAgentProviderKey;
   provider.displayData.name = const_cast<wchar_t*>(L"AntiVirus Endpoint");
   provider.displayData.description = const_cast<wchar_t*>(L"Endpoint network isolation provider");
-
   const auto providerStatus = FwpmProviderAdd0(engineHandle_, &provider, nullptr);
   if (providerStatus != ERROR_SUCCESS && providerStatus != FWP_E_ALREADY_EXISTS) {
     throw std::runtime_error("Unable to register the WFP provider (status " + std::to_string(providerStatus) + ")");
   }
-
   FWPM_SUBLAYER0 subLayer{};
   subLayer.subLayerKey = kIsolationSubLayerKey;
   subLayer.displayData.name = const_cast<wchar_t*>(L"AntiVirus Isolation");
   subLayer.displayData.description = const_cast<wchar_t*>(L"Endpoint isolation filters");
   subLayer.providerKey = const_cast<GUID*>(&kAgentProviderKey);
   subLayer.weight = 0x100;
-
   const auto subLayerStatus = FwpmSubLayerAdd0(engineHandle_, &subLayer, nullptr);
   if (subLayerStatus != ERROR_SUCCESS && subLayerStatus != FWP_E_ALREADY_EXISTS) {
     throw std::runtime_error("Unable to register the WFP sublayer (status " + std::to_string(subLayerStatus) + ")");
@@ -527,7 +530,6 @@ void NetworkIsolationManager::SubscribeNetEvents() {
   if (netEventHandle_ != nullptr) {
     return;
   }
-
   FWPM_NET_EVENT_SUBSCRIPTION0 subscription{};
   const auto status = FwpmNetEventSubscribe0(engineHandle_, &subscription, &NetworkIsolationManager::NetEventCallback,
                                              this, &netEventHandle_);
@@ -550,7 +552,6 @@ bool NetworkIsolationManager::ApplyIsolation(const bool isolate, std::wstring* e
     }
     return false;
   }
-
   const auto beginStatus = FwpmTransactionBegin0(engineHandle_, 0);
   if (beginStatus != ERROR_SUCCESS) {
     if (errorMessage != nullptr) {
@@ -558,7 +559,6 @@ bool NetworkIsolationManager::ApplyIsolation(const bool isolate, std::wstring* e
     }
     return false;
   }
-
   try {
     RemoveIsolationFilters();
     if (isolate) {
@@ -568,7 +568,6 @@ bool NetworkIsolationManager::ApplyIsolation(const bool isolate, std::wstring* e
     if (commitStatus != ERROR_SUCCESS) {
       throw std::runtime_error("Unable to commit isolation filters");
     }
-
     isolationActive_ = isolate;
     QueueStateEvent(isolate ? L"network.isolation.applied" : L"network.isolation.released",
                     isolate ? L"The endpoint applied WFP-backed host isolation filters."
@@ -591,14 +590,21 @@ void NetworkIsolationManager::RemoveIsolationFilters() {
   for (const auto filterId : activeFilterIds_) {
     FwpmFilterDeleteById0(engineHandle_, filterId);
   }
-
   activeFilterIds_.clear();
   activeFilterIdIndex_.clear();
 }
 
+void NetworkIsolationManager::RemoveDestinationBlockFilters() {
+  for (const auto filterId : activeDestinationFilterIds_) {
+    FwpmFilterDeleteById0(engineHandle_, filterId);
+  }
+  activeDestinationFilterIds_.clear();
+  activeDestinationFilterIdIndex_.clear();
+  destinationBlockReasonByRemoteAddress_.clear();
+}
+
 void NetworkIsolationManager::AddIsolationFilters() {
   const auto allowRemoteAddresses = BuildEffectiveAllowedRemoteAddresses(config_);
-
   for (int layerIndex = 0; layerIndex < 4; ++layerIndex) {
     if (config_.isolationAllowLoopback) {
       auto loopbackCondition = BuildLoopbackCondition();
@@ -611,17 +617,14 @@ void NetworkIsolationManager::AddIsolationFilters() {
       filter.action.type = FWP_ACTION_PERMIT;
       filter.numFilterConditions = 1;
       filter.filterCondition = &loopbackCondition.condition;
-
       UINT64 filterId = 0;
       const auto status = FwpmFilterAdd0(engineHandle_, &filter, nullptr, &filterId);
       if (status != ERROR_SUCCESS) {
         throw std::runtime_error("Unable to add a loopback permit filter (status " + std::to_string(status) + ")");
       }
-
       activeFilterIds_.push_back(filterId);
       activeFilterIdIndex_.insert(filterId);
     }
-
     for (const auto& applicationPath : config_.isolationAllowedApplications) {
       auto appCondition = BuildAppIdCondition(applicationPath);
       FWPM_FILTER0 filter{};
@@ -633,22 +636,18 @@ void NetworkIsolationManager::AddIsolationFilters() {
       filter.action.type = FWP_ACTION_PERMIT;
       filter.numFilterConditions = 1;
       filter.filterCondition = &appCondition.condition;
-
       UINT64 filterId = 0;
       const auto status = FwpmFilterAdd0(engineHandle_, &filter, nullptr, &filterId);
       if (status != ERROR_SUCCESS) {
         throw std::runtime_error("Unable to add an application permit filter (status " + std::to_string(status) + ")");
       }
-
       activeFilterIds_.push_back(filterId);
       activeFilterIdIndex_.insert(filterId);
     }
-
     for (const auto& remoteAddress : allowRemoteAddresses) {
       auto remoteCondition = BuildRemoteAddressCondition(remoteAddress, LayerUsesIpv6(layerIndex));
       FWPM_FILTER0 filter{};
-      filter.displayData.name =
-          const_cast<wchar_t*>(FilterNameFor(L"AntiVirus allow remote address", layerIndex).c_str());
+      filter.displayData.name = const_cast<wchar_t*>(FilterNameFor(L"AntiVirus allow remote address", layerIndex).c_str());
       filter.layerKey = LayerKeyForIndex(layerIndex);
       filter.subLayerKey = kIsolationSubLayerKey;
       filter.weight.type = FWP_UINT8;
@@ -656,17 +655,14 @@ void NetworkIsolationManager::AddIsolationFilters() {
       filter.action.type = FWP_ACTION_PERMIT;
       filter.numFilterConditions = 1;
       filter.filterCondition = &remoteCondition.condition;
-
       UINT64 filterId = 0;
       const auto status = FwpmFilterAdd0(engineHandle_, &filter, nullptr, &filterId);
       if (status != ERROR_SUCCESS) {
         continue;
       }
-
       activeFilterIds_.push_back(filterId);
       activeFilterIdIndex_.insert(filterId);
     }
-
     FWPM_FILTER0 blockFilter{};
     blockFilter.displayData.name = const_cast<wchar_t*>(FilterNameFor(L"AntiVirus block all", layerIndex).c_str());
     blockFilter.layerKey = LayerKeyForIndex(layerIndex);
@@ -674,36 +670,62 @@ void NetworkIsolationManager::AddIsolationFilters() {
     blockFilter.weight.type = FWP_UINT8;
     blockFilter.weight.uint8 = 1;
     blockFilter.action.type = FWP_ACTION_BLOCK;
-
     UINT64 filterId = 0;
     const auto status = FwpmFilterAdd0(engineHandle_, &blockFilter, nullptr, &filterId);
     if (status != ERROR_SUCCESS) {
       throw std::runtime_error("Unable to add a terminating block filter (status " + std::to_string(status) + ")");
     }
-
     activeFilterIds_.push_back(filterId);
     activeFilterIdIndex_.insert(filterId);
   }
+}
+
+void NetworkIsolationManager::AddDestinationBlockFilters(const DestinationEnforcementRequest& request) {
+  for (int layerIndex = 0; layerIndex < 2; ++layerIndex) {
+    for (const auto& remoteAddress : request.remoteAddresses) {
+      auto remoteCondition = BuildRemoteAddressCondition(remoteAddress, LayerUsesIpv6(layerIndex));
+      FWPM_FILTER0 filter{};
+      const auto name = FilterNameFor(L"AntiVirus block destination", layerIndex);
+      filter.displayData.name = const_cast<wchar_t*>(name.c_str());
+      filter.layerKey = LayerKeyForIndex(layerIndex);
+      filter.subLayerKey = kIsolationSubLayerKey;
+      filter.weight.type = FWP_UINT8;
+      filter.weight.uint8 = 12;
+      filter.action.type = FWP_ACTION_BLOCK;
+      filter.numFilterConditions = 1;
+      filter.filterCondition = &remoteCondition.condition;
+      UINT64 filterId = 0;
+      const auto status = FwpmFilterAdd0(engineHandle_, &filter, nullptr, &filterId);
+      if (status != ERROR_SUCCESS) {
+        continue;
+      }
+      activeDestinationFilterIds_.push_back(filterId);
+      activeDestinationFilterIdIndex_.insert(filterId);
+      destinationBlockReasonByRemoteAddress_[remoteAddress] = request.reason;
+    }
+  }
+  QueueStateEvent(L"network.destination.block.applied",
+                  request.summary.empty() ? L"Fenrir blocked a risky destination." : request.summary,
+                  std::wstring(L"{\"displayDestination\":\"") + Utf8ToWide(EscapeJsonString(request.displayDestination)) +
+                      L"\",\"sourceApplication\":\"" + Utf8ToWide(EscapeJsonString(request.sourceApplication)) +
+                      L"\",\"remoteAddressCount\":" + std::to_wstring(request.remoteAddresses.size()) + L"}");
 }
 
 void CALLBACK NetworkIsolationManager::NetEventCallback(void* context, const FWPM_NET_EVENT1* event) {
   if (context == nullptr || event == nullptr) {
     return;
   }
-
-  auto* manager = reinterpret_cast<NetworkIsolationManager*>(context);
-  manager->HandleNetEvent(*event);
+  reinterpret_cast<NetworkIsolationManager*>(context)->HandleNetEvent(*event);
 }
 
 void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
   if (event.type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP || event.classifyDrop == nullptr) {
     return;
   }
-
-  if (!activeFilterIdIndex_.contains(event.classifyDrop->filterId)) {
+  const auto filterId = event.classifyDrop->filterId;
+  if (!activeFilterIdIndex_.contains(filterId) && !activeDestinationFilterIdIndex_.contains(filterId)) {
     return;
   }
-
   const auto appId = SafeBlobToWideString(&event.header.appId);
   const auto userSid = SidToString(event.header.userId);
   const auto localAddress = event.header.ipVersion == FWP_IP_VERSION_V4
@@ -712,16 +734,26 @@ void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
   const auto remoteAddress = event.header.ipVersion == FWP_IP_VERSION_V4
                                  ? AddressToString(event.header.ipVersion, event.header.remoteAddrV4, nullptr)
                                  : AddressToString(event.header.ipVersion, 0, &event.header.remoteAddrV6);
-  const auto direction =
-      event.classifyDrop->msFwpDirection == FWP_DIRECTION_INBOUND ? std::wstring(L"inbound") : std::wstring(L"outbound");
-
+  const auto direction = event.classifyDrop->msFwpDirection == FWP_DIRECTION_INBOUND ? std::wstring(L"inbound") : std::wstring(L"outbound");
+  const auto destinationBlock = activeDestinationFilterIdIndex_.contains(filterId);
+  std::wstring reason;
+  if (destinationBlock) {
+    const auto it = destinationBlockReasonByRemoteAddress_.find(remoteAddress);
+    if (it != destinationBlockReasonByRemoteAddress_.end()) {
+      reason = it->second;
+    }
+  }
   std::wstringstream summary;
-  summary << L"WFP isolation blocked " << direction << L" traffic for "
-          << (appId.empty() ? L"(unknown application)" : BaseNameFromPath(appId)) << L" to " << remoteAddress << L":"
-          << NetworkToHostOrder(event.header.remotePort) << L".";
-
+  if (destinationBlock) {
+    summary << L"Fenrir blocked access to " << remoteAddress << L" for "
+            << (appId.empty() ? L"(unknown application)" : BaseNameFromPath(appId)) << L".";
+  } else {
+    summary << L"WFP isolation blocked " << direction << L" traffic for "
+            << (appId.empty() ? L"(unknown application)" : BaseNameFromPath(appId)) << L" to " << remoteAddress << L":"
+            << NetworkToHostOrder(event.header.remotePort) << L".";
+  }
   std::wstring payload = L"{\"filterId\":";
-  payload += std::to_wstring(event.classifyDrop->filterId);
+  payload += std::to_wstring(filterId);
   payload += L",\"direction\":\"";
   payload += direction;
   payload += L"\",\"appId\":\"";
@@ -738,110 +770,71 @@ void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
   payload += std::to_wstring(NetworkToHostOrder(event.header.remotePort));
   payload += L",\"protocol\":";
   payload += std::to_wstring(event.header.ipProtocol);
-  payload += L",\"isLoopback\":";
-  payload += event.classifyDrop->isLoopback ? L"true" : L"false";
-  payload += L"}";
-
-  QueueTelemetry(TelemetryRecord{
-      .eventId = GenerateGuidString(),
-      .eventType = L"network.connection.blocked",
-      .source = L"network-wfp",
-      .summary = summary.str(),
-      .occurredAt = FileTimeToUtcString((static_cast<ULONGLONG>(event.header.timeStamp.dwHighDateTime) << 32U) |
-                                        event.header.timeStamp.dwLowDateTime),
-      .payloadJson = payload});
+  payload += L",\"destinationBlocked\":";
+  payload += destinationBlock ? L"true" : L"false";
+  payload += L",\"reason\":\"";
+  payload += Utf8ToWide(EscapeJsonString(reason));
+  payload += L"\"}";
+  QueueTelemetry(TelemetryRecord{.eventId = GenerateGuidString(),
+                                 .eventType = destinationBlock ? L"network.destination.blocked" : L"network.connection.blocked",
+                                 .source = L"network-wfp",
+                                 .summary = summary.str(),
+                                 .occurredAt = FileTimeToUtcString((static_cast<ULONGLONG>(event.header.timeStamp.dwHighDateTime) << 32U) |
+                                                                   event.header.timeStamp.dwLowDateTime),
+                                 .payloadJson = payload});
 }
 
-std::vector<TelemetryRecord> NetworkIsolationManager::CollectConnectionSnapshotTelemetry(const std::size_t maxRecords) const {
+std::vector<TelemetryRecord> NetworkIsolationManager::CollectConnectionSnapshotTelemetry(std::size_t maxRecords) const {
   std::vector<SnapshotConnection> connections;
-
   const auto collectTcp = [&connections](const ULONG family) {
     DWORD tableSize = 0;
-    if (GetExtendedTcpTable(nullptr, &tableSize, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_INSUFFICIENT_BUFFER ||
-        tableSize == 0) {
+    if (GetExtendedTcpTable(nullptr, &tableSize, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_INSUFFICIENT_BUFFER || tableSize == 0) {
       return;
     }
-
     std::vector<BYTE> buffer(tableSize);
     if (GetExtendedTcpTable(buffer.data(), &tableSize, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0) != ERROR_SUCCESS) {
       return;
     }
-
     if (family == AF_INET) {
       const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buffer.data());
       for (DWORD index = 0; index < table->dwNumEntries; ++index) {
         const auto& row = table->table[index];
-        IN_ADDR localAddress{};
-        localAddress.S_un.S_addr = row.dwLocalAddr;
-        IN_ADDR remoteAddress{};
-        remoteAddress.S_un.S_addr = row.dwRemoteAddr;
+        IN_ADDR localAddress{}; localAddress.S_un.S_addr = row.dwLocalAddr;
+        IN_ADDR remoteAddress{}; remoteAddress.S_un.S_addr = row.dwRemoteAddr;
         wchar_t localBuffer[INET_ADDRSTRLEN] = {};
         wchar_t remoteBuffer[INET_ADDRSTRLEN] = {};
         InetNtopW(AF_INET, &localAddress, localBuffer, ARRAYSIZE(localBuffer));
         InetNtopW(AF_INET, &remoteAddress, remoteBuffer, ARRAYSIZE(remoteBuffer));
-
-        connections.push_back(SnapshotConnection{
-            .pid = row.dwOwningPid,
-            .protocol = L"tcp4",
-            .state = TcpStateToString(row.dwState),
-            .localAddress = localBuffer,
-            .localPort = NetworkToHostOrder(static_cast<UINT16>(row.dwLocalPort)),
-            .remoteAddress = remoteBuffer,
-            .remotePort = NetworkToHostOrder(static_cast<UINT16>(row.dwRemotePort)),
-            .processImagePath = QueryProcessImagePath(row.dwOwningPid),
-        });
+        connections.push_back(SnapshotConnection{.pid = row.dwOwningPid, .protocol = L"tcp4", .state = TcpStateToString(row.dwState), .localAddress = localBuffer, .localPort = NetworkToHostOrder(static_cast<UINT16>(row.dwLocalPort)), .remoteAddress = remoteBuffer, .remotePort = NetworkToHostOrder(static_cast<UINT16>(row.dwRemotePort)), .processImagePath = QueryProcessImagePath(row.dwOwningPid)});
       }
       return;
     }
-
     const auto* table = reinterpret_cast<const MIB_TCP6TABLE_OWNER_PID*>(buffer.data());
     for (DWORD index = 0; index < table->dwNumEntries; ++index) {
       const auto& row = table->table[index];
       wchar_t localBuffer[INET6_ADDRSTRLEN] = {};
       wchar_t remoteBuffer[INET6_ADDRSTRLEN] = {};
-      IN6_ADDR localAddress{};
-      std::memcpy(localAddress.u.Byte, row.ucLocalAddr, sizeof(localAddress.u.Byte));
-      IN6_ADDR remoteAddress{};
-      std::memcpy(remoteAddress.u.Byte, row.ucRemoteAddr, sizeof(remoteAddress.u.Byte));
+      IN6_ADDR localAddress{}; std::memcpy(localAddress.u.Byte, row.ucLocalAddr, sizeof(localAddress.u.Byte));
+      IN6_ADDR remoteAddress{}; std::memcpy(remoteAddress.u.Byte, row.ucRemoteAddr, sizeof(remoteAddress.u.Byte));
       InetNtopW(AF_INET6, &localAddress, localBuffer, ARRAYSIZE(localBuffer));
       InetNtopW(AF_INET6, &remoteAddress, remoteBuffer, ARRAYSIZE(remoteBuffer));
-
-      connections.push_back(SnapshotConnection{
-          .pid = row.dwOwningPid,
-          .protocol = L"tcp6",
-          .state = TcpStateToString(row.dwState),
-          .localAddress = localBuffer,
-          .localPort = NetworkToHostOrder(static_cast<UINT16>(row.dwLocalPort)),
-          .remoteAddress = remoteBuffer,
-          .remotePort = NetworkToHostOrder(static_cast<UINT16>(row.dwRemotePort)),
-          .processImagePath = QueryProcessImagePath(row.dwOwningPid),
-      });
+      connections.push_back(SnapshotConnection{.pid = row.dwOwningPid, .protocol = L"tcp6", .state = TcpStateToString(row.dwState), .localAddress = localBuffer, .localPort = NetworkToHostOrder(static_cast<UINT16>(row.dwLocalPort)), .remoteAddress = remoteBuffer, .remotePort = NetworkToHostOrder(static_cast<UINT16>(row.dwRemotePort)), .processImagePath = QueryProcessImagePath(row.dwOwningPid)});
     }
   };
-
   collectTcp(AF_INET);
   collectTcp(AF_INET6);
-
   std::stable_sort(connections.begin(), connections.end(), [](const SnapshotConnection& left, const SnapshotConnection& right) {
     const auto leftInteresting = IsInterestingNetworkProcess(left.processImagePath);
     const auto rightInteresting = IsInterestingNetworkProcess(right.processImagePath);
-    if (leftInteresting != rightInteresting) {
-      return leftInteresting > rightInteresting;
-    }
-
+    if (leftInteresting != rightInteresting) return leftInteresting > rightInteresting;
     const auto leftEstablished = left.state == L"established";
     const auto rightEstablished = right.state == L"established";
-    if (leftEstablished != rightEstablished) {
-      return leftEstablished > rightEstablished;
-    }
-
+    if (leftEstablished != rightEstablished) return leftEstablished > rightEstablished;
     return left.pid > right.pid;
   });
-
   if (maxRecords > 0 && connections.size() > maxRecords) {
     connections.resize(maxRecords);
   }
-
   std::vector<TelemetryRecord> telemetry;
   telemetry.reserve(connections.size());
   for (const auto& connection : connections) {
@@ -853,19 +846,9 @@ std::vector<TelemetryRecord> NetworkIsolationManager::CollectConnectionSnapshotT
       summary << L" to " << connection.remoteAddress << L":" << connection.remotePort;
     }
     summary << L" (" << connection.state << L").";
-
-    telemetry.push_back(TelemetryRecord{
-        .eventId = GenerateGuidString(),
-        .eventType = L"network.connection.snapshot",
-        .source = L"network-wfp",
-        .summary = summary.str(),
-        .occurredAt = CurrentUtcTimestamp(),
-        .payloadJson = ConnectionPayloadJson(connection),
-    });
+    telemetry.push_back(TelemetryRecord{.eventId = GenerateGuidString(), .eventType = L"network.connection.snapshot", .source = L"network-wfp", .summary = summary.str(), .occurredAt = CurrentUtcTimestamp(), .payloadJson = ConnectionPayloadJson(connection)});
   }
-
   return telemetry;
 }
-
 
 }  // namespace antivirus::agent
