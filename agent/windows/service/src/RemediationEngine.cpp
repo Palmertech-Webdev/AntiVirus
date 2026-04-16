@@ -487,6 +487,121 @@ RemediationOutcome SweepSiblingArtifacts(const std::filesystem::path& subjectPat
 
 RemediationEngine::RemediationEngine(const AgentConfig& config) : config_(config) {}
 
+RemediationOutcome RemediationEngine::TerminateProcessByPid(const DWORD pid, const bool includeChildren) const {
+  RemediationOutcome outcome;
+  if (pid == 0) {
+    outcome.success = false;
+    outcome.errorMessage = L"Realtime containment was requested without a valid process identifier.";
+    return outcome;
+  }
+
+  const auto processes = EnumerateProcesses();
+  std::multimap<DWORD, DWORD> childrenByParent;
+  bool rootPresent = false;
+  for (const auto& process : processes) {
+    childrenByParent.emplace(process.parentProcessId, process.processId);
+    if (process.processId == pid) {
+      rootPresent = true;
+    }
+  }
+
+  if (!rootPresent) {
+    outcome.success = true;
+    outcome.verificationSucceeded = true;
+    outcome.verificationDetails.push_back(
+        L"Realtime containment root process was already exited before termination could run.");
+    return outcome;
+  }
+
+  std::vector<DWORD> orderedIds;
+  if (includeChildren) {
+    CollectDescendants(pid, childrenByParent, orderedIds);
+  } else {
+    orderedIds.push_back(pid);
+  }
+
+  bool rootTerminated = false;
+  bool rootAlreadyExited = false;
+  int childTerminations = 0;
+  for (const auto processId : orderedIds) {
+    const auto handle = OpenProcess(PROCESS_TERMINATE, FALSE, processId);
+    if (handle == nullptr) {
+      const auto error = GetLastError();
+      if (processId == pid && (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_FOUND)) {
+        rootAlreadyExited = true;
+      }
+      continue;
+    }
+
+    if (TerminateProcess(handle, 1) != FALSE) {
+      ++outcome.processesTerminated;
+      if (processId == pid) {
+        rootTerminated = true;
+      } else {
+        ++childTerminations;
+      }
+    } else if (processId == pid) {
+      const auto error = GetLastError();
+      outcome.errorMessage = L"Fenrir could not terminate realtime containment root PID " + std::to_wstring(pid) +
+                             L" (error " + std::to_wstring(error) + L").";
+    }
+
+    CloseHandle(handle);
+  }
+
+  if (rootTerminated) {
+    outcome.verificationDetails.push_back(L"Realtime containment terminated the root process.");
+  } else if (rootAlreadyExited) {
+    outcome.verificationDetails.push_back(L"Realtime containment root process had already exited.");
+  }
+
+  if (includeChildren && childTerminations > 0) {
+    outcome.verificationDetails.push_back(L"Realtime containment terminated " + std::to_wstring(childTerminations) +
+                                          L" child process(es).");
+  }
+
+  if (!rootTerminated && !rootAlreadyExited && outcome.errorMessage.empty()) {
+    outcome.errorMessage = L"Fenrir could not verify root process termination for realtime containment.";
+  }
+
+  outcome.success = outcome.errorMessage.empty();
+  outcome.verificationSucceeded = outcome.success;
+  return outcome;
+}
+
+RemediationOutcome RemediationEngine::TerminateProcessTreeByRootPid(const DWORD pid) const {
+  return TerminateProcessByPid(pid, true);
+}
+
+RemediationOutcome RemediationEngine::TerminateProcessesForRealtimeRequest(const RealtimeFileScanRequest& request,
+                                                                           const bool includeChildren) const {
+  RemediationOutcome outcome;
+
+  if (request.processId != 0) {
+    AppendOutcome(outcome, TerminateProcessByPid(request.processId, includeChildren));
+  } else {
+    outcome.verificationDetails.push_back(
+        L"Realtime request did not contain a process ID; falling back to path-based containment.");
+  }
+
+  if (request.path[0] != L'\0') {
+    AppendOutcome(outcome, TerminateProcessesForPath(std::filesystem::path(request.path), includeChildren));
+  }
+
+  if (request.processImage[0] != L'\0') {
+    AppendOutcome(outcome, TerminateProcessesForPath(std::filesystem::path(request.processImage), includeChildren));
+  }
+
+  if (outcome.processesTerminated == 0 && outcome.errorMessage.empty()) {
+    outcome.verificationDetails.push_back(
+        L"Realtime containment did not find a live matching process tree; process may have already exited.");
+  }
+
+  outcome.success = outcome.errorMessage.empty();
+  outcome.verificationSucceeded = outcome.success;
+  return outcome;
+}
+
 RemediationOutcome RemediationEngine::TerminateProcessesForPath(const std::filesystem::path& subjectPath,
                                                                 const bool includeChildren) const {
   RemediationOutcome outcome;

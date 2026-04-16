@@ -50,7 +50,8 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
                               _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation);
 
 static NTSTATUS
-AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
+AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                      _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
                       _Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
 
 static VOID
@@ -96,6 +97,23 @@ AntivirusPathContainsAlternateDataStream(_In_z_ const WCHAR* Path);
 
 static BOOLEAN
 AntivirusPathHasPrefixInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Prefix);
+
+static ULONG
+AntivirusBuildRequestFlags(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                           _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
+                           _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
+
+static ULONG
+AntivirusBuildPathRiskFlags(_In_z_ const WCHAR* Path, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation);
+
+static ULONG
+AntivirusClassifySignerTrustLevel(_In_z_ const WCHAR* ProcessImagePath);
+
+static BOOLEAN
+AntivirusPathHasExtensionInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Extension);
+
+static BOOLEAN
+AntivirusPathIsUserControlled(_In_z_ const WCHAR* Path);
 
 const FLT_OPERATION_REGISTRATION gCallbacks[] = {
     {IRP_MJ_CREATE, 0, AntivirusPreCreate, NULL},
@@ -352,7 +370,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   RtlZeroMemory(&request, sizeof(request));
   RtlZeroMemory(&reply, sizeof(reply));
 
-  status = AntivirusBuildRequest(Data, Operation, &request);
+  status = AntivirusBuildRequest(Data, FltObjects, Operation, &request);
   strictFailClosed = AntivirusShouldFailClosedForContext(Data, Operation, NT_SUCCESS(status) ? &request : NULL,
                                                          FltObjects);
   if (!NT_SUCCESS(status)) {
@@ -377,6 +395,13 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   request.operation = Operation;
   request.processId = HandleToULong(PsGetCurrentProcessId());
   request.threadId = HandleToULong(PsGetCurrentThreadId());
+  request.parentProcessId = HandleToULong(PsGetProcessInheritedFromUniqueProcessId(PsGetCurrentProcess()));
+  if (request.requestFlags == 0) {
+    request.requestFlags = AntivirusBuildRequestFlags(Data, FltObjects, Operation, &request);
+  }
+  if (request.pathRiskFlags == 0) {
+    request.pathRiskFlags = AntivirusBuildPathRiskFlags(request.path, Operation);
+  }
 
   timeout.QuadPart = -((strictFailClosed ? 2500 : 1000) * 10 * 1000);
   replyLength = sizeof(reply);
@@ -402,15 +427,25 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
 }
 
 static NTSTATUS
-AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
+AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                      _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
                       _Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
   NTSTATUS status;
   PFLT_FILE_NAME_INFORMATION fileNameInformation = NULL;
 
-  UNREFERENCED_PARAMETER(Operation);
-
   if (Data == NULL || Data->Iopb == NULL || Request == NULL) {
     return STATUS_INVALID_PARAMETER;
+  }
+
+  Request->desiredAccess = 0;
+  Request->createDisposition = 0;
+  Request->requestFlags = 0;
+  Request->pathRiskFlags = 0;
+  Request->signerTrustLevel = ANTIVIRUS_REALTIME_SIGNER_TRUST_UNKNOWN;
+
+  if (Data->Iopb->MajorFunction == IRP_MJ_CREATE && Data->Iopb->Parameters.Create.SecurityContext != NULL) {
+    Request->desiredAccess = Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess;
+    Request->createDisposition = (Data->Iopb->Parameters.Create.Options >> 24);
   }
 
   status = FltGetFileNameInformation(Data, FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT, &fileNameInformation);
@@ -443,6 +478,9 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
 
   RtlStringCchPrintfW(Request->correlationId, ANTIVIRUS_REALTIME_CORRELATION_CAPACITY, L"%p", Data);
   AntivirusPopulateProcessImage(Request);
+  Request->signerTrustLevel = AntivirusClassifySignerTrustLevel(Request->processImage);
+  Request->pathRiskFlags = AntivirusBuildPathRiskFlags(Request->path, Operation);
+  Request->requestFlags = AntivirusBuildRequestFlags(Data, FltObjects, Operation, Request);
 
   FltReleaseFileNameInformation(fileNameInformation);
   return STATUS_SUCCESS;
@@ -471,24 +509,27 @@ AntivirusPopulateProcessImage(_Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
 
 static BOOLEAN
 AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME_FILE_OPERATION* Operation) {
-  const ACCESS_MASK desiredAccess =
-    (Data != NULL && Data->Iopb != NULL && Data->Iopb->Parameters.Create.SecurityContext != NULL)
-      ? Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess
-      : 0;
-  const BOOLEAN executeIntent = FlagOn(desiredAccess, FILE_EXECUTE);
-  const BOOLEAN writeIntent =
-    FlagOn(desiredAccess,
-       FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC |
-         WRITE_OWNER);
-  const BOOLEAN createDisposition =
-      (Data->Iopb->Parameters.Create.Options >> 24) == FILE_CREATE ||
-      (Data->Iopb->Parameters.Create.Options >> 24) == FILE_SUPERSEDE ||
-      (Data->Iopb->Parameters.Create.Options >> 24) == FILE_OVERWRITE ||
-      (Data->Iopb->Parameters.Create.Options >> 24) == FILE_OVERWRITE_IF;
+  ACCESS_MASK desiredAccess = 0;
+  ULONG createDispositionValue = 0;
+  BOOLEAN executeIntent;
+  BOOLEAN writeIntent;
+  BOOLEAN createDisposition;
 
   if (Data == NULL || Data->Iopb == NULL || Operation == NULL) {
     return FALSE;
   }
+
+  if (Data->Iopb->Parameters.Create.SecurityContext != NULL) {
+    desiredAccess = Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess;
+  }
+  createDispositionValue = (Data->Iopb->Parameters.Create.Options >> 24);
+  executeIntent = FlagOn(desiredAccess, FILE_EXECUTE | GENERIC_EXECUTE);
+  writeIntent =
+      FlagOn(desiredAccess,
+             FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC |
+                 WRITE_OWNER | GENERIC_WRITE);
+  createDisposition = createDispositionValue == FILE_CREATE || createDispositionValue == FILE_SUPERSEDE ||
+                      createDispositionValue == FILE_OVERWRITE || createDispositionValue == FILE_OVERWRITE_IF;
 
   if (FlagOn(Data->Iopb->IrpFlags, IRP_PAGING_IO)) {
     return FALSE;
@@ -499,13 +540,18 @@ AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME
     return TRUE;
   }
 
-  if (createDisposition) {
+  if (createDisposition && writeIntent) {
     *Operation = ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
     return TRUE;
   }
 
   if (writeIntent) {
     *Operation = ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE;
+    return TRUE;
+  }
+
+  if (createDisposition) {
+    *Operation = ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE;
     return TRUE;
   }
 
@@ -526,10 +572,7 @@ AntivirusHasConnectedBroker(VOID) {
 
 static BOOLEAN
 AntivirusShouldFailClosed(_In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation) {
-  return Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
-         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
-         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
-         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME ||
+  return Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
          Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP;
 }
 
@@ -537,9 +580,14 @@ static BOOLEAN
 AntivirusShouldFailClosedForContext(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
                                     _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request,
                                     _In_ PCFLT_RELATED_OBJECTS FltObjects) {
+  const ULONG highRiskExtensionMask = ANTIVIRUS_REALTIME_PATH_RISK_EXECUTABLE_EXTENSION |
+                                      ANTIVIRUS_REALTIME_PATH_RISK_SCRIPT_EXTENSION |
+                                      ANTIVIRUS_REALTIME_PATH_RISK_CONTAINER_EXTENSION;
   BOOLEAN isCreateReparseOpen = FALSE;
   BOOLEAN isSensitiveSetInformation = FALSE;
   BOOLEAN isSectionSyncHighRisk = FALSE;
+  BOOLEAN createHighRiskUserPath = FALSE;
+  BOOLEAN renameHighRiskExtension = FALSE;
 
   if (Data->Iopb != NULL && Data->Iopb->MajorFunction == IRP_MJ_CREATE) {
     isCreateReparseOpen = FlagOn(Data->Iopb->Parameters.Create.Options, FILE_OPEN_REPARSE_POINT);
@@ -554,17 +602,244 @@ AntivirusShouldFailClosedForContext(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVI
     isSectionSyncHighRisk = AntivirusIsSectionSyncHighRisk(Data);
   }
 
-  if (AntivirusShouldFailClosed(Operation) || isCreateReparseOpen || isSensitiveSetInformation ||
-      isSectionSyncHighRisk || AntivirusVolumeIsRemoteOrRemovable(FltObjects)) {
+  if (Request != NULL) {
+    createHighRiskUserPath =
+        Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE &&
+        FlagOn(Request->pathRiskFlags, ANTIVIRUS_REALTIME_PATH_RISK_USER_CONTROLLED) &&
+        FlagOn(Request->pathRiskFlags, highRiskExtensionMask);
+    renameHighRiskExtension =
+        Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME &&
+        FlagOn(Request->pathRiskFlags, highRiskExtensionMask);
+  }
+
+  if (AntivirusShouldFailClosed(Operation) || isSectionSyncHighRisk || createHighRiskUserPath ||
+      renameHighRiskExtension) {
     return TRUE;
   }
 
-  if (Request != NULL &&
-      (AntivirusIsHighRiskPath(Request->path) || AntivirusPathHasCloudSyncMarker(Request->path))) {
+  if (Request != NULL) {
+    if (isCreateReparseOpen && FlagOn(Request->requestFlags, ANTIVIRUS_REALTIME_REQUEST_FLAG_REPARSE_PATH)) {
+      return TRUE;
+    }
+
+    if (FlagOn(Request->requestFlags, ANTIVIRUS_REALTIME_REQUEST_FLAG_ADS_PATH) &&
+        (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE)) {
+      return TRUE;
+    }
+
+    if (isSensitiveSetInformation && renameHighRiskExtension) {
+      return TRUE;
+    }
+
+    if (AntivirusVolumeIsRemoteOrRemovable(FltObjects) &&
+        (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP || createHighRiskUserPath ||
+         renameHighRiskExtension)) {
+      return TRUE;
+    }
+
+    if (FlagOn(Request->pathRiskFlags, ANTIVIRUS_REALTIME_PATH_RISK_HIGH_RISK_PATH) &&
+        (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP || createHighRiskUserPath ||
+         renameHighRiskExtension)) {
+      return TRUE;
+    }
+
+    if (AntivirusPathHasCloudSyncMarker(Request->path) &&
+        (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+         Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP || createHighRiskUserPath ||
+         renameHighRiskExtension)) {
+      return TRUE;
+    }
+  }
+
+  if (isCreateReparseOpen && (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+                              Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP)) {
     return TRUE;
   }
 
   return FALSE;
+}
+
+static ULONG
+AntivirusBuildRequestFlags(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                           _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
+                           _In_opt_ const ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
+  ULONG flags = 0;
+
+  if (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+      Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP) {
+    flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_EXECUTE_INTENT;
+  }
+
+  if (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE ||
+      Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE) {
+    flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_WRITE_INTENT;
+  }
+
+  if (Operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME) {
+    flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_RENAME_INTENT;
+  }
+
+  if (Data != NULL && Data->Iopb != NULL && Data->Iopb->MajorFunction == IRP_MJ_CREATE &&
+      FlagOn(Data->Iopb->Parameters.Create.Options, FILE_OPEN_REPARSE_POINT)) {
+    flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_REPARSE_PATH;
+  }
+
+  if (Data != NULL && Data->Iopb != NULL &&
+      Data->Iopb->MajorFunction == IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION) {
+    const ULONG pageProtection = Data->Iopb->Parameters.AcquireForSectionSynchronization.PageProtection;
+    const ULONG executeMask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const ULONG writeMask = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (FlagOn(pageProtection, executeMask)) {
+      flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_SECTION_MAP_EXECUTE;
+    }
+    if (FlagOn(pageProtection, writeMask)) {
+      flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_SECTION_MAP_WRITE;
+    }
+  }
+
+  if (AntivirusVolumeIsRemoteOrRemovable(FltObjects)) {
+    flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_REMOTE_VOLUME;
+    flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_REMOVABLE_VOLUME;
+  }
+
+  if (Request != NULL) {
+    if (AntivirusPathHasCloudSyncMarker(Request->path)) {
+      flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_CLOUD_SYNC_PATH;
+    }
+    if (AntivirusPathContainsAlternateDataStream(Request->path)) {
+      flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_ADS_PATH;
+    }
+    if (AntivirusPathHasTraversalSequence(Request->path)) {
+      flags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_REPARSE_PATH;
+    }
+  }
+
+  return flags;
+}
+
+static ULONG
+AntivirusBuildPathRiskFlags(_In_z_ const WCHAR* Path, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation) {
+  ULONG flags = 0;
+
+  UNREFERENCED_PARAMETER(Operation);
+
+  if (Path == NULL || Path[0] == L'\0') {
+    return flags;
+  }
+
+  if (AntivirusIsHighRiskPath(Path)) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_HIGH_RISK_PATH;
+  }
+  if (AntivirusPathIsUserControlled(Path)) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_USER_CONTROLLED;
+  }
+  if (AntivirusPathHasExtensionInsensitive(Path, L".exe") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".dll") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".scr") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".com") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".msi")) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_EXECUTABLE_EXTENSION;
+  }
+  if (AntivirusPathHasExtensionInsensitive(Path, L".ps1") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".psm1") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".cmd") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".bat") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".js") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".jse") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".vbs") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".vbe") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".hta")) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_SCRIPT_EXTENSION;
+  }
+  if (AntivirusPathHasExtensionInsensitive(Path, L".zip") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".7z") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".rar") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".lnk") ||
+      AntivirusPathHasExtensionInsensitive(Path, L".iso")) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_CONTAINER_EXTENSION;
+  }
+  if (AntivirusPathHasTraversalSequence(Path)) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_TRAVERSAL_SEQUENCE;
+  }
+  if (AntivirusPathContainsAlternateDataStream(Path)) {
+    flags |= ANTIVIRUS_REALTIME_PATH_RISK_ADS_PATH;
+  }
+
+  return flags;
+}
+
+static ULONG
+AntivirusClassifySignerTrustLevel(_In_z_ const WCHAR* ProcessImagePath) {
+  if (ProcessImagePath == NULL || ProcessImagePath[0] == L'\0') {
+    return ANTIVIRUS_REALTIME_SIGNER_TRUST_UNKNOWN;
+  }
+
+  if (AntivirusPathHasPrefixInsensitive(ProcessImagePath, L"\\SystemRoot\\") ||
+      AntivirusPathContainsInsensitive(ProcessImagePath, L"\\Windows\\System32\\")) {
+    return ANTIVIRUS_REALTIME_SIGNER_TRUST_SYSTEM;
+  }
+
+  if (AntivirusPathContainsInsensitive(ProcessImagePath, L"\\Program Files\\") ||
+      AntivirusPathContainsInsensitive(ProcessImagePath, L"\\Program Files (x86)\\")) {
+    return ANTIVIRUS_REALTIME_SIGNER_TRUST_PROGRAM_FILES;
+  }
+
+  if (AntivirusPathIsUserControlled(ProcessImagePath)) {
+    return ANTIVIRUS_REALTIME_SIGNER_TRUST_USER_PATH;
+  }
+
+  return ANTIVIRUS_REALTIME_SIGNER_TRUST_UNKNOWN;
+}
+
+static BOOLEAN
+AntivirusPathHasExtensionInsensitive(_In_z_ const WCHAR* Path, _In_z_ const WCHAR* Extension) {
+  SIZE_T pathLength = 0;
+  SIZE_T extensionLength = 0;
+  SIZE_T index;
+
+  if (Path == NULL || Extension == NULL || Extension[0] == L'\0') {
+    return FALSE;
+  }
+
+  while (Path[pathLength] != L'\0') {
+    ++pathLength;
+  }
+  while (Extension[extensionLength] != L'\0') {
+    ++extensionLength;
+  }
+
+  if (pathLength < extensionLength) {
+    return FALSE;
+  }
+
+  index = pathLength - extensionLength;
+  while (index < pathLength) {
+    if (RtlDowncaseUnicodeChar(Path[index]) != RtlDowncaseUnicodeChar(Extension[index - (pathLength - extensionLength)])) {
+      return FALSE;
+    }
+    ++index;
+  }
+
+  return TRUE;
+}
+
+static BOOLEAN
+AntivirusPathIsUserControlled(_In_z_ const WCHAR* Path) {
+  if (Path == NULL || Path[0] == L'\0') {
+    return FALSE;
+  }
+
+  return AntivirusPathContainsInsensitive(Path, L"\\Users\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\ProgramData\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\AppData\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\Downloads\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\Desktop\\") ||
+         AntivirusPathContainsInsensitive(Path, L"\\Temp\\");
 }
 
 static BOOLEAN

@@ -38,6 +38,11 @@ struct AgentConfig {
   int syncIterations{1};
   int telemetryBatchSize{25};
   int realtimeBrokerRetrySeconds{5};
+  int realtimeCoverageStartupTimeoutSeconds{30};
+  bool failServiceStartupIfRealtimeCoverageMissing{true};
+  bool enforceProcessStartVerdicts{true};
+  bool terminateProcessTreeOnExecuteBlock{true};
+  bool strictRealtimeMode{true};
   bool enforceOperationalGates{true};
   int maxCpuLoadPercent{85};
   int maxMemoryLoadPercent{90};

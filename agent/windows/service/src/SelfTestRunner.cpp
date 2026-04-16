@@ -3176,16 +3176,18 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
 
     try {
       const auto minifilterState = QueryServiceState(kMinifilterServiceName);
-      if (!minifilterState.empty()) {
+      if (_wcsicmp(minifilterState.c_str(), L"running") == 0) {
         AddCheck(report, L"phase4_driver_recovery_path", L"Phase 4 driver rollback and recovery posture",
                  SelfTestStatus::Pass,
                  L"Minifilter service is present with state " + minifilterState +
                      L", enabling rollback/repair orchestration paths.");
       } else {
         AddCheck(report, L"phase4_driver_recovery_path", L"Phase 4 driver rollback and recovery posture",
-                 SelfTestStatus::Warning,
-                 L"Minifilter service is not installed in this host context; user-mode protection remains available but driver rollback path cannot be validated here.",
-                 L"Run self-test on a host with the minifilter installed to validate rollback and safe-mode recovery workflow.");
+                 SelfTestStatus::Fail,
+                 minifilterState.empty()
+                     ? L"Minifilter service is not installed in this host context."
+                     : (L"Minifilter service is not running (state " + minifilterState + L")."),
+                 L"Install and start the AntivirusMinifilter service before validating rollback and safe-mode recovery workflow.");
       }
     } catch (const std::exception& error) {
       AddCheck(report, L"phase4_driver_recovery_path", L"Phase 4 driver rollback and recovery posture",
@@ -3728,13 +3730,16 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
   const auto minifilterSys = installRoot / L"driver" / L"AntivirusMinifilter.sys";
   const auto minifilterCat = installRoot / L"driver" / L"AntivirusMinifilter.cat";
   const auto minifilterServiceState = QueryServiceState(kMinifilterServiceName);
+  const auto minifilterServiceRunning = _wcsicmp(minifilterServiceState.c_str(), L"running") == 0;
   const auto minifilterArtifactsPresent = PathExists(minifilterInf) || PathExists(minifilterSys) || PathExists(minifilterCat);
   AddCheck(report, L"minifilter", L"Minifilter package",
-         !minifilterServiceState.empty() ? SelfTestStatus::Pass : SelfTestStatus::Fail,
-           !minifilterServiceState.empty()
-               ? L"The minifilter service is registered with state " + minifilterServiceState + L"."
-               : (minifilterArtifactsPresent ? L"Driver packaging artifacts are present, but the minifilter service is not installed."
-                                            : L"No built minifilter artifacts were found beside the agent binaries."),
+         minifilterServiceRunning ? SelfTestStatus::Pass : SelfTestStatus::Fail,
+           minifilterServiceRunning
+               ? L"The minifilter service is registered and running."
+               : (minifilterServiceState.empty()
+                      ? (minifilterArtifactsPresent ? L"Driver packaging artifacts are present, but the minifilter service is not installed."
+                                                   : L"No built minifilter artifacts were found beside the agent binaries.")
+                      : L"The minifilter service is registered but not running (state " + minifilterServiceState + L")."),
          L"Build and sign the minifilter, stage AntivirusMinifilter.inf/.sys/.cat into the release package, and install the minifilter service.");
 
   const auto minifilterInfPresent = PathExists(minifilterInf);

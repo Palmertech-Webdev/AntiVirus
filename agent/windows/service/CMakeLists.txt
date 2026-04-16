@@ -14,6 +14,8 @@ set(ANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD ON CACHE BOOL
   "Require staged minifilter INF/SYS/CAT payloads in the development output root.")
 set(ANTIVIRUS_WEBVIEW2_BOOTSTRAPPER "" CACHE FILEPATH
   "Optional path to a Microsoft Edge WebView2 runtime installer to embed in FenrirSetup.")
+set(ANTIVIRUS_ENABLE_BUILD_VALIDATION ON CACHE BOOL
+  "Enable build-time minifilter package validation target.")
 file(TO_CMAKE_PATH "${ANTIVIRUS_DEV_OUTPUT_ROOT}" ANTIVIRUS_DEV_OUTPUT_ROOT)
 file(TO_CMAKE_PATH "${ANTIVIRUS_INSTALL_OUTPUT_ROOT}" ANTIVIRUS_INSTALL_OUTPUT_ROOT)
 set(ANTIVIRUS_DEV_TOOLS_OUTPUT_ROOT "${ANTIVIRUS_DEV_OUTPUT_ROOT}/tools")
@@ -377,3 +379,35 @@ target_link_options(antivirus-setup PRIVATE -municode -static)
 set_target_properties(antivirus-setup PROPERTIES OUTPUT_NAME "FenrirSetup")
 antivirus_set_runtime_output(antivirus-setup "${ANTIVIRUS_INSTALL_OUTPUT_ROOT}")
 antivirus_apply_portable_runtime(antivirus-setup)
+
+find_program(ANTIVIRUS_POWERSHELL_EXECUTABLE NAMES pwsh powershell)
+if(ANTIVIRUS_ENABLE_BUILD_VALIDATION AND ANTIVIRUS_POWERSHELL_EXECUTABLE)
+  get_filename_component(ANTIVIRUS_REPO_ROOT "${ANTIVIRUS_WINDOWS_ROOT}/.." ABSOLUTE)
+  set(ANTIVIRUS_VALIDATE_MINIFILTER_SCRIPT
+      "${ANTIVIRUS_WINDOWS_ROOT}/tools/scannercli/ValidateMinifilterPackage.ps1")
+
+  add_custom_target(antivirus-validate-minifilter-package
+    COMMAND "${ANTIVIRUS_POWERSHELL_EXECUTABLE}"
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File "${ANTIVIRUS_VALIDATE_MINIFILTER_SCRIPT}"
+            -WorkspaceRoot "${ANTIVIRUS_REPO_ROOT}"
+            -DriverRoot "${ANTIVIRUS_DEV_OUTPUT_ROOT}/driver"
+            -WorkingRoot "${ANTIVIRUS_REPO_ROOT}/tmp-phase1-minifilter-package"
+            -RequireSignedArtifacts:$true
+            -RequireServiceInstalled:$false
+            -RequireServiceRunning:$false
+            -RequireBrokerProbe:$false
+            -RequireLiveInterception:$false
+    WORKING_DIRECTORY "${ANTIVIRUS_REPO_ROOT}"
+    DEPENDS antivirus-setup
+    COMMENT "Running minifilter package validation target."
+    VERBATIM
+  )
+
+  add_custom_target(antivirus-build-validated
+    DEPENDS antivirus-setup antivirus-validate-minifilter-package
+  )
+elseif(ANTIVIRUS_ENABLE_BUILD_VALIDATION)
+  message(STATUS "ANTIVIRUS_ENABLE_BUILD_VALIDATION is ON, but no PowerShell executable was found; validation target will not be created.")
+endif()

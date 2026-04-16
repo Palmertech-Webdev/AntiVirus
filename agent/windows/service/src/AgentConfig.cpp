@@ -858,6 +858,22 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   config.realtimeBrokerRetrySeconds =
       ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_REALTIME_BROKER_RETRY_SECONDS"),
                        config.realtimeBrokerRetrySeconds);
+    config.realtimeCoverageStartupTimeoutSeconds =
+      std::clamp(ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_REALTIME_STARTUP_TIMEOUT_SECONDS"),
+                    config.realtimeCoverageStartupTimeoutSeconds),
+           1, 300);
+    config.failServiceStartupIfRealtimeCoverageMissing =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_FAIL_STARTUP_IF_REALTIME_MISSING"),
+              config.failServiceStartupIfRealtimeCoverageMissing);
+    config.enforceProcessStartVerdicts =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_PROCESS_START_VERDICTS"),
+              config.enforceProcessStartVerdicts);
+    config.terminateProcessTreeOnExecuteBlock =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_TERMINATE_PROCESS_TREE_ON_EXECUTE_BLOCK"),
+              config.terminateProcessTreeOnExecuteBlock);
+    config.strictRealtimeMode =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_STRICT_REALTIME_MODE"),
+              config.strictRealtimeMode);
   config.enforceOperationalGates = ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ENFORCE_OPERATIONAL_GATES"),
                                                      config.enforceOperationalGates);
     config.maxCpuLoadPercent =

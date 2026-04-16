@@ -1252,6 +1252,64 @@ std::wstring BuildVerdictReasonCodesJson(const ScanVerdict& verdict) {
   return reasonCodesJson;
 }
 
+bool IsSuspiciousImageLoadForEnforcement(const TelemetryRecord& record) {
+  if (record.eventType != L"image.loaded") {
+    return false;
+  }
+
+  const auto modulePath = ToLowerCopy(ExtractPayloadString(record.payloadJson, "imagePath").value_or(L""));
+  const auto processImage = ToLowerCopy(ExtractPayloadString(record.payloadJson, "processImagePath").value_or(L""));
+  const auto signer = ToLowerCopy(ExtractPayloadString(record.payloadJson, "signer").value_or(L""));
+  if (modulePath.empty()) {
+    return false;
+  }
+
+  const auto userControlledModule = modulePath.find(L"\\users\\") != std::wstring::npos ||
+                                    modulePath.find(L"\\programdata\\") != std::wstring::npos ||
+                                    modulePath.find(L"\\appdata\\") != std::wstring::npos ||
+                                    modulePath.find(L"\\temp\\") != std::wstring::npos;
+  const auto dllLikeModule = modulePath.ends_with(L".dll") || modulePath.ends_with(L".ocx") ||
+                             modulePath.ends_with(L".exe") || modulePath.ends_with(L".scr");
+  const auto lolbinHost = processImage.find(L"rundll32.exe") != std::wstring::npos ||
+                          processImage.find(L"regsvr32.exe") != std::wstring::npos ||
+                          processImage.find(L"mshta.exe") != std::wstring::npos ||
+                          processImage.find(L"wscript.exe") != std::wstring::npos ||
+                          processImage.find(L"cscript.exe") != std::wstring::npos ||
+                          processImage.find(L"powershell.exe") != std::wstring::npos ||
+                          processImage.find(L"cmd.exe") != std::wstring::npos;
+  const auto signerUntrusted = signer.empty() || signer.find(L"microsoft") == std::wstring::npos;
+
+  return userControlledModule && dllLikeModule && (lolbinHost || signerUntrusted);
+}
+
+void ApplyRealtimeQuarantineAndEvidence(const AgentConfig& config, const PolicySnapshot& policy, ScanFinding* finding) {
+  if (finding == nullptr || finding->path.empty()) {
+    return;
+  }
+
+  if (policy.quarantineOnMalicious && policy.quarantineAfterProcessKill) {
+    QuarantineStore quarantineStore(config.quarantineRootPath, config.runtimeDatabasePath);
+    auto quarantineResult = quarantineStore.QuarantineFile(*finding);
+    if (quarantineResult.success) {
+      finding->remediationStatus = RemediationStatus::Quarantined;
+      finding->quarantineRecordId = quarantineResult.recordId;
+      finding->quarantinedPath = quarantineResult.quarantinedPath;
+      finding->verdict.reasons.push_back(
+          {L"QUARANTINE_APPLIED", L"Fenrir moved the blocked process image into local quarantine."});
+    } else {
+      finding->remediationStatus = RemediationStatus::Failed;
+      finding->remediationError = quarantineResult.errorMessage.empty()
+                                      ? L"Realtime process-block quarantine failed."
+                                      : quarantineResult.errorMessage;
+      finding->verdict.reasons.push_back({L"QUARANTINE_FAILED", finding->remediationError});
+    }
+  }
+
+  EvidenceRecorder evidenceRecorder(config.evidenceRootPath, config.runtimeDatabasePath);
+  const auto evidence = evidenceRecorder.RecordScanFinding(*finding, policy, L"realtime-protection");
+  finding->evidenceRecordId = evidence.recordId;
+}
+
 DWORD ExecuteHiddenProcess(const std::wstring& commandLine, const std::wstring& workingDirectory = {}) {
   std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
   mutableCommandLine.push_back(L'\0');
@@ -1532,74 +1590,73 @@ std::filesystem::path ResolvePamPolicyBackupPath(const AgentConfig& config) {
 bool ReadUtf8TextFile(const std::filesystem::path& path, std::string* content, std::wstring* errorMessage) {
   if (content == nullptr) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir did not receive a text-file output buffer.";
+      *errorMessage = L"Fenrir cannot read UTF-8 content into a null output buffer.";
     }
     return false;
   }
 
-  std::ifstream input(path, std::ios::binary);
-  if (!input.is_open()) {
+  content->clear();
+
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream.is_open()) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir could not open file " + path.wstring() + L".";
+      *errorMessage = L"Fenrir could not open " + path.wstring() + L" for reading.";
     }
     return false;
   }
 
-  const std::string loaded((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-  if (!input.good() && !input.eof()) {
+  std::ostringstream buffer;
+  buffer << stream.rdbuf();
+  if (!stream.good() && !stream.eof()) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir encountered an I/O error while reading " + path.wstring() + L".";
+      *errorMessage = L"Fenrir could not read UTF-8 content from " + path.wstring() + L".";
     }
     return false;
   }
 
-  *content = loaded;
+  *content = buffer.str();
   return true;
 }
 
 bool WriteUtf8TextFileAtomic(const std::filesystem::path& path, const std::string& content,
                              std::wstring* errorMessage) {
   std::error_code directoryError;
-  std::filesystem::create_directories(path.parent_path(), directoryError);
+  if (!path.parent_path().empty()) {
+    std::filesystem::create_directories(path.parent_path(), directoryError);
+  }
   if (directoryError) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir could not create directory for " + path.wstring() + L".";
+      *errorMessage = L"Fenrir could not prepare parent directory for " + path.wstring() + L".";
     }
     return false;
   }
 
-  const auto tempPath =
-      path.parent_path() / (path.filename().wstring() + L".tmp-" + GenerateGuidString());
-  std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
-  if (!output.is_open()) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir could not create temporary file " + tempPath.wstring() + L".";
+  const auto temporaryPath = path.wstring() + L".fenrir-new";
+  {
+    std::ofstream output(temporaryPath.c_str(), std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir could not stage update for " + path.wstring() + L".";
+      }
+      return false;
     }
-    return false;
-  }
 
-  output.write(content.data(), static_cast<std::streamsize>(content.size()));
-  output.flush();
-  if (!output.good()) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir could not persist temporary file " + tempPath.wstring() + L".";
+    output.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!output.good()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Fenrir could not write update content for " + path.wstring() + L".";
+      }
+      return false;
     }
-    return false;
   }
 
-  std::error_code renameError;
-  std::filesystem::rename(tempPath, path, renameError);
-  if (!renameError) {
-    return true;
-  }
-
-  renameError.clear();
-  std::filesystem::copy_file(tempPath, path, std::filesystem::copy_options::overwrite_existing, renameError);
-  std::error_code cleanupError;
-  std::filesystem::remove(tempPath, cleanupError);
-  if (renameError) {
+  if (MoveFileExW(temporaryPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
+    const auto moveError = GetLastError();
+    std::error_code cleanupError;
+    std::filesystem::remove(temporaryPath, cleanupError);
     if (errorMessage != nullptr) {
-      *errorMessage = L"Fenrir could not finalize update for " + path.wstring() + L".";
+      *errorMessage = L"Fenrir could not finalize update for " + path.wstring() + L" (error " +
+                      std::to_wstring(moveError) + L").";
     }
     return false;
   }
@@ -2539,6 +2596,37 @@ int AgentService::Run(const AgentRunMode mode) {
     processEtwSensor_->SetDeviceId(state_.deviceId);
     networkIsolationManager_->SetDeviceId(state_.deviceId);
     realtimeProtectionBroker_->Start();
+
+    bool realtimeCoverageHealthy = realtimeProtectionBroker_->IsRealtimeCoverageHealthy();
+    if (!realtimeCoverageHealthy) {
+      const auto startupTimeoutSeconds = std::max(config_.realtimeCoverageStartupTimeoutSeconds, 1);
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(startupTimeoutSeconds);
+      while (!ShouldStop() && std::chrono::steady_clock::now() < deadline) {
+        if (realtimeProtectionBroker_->IsRealtimeCoverageHealthy()) {
+          realtimeCoverageHealthy = true;
+          break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+    }
+
+    if (!realtimeCoverageHealthy) {
+      const auto failStartupForMissingCoverage =
+          policy_.failServiceStartupIfRealtimeCoverageMissing ||
+          config_.failServiceStartupIfRealtimeCoverageMissing || config_.strictRealtimeMode;
+      if (failStartupForMissingCoverage) {
+        throw std::runtime_error("Realtime broker/minifilter coverage did not become healthy within startup budget.");
+      }
+
+      state_.healthState = L"critical";
+      QueueTelemetryEvent(
+          L"realtime.coverage.critical", L"realtime-protection",
+          L"Realtime broker/minifilter coverage is missing after startup timeout; service continues in critical degraded mode.",
+          std::wstring(L"{\"timeoutSeconds\":") +
+              std::to_wstring(std::max(config_.realtimeCoverageStartupTimeoutSeconds, 1)) + L"}");
+    }
+
     localControlChannel_->Start();
     processEtwSensor_->Start();
     networkIsolationManager_->Start();
@@ -4491,14 +4579,18 @@ void AgentService::PublishHeartbeat(const int cycle) {
       policy_.networkContainmentEnabled && (!networkIsolationManager_ || !networkIsolationManager_->EngineReady());
   const auto realtimeUnavailable = policy_.realtimeProtectionEnabled &&
                                    (!realtimeProtectionBroker_ || !realtimeProtectionBroker_->IsRealtimeCoverageHealthy());
+  const auto realtimeCoverageCritical =
+      realtimeUnavailable && (policy_.requireMinifilterBrokerConnection || config_.strictRealtimeMode);
 
   state_.isolated = wfpIsolationActive;
   state_.healthState = wfpIsolationActive
                            ? L"isolated"
-                           : ((wfpUnavailable || realtimeUnavailable || lastControlPlaneSyncFailed_ || lastTelemetryFlushFailed_ ||
-                               lastHardeningCheckFailed_)
-                                  ? L"degraded"
-                                  : L"healthy");
+                 : (realtimeCoverageCritical || state_.healthState == L"critical"
+                    ? L"critical"
+                    : ((wfpUnavailable || realtimeUnavailable || lastControlPlaneSyncFailed_ ||
+                      lastTelemetryFlushFailed_ || lastHardeningCheckFailed_)
+                       ? L"degraded"
+                       : L"healthy"));
 
   bool attemptedRecovery = false;
   for (;;) {
@@ -4716,6 +4808,9 @@ void AgentService::DrainProcessTelemetry() {
     return;
   }
 
+  const auto enforceProcessStartVerdicts =
+      policy_.enforceProcessStartVerdicts || config_.enforceProcessStartVerdicts || config_.strictRealtimeMode;
+
   for (const auto& record : telemetry) {
     const std::optional<EventEnvelope> behaviorEvent =
         realtimeProtectionBroker_ ? BuildBehaviorEventFromProcessTelemetry(record, state_.deviceId)
@@ -4727,36 +4822,52 @@ void AgentService::DrainProcessTelemetry() {
       const auto imagePath = ExtractPayloadString(record.payloadJson, "imagePath").value_or(L"");
       bool terminatedByRealtimeContainment = false;
 
-      if (realtimeProtectionBroker_ && behaviorEvent.has_value()) {
+      if (realtimeProtectionBroker_ && behaviorEvent.has_value() && enforceProcessStartVerdicts) {
         const auto verdict = realtimeProtectionBroker_->EvaluateEvent(*behaviorEvent);
         if (IsMaliciousRealtimeVerdict(verdict)) {
-          int terminatedCount = 0;
-          if (pid.has_value() && TerminateProcessById(*pid)) {
-            ++terminatedCount;
+          RemediationEngine remediationEngine(config_);
+          RemediationOutcome containment;
+          if (pid.has_value()) {
+            containment = remediationEngine.TerminateProcessTreeByRootPid(*pid);
           }
 
-          if (!imagePath.empty()) {
-            RemediationEngine remediationEngine(config_);
-            const auto remediation = remediationEngine.TerminateProcessesForPath(imagePath, true);
-            terminatedCount += remediation.processesTerminated;
+          terminatedByRealtimeContainment = containment.processesTerminated > 0;
+
+          ScanFinding finding{};
+          finding.path = std::filesystem::path(imagePath.empty() ? imageName : imagePath);
+          finding.verdict = verdict;
+          if (terminatedByRealtimeContainment) {
+            finding.verdict.reasons.push_back(
+                {L"PROCESS_TREE_TERMINATED_PRE_QUARANTINE",
+                 L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+                     L" process(es) immediately after process-start verdict enforcement."});
+          } else {
+            finding.verdict.reasons.push_back({L"PROCESS_TREE_TERMINATION_FAILED",
+                                               containment.errorMessage.empty()
+                                                   ? L"Fenrir could not terminate the process tree after a malicious start verdict."
+                                                   : containment.errorMessage});
           }
 
-          terminatedByRealtimeContainment = terminatedCount > 0;
+          ApplyRealtimeQuarantineAndEvidence(config_, policy_, &finding);
+
           QueueTelemetryEvent(
-              terminatedByRealtimeContainment ? L"realtime.process.contained"
-                                             : L"realtime.process.containment_failed",
+              terminatedByRealtimeContainment ? L"process.execution.blocked" : L"process.execution.block.failed",
               L"realtime-protection",
               terminatedByRealtimeContainment
-                  ? L"Fenrir terminated a malicious process immediately after ETW process-start classification."
-                  : L"Fenrir classified a process start as malicious but could not terminate it immediately.",
+                  ? L"Fenrir blocked a malicious process start and contained the process tree immediately."
+                  : L"Fenrir classified a process start as malicious but process-tree containment did not complete.",
               std::wstring(L"{\"pid\":") + std::to_wstring(pid.value_or(0)) + L",\"imagePath\":\"" +
                   Utf8ToWide(EscapeJsonString(imagePath)) + L"\",\"imageName\":\"" +
                   Utf8ToWide(EscapeJsonString(imageName)) + L"\",\"confidence\":" +
                   std::to_wstring(verdict.confidence) + L",\"disposition\":\"" +
                   VerdictDispositionToString(verdict.disposition) + L"\",\"terminatedCount\":" +
-                  std::to_wstring(terminatedCount) + L",\"reasonCodes\":" +
+                  std::to_wstring(containment.processesTerminated) + L",\"reasonCodes\":" +
                   BuildVerdictReasonCodesJson(verdict) + L"}");
+        } else {
+          realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
         }
+      } else if (realtimeProtectionBroker_ && behaviorEvent.has_value()) {
+        realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
       }
 
       RuntimeDatabase database(config_.runtimeDatabasePath);
@@ -4778,6 +4889,56 @@ void AgentService::DrainProcessTelemetry() {
                                   Utf8ToWide(EscapeJsonString(imageName)) + L"\"}");
         }
       }
+      continue;
+    }
+
+    if (record.eventType == L"image.loaded" && realtimeProtectionBroker_ && behaviorEvent.has_value()) {
+      if (enforceProcessStartVerdicts && IsSuspiciousImageLoadForEnforcement(record)) {
+        const auto verdict = realtimeProtectionBroker_->EvaluateEvent(*behaviorEvent);
+        if (IsMaliciousRealtimeVerdict(verdict)) {
+          const auto pid = ExtractPayloadUInt32(record.payloadJson, "pid");
+          const auto modulePath = ExtractPayloadString(record.payloadJson, "imagePath").value_or(L"");
+          const auto hostImage = ExtractPayloadString(record.payloadJson, "processImagePath").value_or(L"");
+
+          RemediationEngine remediationEngine(config_);
+          RemediationOutcome containment;
+          if (pid.has_value()) {
+            containment = remediationEngine.TerminateProcessTreeByRootPid(*pid);
+          }
+
+          ScanFinding finding{};
+          finding.path = std::filesystem::path(modulePath.empty() ? hostImage : modulePath);
+          finding.verdict = verdict;
+          finding.verdict.reasons.push_back(
+              {L"SUSPICIOUS_IMAGE_LOAD_BLOCKED",
+               L"Fenrir blocked suspicious module load behavior associated with sideloading or LOLBin proxy execution."});
+          if (containment.processesTerminated > 0) {
+            finding.verdict.reasons.push_back(
+                {L"PROCESS_TREE_TERMINATED_PRE_QUARANTINE",
+                 L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+                     L" process(es) after malicious image-load verdict enforcement."});
+          }
+
+          ApplyRealtimeQuarantineAndEvidence(config_, policy_, &finding);
+
+          QueueTelemetryEvent(
+              containment.processesTerminated > 0 ? L"process.execution.blocked" : L"process.execution.block.failed",
+              L"realtime-protection",
+              containment.processesTerminated > 0
+                  ? L"Fenrir blocked suspicious image-load execution and contained the host process tree."
+                  : L"Fenrir detected suspicious image-load execution but containment did not complete.",
+              std::wstring(L"{\"pid\":") + std::to_wstring(pid.value_or(0)) + L",\"modulePath\":\"" +
+                  Utf8ToWide(EscapeJsonString(modulePath)) + L"\",\"hostImage\":\"" +
+                  Utf8ToWide(EscapeJsonString(hostImage)) + L"\",\"confidence\":" +
+                  std::to_wstring(verdict.confidence) + L",\"disposition\":\"" +
+                  VerdictDispositionToString(verdict.disposition) + L"\",\"terminatedCount\":" +
+                  std::to_wstring(containment.processesTerminated) + L",\"reasonCodes\":" +
+                  BuildVerdictReasonCodesJson(verdict) + L"}");
+          continue;
+        }
+      }
+
+      realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
       continue;
     }
 

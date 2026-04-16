@@ -402,6 +402,21 @@ PolicySnapshot ParsePolicySnapshot(const std::string& json) {
   if (const auto value = ExtractJsonBool(json, "realtimeObserveOnlyForNonExecute"); value.has_value()) {
     policy.realtimeObserveOnlyForNonExecute = *value;
   }
+  if (const auto value = ExtractJsonBool(json, "terminateProcessTreeOnExecuteBlock"); value.has_value()) {
+    policy.terminateProcessTreeOnExecuteBlock = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "enforceProcessStartVerdicts"); value.has_value()) {
+    policy.enforceProcessStartVerdicts = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "quarantineAfterProcessKill"); value.has_value()) {
+    policy.quarantineAfterProcessKill = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "failServiceStartupIfRealtimeCoverageMissing"); value.has_value()) {
+    policy.failServiceStartupIfRealtimeCoverageMissing = *value;
+  }
+  if (const auto value = ExtractJsonBool(json, "requireMinifilterBrokerConnection"); value.has_value()) {
+    policy.requireMinifilterBrokerConnection = *value;
+  }
   if (const auto value = ExtractJsonBool(json, "archiveObserveOnly"); value.has_value()) {
     policy.archiveObserveOnly = *value;
   }

@@ -4,7 +4,10 @@ param(
   [string]$WorkingRoot = "./tmp-phase1-minifilter-package",
   [string]$ExpectedServiceName = "AntivirusMinifilter",
   [bool]$RequireSignedArtifacts = $true,
-  [bool]$RequireServiceInstalled = $true
+  [bool]$RequireServiceInstalled = $true,
+  [bool]$RequireServiceRunning = $true,
+  [bool]$RequireBrokerProbe = $true,
+  [bool]$RequireLiveInterception = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -165,20 +168,86 @@ if ($catExists) {
   }
 }
 
-$isAdministrator = Test-IsRunningAsAdministrator
 $service = Get-Service -Name $ExpectedServiceName -ErrorAction SilentlyContinue
 if ($null -ne $service) {
   Add-Check -Name "service_registration" -Status "pass" -Details ("Service '{0}' is registered with state '{1}'." -f $ExpectedServiceName, [string]$service.Status)
 } else {
   if ($RequireServiceInstalled) {
-    if ($isAdministrator) {
-      Add-Check -Name "service_registration" -Status "fail" -Details ("Service '{0}' is not registered on this host." -f $ExpectedServiceName)
-    } else {
-      Add-Check -Name "service_registration" -Status "warning" -Details ("Service '{0}' is not registered, and this validation ran without administrator rights. Re-run in an elevated shell for strict service-registration enforcement." -f $ExpectedServiceName)
-    }
+    Add-Check -Name "service_registration" -Status "fail" -Details ("Service '{0}' is not registered on this host." -f $ExpectedServiceName)
   } else {
     Add-Check -Name "service_registration" -Status "warning" -Details ("Service '{0}' is not registered on this host (warning only for packaging validation)." -f $ExpectedServiceName)
   }
+}
+
+if ($null -ne $service) {
+  if ([string]$service.Status -eq "Running") {
+    Add-Check -Name "service_running" -Status "pass" -Details ("Service '{0}' is running." -f $ExpectedServiceName)
+  } else {
+    $status = if ($RequireServiceRunning) { "fail" } else { "warning" }
+    Add-Check -Name "service_running" -Status $status -Details ("Service '{0}' is registered but state is '{1}'." -f $ExpectedServiceName, [string]$service.Status)
+  }
+} else {
+  $status = if ($RequireServiceRunning) { "fail" } else { "warning" }
+  Add-Check -Name "service_running" -Status $status -Details ("Service '{0}' is not registered, so running-state validation could not be performed." -f $ExpectedServiceName)
+}
+
+$fltmcPath = Join-Path $env:SystemRoot "System32\fltmc.exe"
+if (Test-Path -LiteralPath $fltmcPath) {
+  try {
+    $fltmcOutput = & $fltmcPath filters 2>&1 | Out-String
+    $fltmcExitCode = $LASTEXITCODE
+    $minifilterLoaded = $false
+    if ($fltmcExitCode -eq 0) {
+      $minifilterLoaded = $fltmcOutput -match [regex]::Escape($ExpectedServiceName)
+    }
+
+    if ($minifilterLoaded) {
+      Add-Check -Name "live_interception_path" -Status "pass" -Details ("fltmc reports '{0}' in the loaded minifilter list." -f $ExpectedServiceName)
+    } else {
+      $status = if ($RequireLiveInterception) { "fail" } else { "warning" }
+      $details = if ($fltmcExitCode -ne 0) {
+        "fltmc filters failed with exit code $fltmcExitCode."
+      } else {
+        ("fltmc did not report '{0}' in the loaded minifilter list." -f $ExpectedServiceName)
+      }
+      Add-Check -Name "live_interception_path" -Status $status -Details $details
+    }
+  } catch {
+    $status = if ($RequireLiveInterception) { "fail" } else { "warning" }
+    Add-Check -Name "live_interception_path" -Status $status -Details ("Could not query loaded minifilters with fltmc: {0}" -f $_.Exception.Message)
+  }
+} else {
+  $status = if ($RequireLiveInterception) { "fail" } else { "warning" }
+  Add-Check -Name "live_interception_path" -Status $status -Details "fltmc.exe was not found; live minifilter load validation could not run."
+}
+
+$scannerCliPath = Resolve-AbsolutePath -InputPath "./agent/windows/out/dev/tools/fenrir-scannercli.exe"
+if (Test-Path -LiteralPath $scannerCliPath) {
+  try {
+    $probeRoot = Join-Path $workingRootAbsolute "broker-probe"
+    $null = New-Item -ItemType Directory -Force -Path $probeRoot
+    $probePath = Join-Path $probeRoot "broker-execute-eicar.ps1"
+    $probePayload = 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+    Set-Content -LiteralPath $probePath -Value $probePayload -Encoding ASCII
+
+    $probeOutput = & $scannerCliPath --json --realtime-op execute $probePath 2>&1 | Out-String
+    $probeExitCode = $LASTEXITCODE
+    $blocked = ($probeExitCode -eq 2 -or $probeExitCode -eq 3)
+
+    if ($blocked) {
+      Add-Check -Name "broker_execute_probe" -Status "pass" -Details ("Realtime broker execute probe blocked the staged EICAR sample (exit code {0})." -f $probeExitCode)
+    } else {
+      $status = if ($RequireBrokerProbe) { "fail" } else { "warning" }
+      $truncatedOutput = if ($probeOutput.Length -gt 512) { $probeOutput.Substring(0, 512) + "..." } else { $probeOutput }
+      Add-Check -Name "broker_execute_probe" -Status $status -Details ("Realtime broker execute probe did not block staged sample (exit code {0}). Output: {1}" -f $probeExitCode, $truncatedOutput.Trim())
+    }
+  } catch {
+    $status = if ($RequireBrokerProbe) { "fail" } else { "warning" }
+    Add-Check -Name "broker_execute_probe" -Status $status -Details ("Could not run realtime broker execute probe: {0}" -f $_.Exception.Message)
+  }
+} else {
+  $status = if ($RequireBrokerProbe) { "fail" } else { "warning" }
+  Add-Check -Name "broker_execute_probe" -Status $status -Details ("Scanner CLI was not found at '{0}'." -f $scannerCliPath)
 }
 
 $inventory = [System.Collections.Generic.List[object]]::new()
@@ -209,6 +278,9 @@ $report = [PSCustomObject]@{
   driverRoot = $driverRootAbsolute
   requireSignedArtifacts = $RequireSignedArtifacts
   requireServiceInstalled = [bool]$RequireServiceInstalled
+  requireServiceRunning = [bool]$RequireServiceRunning
+  requireBrokerProbe = [bool]$RequireBrokerProbe
+  requireLiveInterception = [bool]$RequireLiveInterception
   expectedServiceName = $ExpectedServiceName
   overallStatus = $overallStatus
   allPass = $allPass

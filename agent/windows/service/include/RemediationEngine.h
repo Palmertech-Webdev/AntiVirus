@@ -3,9 +3,11 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <Windows.h>
 
 #include "AgentConfig.h"
 #include "PolicySnapshot.h"
+#include "../../shared/include/RealtimeProtectionProtocol.h"
 
 namespace antivirus::agent {
 
@@ -31,6 +33,10 @@ class RemediationEngine {
  public:
   explicit RemediationEngine(const AgentConfig& config);
 
+  RemediationOutcome TerminateProcessByPid(DWORD pid, bool includeChildren) const;
+  RemediationOutcome TerminateProcessTreeByRootPid(DWORD pid) const;
+  RemediationOutcome TerminateProcessesForRealtimeRequest(const RealtimeFileScanRequest& request,
+                                                          bool includeChildren) const;
   RemediationOutcome TerminateProcessesForPath(const std::filesystem::path& subjectPath, bool includeChildren) const;
   RemediationOutcome CleanupPersistenceForPath(const std::filesystem::path& subjectPath) const;
   RemediationOutcome RemediatePath(const std::filesystem::path& subjectPath, const PolicySnapshot& policy) const;

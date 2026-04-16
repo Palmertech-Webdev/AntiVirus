@@ -19,11 +19,16 @@ struct PolicySnapshot {
   std::uint32_t scanMaliciousQuarantineThreshold{70};
   std::uint32_t scanBenignDampeningScore{20};
   std::uint32_t genericRuleScoreScalePercent{75};
-  std::uint32_t realtimeExecuteBlockThreshold{65};
-  std::uint32_t realtimeNonExecuteBlockThreshold{70};
-  std::uint32_t realtimeQuarantineThreshold{90};
-  std::uint32_t realtimeObserveTelemetryThreshold{45};
+  std::uint32_t realtimeExecuteBlockThreshold{55};
+  std::uint32_t realtimeNonExecuteBlockThreshold{60};
+  std::uint32_t realtimeQuarantineThreshold{75};
+  std::uint32_t realtimeObserveTelemetryThreshold{35};
   bool realtimeObserveOnlyForNonExecute{false};
+  bool terminateProcessTreeOnExecuteBlock{true};
+  bool enforceProcessStartVerdicts{true};
+  bool quarantineAfterProcessKill{true};
+  bool failServiceStartupIfRealtimeCoverageMissing{true};
+  bool requireMinifilterBrokerConnection{true};
   bool archiveObserveOnly{false};
   bool networkObserveOnly{false};
   bool cloudLookupObserveOnly{false};
@@ -50,11 +55,16 @@ inline PolicySnapshot CreateDefaultPolicySnapshot() {
       .scanMaliciousQuarantineThreshold = 70,
       .scanBenignDampeningScore = 20,
       .genericRuleScoreScalePercent = 75,
-      .realtimeExecuteBlockThreshold = 65,
-      .realtimeNonExecuteBlockThreshold = 70,
-      .realtimeQuarantineThreshold = 90,
-      .realtimeObserveTelemetryThreshold = 45,
+      .realtimeExecuteBlockThreshold = 55,
+      .realtimeNonExecuteBlockThreshold = 60,
+      .realtimeQuarantineThreshold = 75,
+      .realtimeObserveTelemetryThreshold = 35,
       .realtimeObserveOnlyForNonExecute = false,
+      .terminateProcessTreeOnExecuteBlock = true,
+      .enforceProcessStartVerdicts = true,
+      .quarantineAfterProcessKill = true,
+      .failServiceStartupIfRealtimeCoverageMissing = true,
+      .requireMinifilterBrokerConnection = true,
       .archiveObserveOnly = false,
       .networkObserveOnly = false,
       .cloudLookupObserveOnly = false,

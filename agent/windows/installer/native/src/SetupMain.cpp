@@ -12,7 +12,9 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -430,9 +432,12 @@ bool RunProcessHidden(const std::filesystem::path& executable, const std::wstrin
 bool WaitForServiceStateByName(const wchar_t* serviceName, DWORD targetState, DWORD timeoutMs);
 bool WaitForServiceState(DWORD targetState, DWORD timeoutMs);
 bool StartServiceByName(const wchar_t* serviceName, DWORD timeoutMs, std::wstring* errorMessage);
+bool StopServiceByName(const wchar_t* serviceName, DWORD timeoutMs, std::wstring* errorMessage);
 bool StartInstalledService(std::wstring* errorMessage);
 bool StopInstalledService(std::wstring* errorMessage);
 bool InstallMinifilterDriver(const std::filesystem::path& installRoot, bool repair, std::wstring* errorMessage);
+bool UninstallMinifilterDriver(const std::filesystem::path& installRoot, std::wstring* errorMessage);
+bool RunPostInstallHealthChecks(const std::filesystem::path& installRoot, std::wstring* errorMessage);
 bool StopMatchingProcess(const std::filesystem::path& imagePath);
 bool CreateShortcut(const std::filesystem::path& linkPath, const std::filesystem::path& targetPath,
                     const std::wstring& arguments, const std::wstring& description);
@@ -878,6 +883,109 @@ bool StartServiceByName(const wchar_t* serviceName, const DWORD timeoutMs, std::
   return true;
 }
 
+bool StopServiceByName(const wchar_t* serviceName, const DWORD timeoutMs, std::wstring* errorMessage) {
+  const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (manager == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not open the Service Control Manager.";
+    }
+    return false;
+  }
+
+  const auto service = OpenServiceW(manager, serviceName, SERVICE_STOP | SERVICE_QUERY_STATUS);
+  if (service == nullptr) {
+    const auto openError = GetLastError();
+    CloseServiceHandle(manager);
+    if (openError == ERROR_SERVICE_DOES_NOT_EXIST) {
+      return true;
+    }
+    if (errorMessage != nullptr) {
+      *errorMessage = std::wstring(L"Could not open service '") + serviceName + L"'.";
+    }
+    return false;
+  }
+
+  SERVICE_STATUS_PROCESS status{};
+  DWORD bytesNeeded = 0;
+  if (QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status),
+                           &bytesNeeded) == FALSE) {
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    if (errorMessage != nullptr) {
+      *errorMessage = std::wstring(L"Could not query service '") + serviceName + L"'.";
+    }
+    return false;
+  }
+
+  if (status.dwCurrentState != SERVICE_STOPPED) {
+    SERVICE_STATUS stopStatus{};
+    if (ControlService(service, SERVICE_CONTROL_STOP, &stopStatus) == FALSE) {
+      const auto stopError = GetLastError();
+      if (stopError != ERROR_SERVICE_NOT_ACTIVE) {
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+        if (errorMessage != nullptr) {
+          *errorMessage = std::wstring(L"Service '") + serviceName + L"' could not be stopped.";
+        }
+        return false;
+      }
+    }
+
+    if (!WaitForServiceStateByName(serviceName, SERVICE_STOPPED, timeoutMs)) {
+      CloseServiceHandle(service);
+      CloseServiceHandle(manager);
+      if (errorMessage != nullptr) {
+        *errorMessage = std::wstring(L"Service '") + serviceName + L"' did not reach the stopped state.";
+      }
+      return false;
+    }
+  }
+
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+  return true;
+}
+
+bool DeleteServiceByName(const wchar_t* serviceName, std::wstring* errorMessage) {
+  const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+  if (manager == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not open the Service Control Manager.";
+    }
+    return false;
+  }
+
+  const auto service = OpenServiceW(manager, serviceName, DELETE | SERVICE_QUERY_STATUS);
+  if (service == nullptr) {
+    const auto openError = GetLastError();
+    CloseServiceHandle(manager);
+    if (openError == ERROR_SERVICE_DOES_NOT_EXIST) {
+      return true;
+    }
+    if (errorMessage != nullptr) {
+      *errorMessage = std::wstring(L"Could not open service '") + serviceName + L"' for deletion.";
+    }
+    return false;
+  }
+
+  const auto deleted = DeleteService(service) != FALSE;
+  if (!deleted) {
+    const auto deleteError = GetLastError();
+    if (deleteError != ERROR_SERVICE_MARKED_FOR_DELETE && deleteError != ERROR_SERVICE_DOES_NOT_EXIST) {
+      CloseServiceHandle(service);
+      CloseServiceHandle(manager);
+      if (errorMessage != nullptr) {
+        *errorMessage = std::wstring(L"Could not delete service '") + serviceName + L"'.";
+      }
+      return false;
+    }
+  }
+
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+  return true;
+}
+
 bool StartInstalledService(std::wstring* errorMessage) {
   return StartServiceByName(kServiceName, 20'000, errorMessage);
 }
@@ -1068,6 +1176,165 @@ bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const boo
     if (errorMessage != nullptr) {
       *errorMessage = L"AntivirusMinifilter service is not running after " +
                       std::wstring(repair ? L"repair" : L"install") + L" (state: " + finalState + L").";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool RunPostInstallHealthChecks(const std::filesystem::path& installRoot, std::wstring* errorMessage) {
+  const auto minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+  if (_wcsicmp(minifilterState.c_str(), L"running") != 0) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Post-install health check failed: AntivirusMinifilter is not running (state: " +
+                      minifilterState + L").";
+    }
+    return false;
+  }
+
+  const auto scannerCliPath = installRoot / kToolsRelativePath;
+  if (!std::filesystem::exists(scannerCliPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Post-install health check failed: scanner CLI payload is missing at " +
+                      scannerCliPath.wstring() + L".";
+    }
+    return false;
+  }
+
+  const auto probeRoot = installRoot / L"runtime" / L"post-install-broker-probe";
+  std::error_code probeRootError;
+  std::filesystem::create_directories(probeRoot, probeRootError);
+  if (probeRootError) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Post-install health check failed: could not create broker probe root at " +
+                      probeRoot.wstring() + L".";
+    }
+    return false;
+  }
+
+  const auto probePath = probeRoot / L"broker-execute-eicar.ps1";
+  {
+    std::ofstream probeFile(probePath, std::ios::binary | std::ios::trunc);
+    if (!probeFile.is_open()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Post-install health check failed: could not stage broker probe sample at " +
+                        probePath.wstring() + L".";
+      }
+      return false;
+    }
+
+    probeFile << "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    if (!probeFile.good()) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Post-install health check failed: could not write broker probe sample at " +
+                        probePath.wstring() + L".";
+      }
+      return false;
+    }
+  }
+
+  DWORD brokerProbeExitCode = std::numeric_limits<DWORD>::max();
+  std::wstring brokerProbeError;
+  const auto brokerProbeArgs = std::wstring(L"--json --realtime-op execute ") + QuotePath(probePath);
+  RunProcessHidden(scannerCliPath, brokerProbeArgs, installRoot, &brokerProbeExitCode, &brokerProbeError);
+
+  std::error_code probeCleanupError;
+  std::filesystem::remove(probePath, probeCleanupError);
+
+  if (brokerProbeExitCode != 2 && brokerProbeExitCode != 3) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Post-install health check failed: realtime broker execute probe did not block the staged "
+                      L"sample (exit code " +
+                      std::to_wstring(brokerProbeExitCode == std::numeric_limits<DWORD>::max() ? 0
+                                                                                               : brokerProbeExitCode) +
+                      L"). " + brokerProbeError;
+    }
+    return false;
+  }
+
+  const auto serviceExe = installRoot / kServiceExeName;
+  if (!std::filesystem::exists(serviceExe)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Post-install health check failed: service binary is missing at " + serviceExe.wstring() +
+                      L".";
+    }
+    return false;
+  }
+
+  DWORD selfTestExitCode = std::numeric_limits<DWORD>::max();
+  std::wstring selfTestError;
+  RunProcessHidden(serviceExe, L"--self-test", installRoot, &selfTestExitCode, &selfTestError);
+  if (selfTestExitCode != 0) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Post-install health check failed: fenrir-agent-service.exe --self-test exited with code " +
+                      std::to_wstring(selfTestExitCode == std::numeric_limits<DWORD>::max() ? 0 : selfTestExitCode) +
+                      L". " + selfTestError;
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool UninstallMinifilterDriver(const std::filesystem::path& installRoot, std::wstring* errorMessage) {
+  std::filesystem::path windowsRoot = L"C:\\Windows";
+  const auto windir = _wgetenv(L"WINDIR");
+  if (windir != nullptr && *windir != L'\0') {
+    windowsRoot = std::filesystem::path(windir);
+  }
+
+  std::wstring stopError;
+  if (!StopServiceByName(kMinifilterServiceName, 20'000, &stopError)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not stop AntivirusMinifilter before uninstall cleanup. " + stopError;
+    }
+    return false;
+  }
+
+  const auto fltmcPath = windowsRoot / L"System32" / L"fltmc.exe";
+  if (std::filesystem::exists(fltmcPath)) {
+    DWORD fltmcExitCode = 0;
+    std::wstring fltmcError;
+    const auto unloadArgs = std::wstring(L"unload ") + kMinifilterServiceName;
+    RunProcessHidden(fltmcPath, unloadArgs, installRoot, &fltmcExitCode, &fltmcError);
+  }
+
+  const auto driverInfPath = installRoot / kDriverInfRelativePath;
+  if (std::filesystem::exists(driverInfPath)) {
+    const auto pnputilPath = windowsRoot / L"System32" / L"pnputil.exe";
+    if (!std::filesystem::exists(pnputilPath)) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Could not run minifilter uninstall cleanup because pnputil.exe is unavailable.";
+      }
+      return false;
+    }
+
+    DWORD pnputilExitCode = 0;
+    std::wstring pnputilError;
+    const auto pnputilArgs = std::wstring(L"/delete-driver ") + QuotePath(driverInfPath) + L" /uninstall /force";
+    RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+    if (pnputilExitCode != ERROR_SUCCESS && pnputilExitCode != kPnpUtilNoMoreItemsExitCode) {
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Could not remove AntivirusMinifilter driver package with pnputil (exit code " +
+                        std::to_wstring(pnputilExitCode) + L"). " + pnputilError;
+      }
+      return false;
+    }
+  }
+
+  std::wstring deleteServiceError;
+  if (!DeleteServiceByName(kMinifilterServiceName, &deleteServiceError)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not delete AntivirusMinifilter service registration. " + deleteServiceError;
+    }
+    return false;
+  }
+
+  const auto finalState = QueryServiceStateByName(kMinifilterServiceName);
+  if (finalState != L"missing") {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"AntivirusMinifilter service cleanup did not complete (state: " + finalState + L").";
     }
     return false;
   }
@@ -1543,6 +1810,13 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
     return;
   }
 
+  PostStatus(hwnd, L"Running post-install health checks...", 90);
+  PostLog(hwnd, L"Validating minifilter runtime state, broker enforcement probe, and strict self-test");
+  if (!RunPostInstallHealthChecks(context->installRoot, &errorMessage)) {
+    PostComplete(hwnd, false, false, false, errorMessage);
+    return;
+  }
+
   PostStatus(hwnd, L"Configuring startup and shortcuts...", 93);
   PostLog(hwnd, L"Registering endpoint client auto-start");
   if (!RegisterEndpointAutoStart(context->installRoot)) {
@@ -1618,6 +1892,13 @@ void RunUninstall(HWND hwnd, UiContext* context) {
       PostComplete(hwnd, false, true, false, errorMessage);
       return;
     }
+  }
+
+  PostStatus(hwnd, L"Removing minifilter registration...", 45);
+  PostLog(hwnd, L"Uninstalling AntivirusMinifilter driver package and service registration");
+  if (!UninstallMinifilterDriver(installRoot, &errorMessage)) {
+    PostComplete(hwnd, false, true, false, errorMessage);
+    return;
   }
 
   PostStatus(hwnd, L"Removing startup and shortcuts...", 55);

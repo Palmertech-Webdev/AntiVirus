@@ -535,8 +535,31 @@ bool IsSuspiciousEncryptedExtension(const std::wstring& extension) {
 
 bool IsExecuteLikeOperation(const RealtimeFileOperation operation) {
   return operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
-         operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
          operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP;
+}
+
+bool IsHighRiskCreateOperation(const RealtimeFileScanRequest& request, const ScanFinding& finding,
+                               const PolicySnapshot& policy) {
+  if (request.operation != ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE) {
+    return false;
+  }
+
+  const auto extension = ToLowerCopy(finding.path.extension().wstring());
+  const auto highRiskFileType = IsExecutableExtension(extension) || IsScriptExtension(extension) ||
+                                IsContainerExtension(extension) || extension == L".hta";
+  if (!highRiskFileType || !IsUserControlledPath(finding.path)) {
+    return false;
+  }
+
+  const auto executeThreshold = static_cast<std::uint32_t>(
+      std::clamp(policy.realtimeExecuteBlockThreshold, static_cast<std::uint32_t>(1), static_cast<std::uint32_t>(99)));
+
+  const auto requestFlaggedHighRisk =
+      (request.pathRiskFlags & (ANTIVIRUS_REALTIME_PATH_RISK_EXECUTABLE_EXTENSION |
+                                ANTIVIRUS_REALTIME_PATH_RISK_SCRIPT_EXTENSION |
+                                ANTIVIRUS_REALTIME_PATH_RISK_CONTAINER_EXTENSION)) != 0;
+
+  return requestFlaggedHighRisk || finding.verdict.confidence >= executeThreshold;
 }
 
 bool LooksLikeDoubleExtensionLure(const std::wstring& fileNameLower) {
@@ -713,7 +736,8 @@ void ApplyRealtimeHitsToFinding(ScanFinding& finding, const std::vector<Realtime
   const auto quarantineThreshold = static_cast<int>(
       std::clamp(policy.realtimeQuarantineThreshold, static_cast<std::uint32_t>(blockThreshold + 1),
                  static_cast<std::uint32_t>(99)));
-  const auto nonExecuteObserveOnly = policy.realtimeObserveOnlyForNonExecute && !executeLike;
+    const auto nonExecuteObserveOnlyLowConfidence =
+      policy.realtimeObserveOnlyForNonExecute && !executeLike && totalScore < blockThreshold;
 
   finding.verdict.confidence = std::max<std::uint32_t>(finding.verdict.confidence, static_cast<std::uint32_t>(totalScore));
   if (topHit != hits.end() && !topHit->tacticId.empty() && topHit->tacticId != L"TA0000") {
@@ -727,24 +751,16 @@ void ApplyRealtimeHitsToFinding(ScanFinding& finding, const std::vector<Realtime
     finding.verdict.reasons.push_back({hit.code, hit.message});
   }
 
-  if (nonExecuteObserveOnly && finding.verdict.disposition != VerdictDisposition::Allow &&
-      totalScore < quarantineThreshold) {
-    finding.verdict.disposition = VerdictDisposition::Allow;
-    finding.verdict.reasons.push_back(
-        {L"REALTIME_NON_EXECUTE_OBSERVE_ONLY", L"Policy keeps non-execute interception in observe mode at this confidence."});
-  }
-
   if (finding.verdict.disposition == VerdictDisposition::Allow) {
-    if (!nonExecuteObserveOnly && totalScore >= quarantineThreshold) {
+    if (totalScore >= quarantineThreshold) {
       finding.verdict.disposition = allowQuarantine ? VerdictDisposition::Quarantine : VerdictDisposition::Block;
-    } else if (!nonExecuteObserveOnly && totalScore >= blockThreshold) {
+    } else if (totalScore >= blockThreshold) {
       finding.verdict.disposition = VerdictDisposition::Block;
-    } else if (nonExecuteObserveOnly && totalScore >= blockThreshold) {
-      finding.verdict.reasons.push_back(
-          {L"REALTIME_NON_EXECUTE_HIGH_CONFIDENCE_OBSERVED",
-           L"Fenrir observed elevated non-execute confidence without immediate block due to policy ladder."});
+    } else if (nonExecuteObserveOnlyLowConfidence) {
+      finding.verdict.reasons.push_back({L"REALTIME_NON_EXECUTE_LOW_CONFIDENCE_OBSERVED",
+                                         L"Fenrir kept non-execute interception in observe mode because confidence stayed below the block threshold."});
     }
-  } else if (finding.verdict.disposition == VerdictDisposition::Block && allowQuarantine && !nonExecuteObserveOnly &&
+  } else if (finding.verdict.disposition == VerdictDisposition::Block && allowQuarantine &&
              totalScore >= quarantineThreshold) {
     finding.verdict.disposition = VerdictDisposition::Quarantine;
   }
@@ -1351,28 +1367,55 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
   if (IsExecutableExtension(extension) && userControlledPath) {
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_EXECUTABLE_DROP",
                                      L"Executable content in a user-controlled path was intercepted by real-time protection.",
-                                     L"TA0002", L"T1204.002", executeLike ? 72 : 52});
+                                     L"TA0002", L"T1204.002", executeLike ? 78 : 66});
   }
 
   if (extension == L".hta") {
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_HTA_CONTENT",
                                      L"HTA content was intercepted before it could be proxied through MSHTA.",
-                                     L"TA0005", L"T1218.005", executeLike ? 68 : 54});
+                                     L"TA0005", L"T1218.005", executeLike ? 74 : 68});
   }
 
   if (IsScriptExtension(extension)) {
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_SCRIPT_INTERCEPT",
                                      L"Script content was intercepted by real-time protection.",
                                      L"TA0002", extension == L".ps1" ? L"T1059.001" : L"T1059",
-                                     executeLike ? (userControlledPath ? 56 : 45) : 28});
+                                     executeLike ? (userControlledPath ? 70 : 58)
+                                                 : (userControlledPath ? 62 : 44)});
   }
 
   if (IsContainerExtension(extension) && userControlledPath &&
-      (operation == ANTIVIRUS_REALTIME_FILE_OPERATION_OPEN || executeLike)) {
+      (operation == ANTIVIRUS_REALTIME_FILE_OPERATION_OPEN ||
+       operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
+       operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME || executeLike)) {
     AddRealtimeHit(hits, RealtimeHit{L"REALTIME_CONTAINER_LURE",
                                      L"User-writable lure or archive content was intercepted before staging could continue.",
                                      L"TA0002", extension == L".lnk" ? L"T1204.001" : L"T1204.002",
-                                     executeLike ? 36 : 24});
+                                     executeLike ? 62 : 56});
+  }
+
+  if (operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME &&
+      (IsExecutableExtension(extension) || IsScriptExtension(extension) || extension == L".hta")) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_RENAME_TO_EXECUTABLE",
+                                     L"Fenrir intercepted a rename operation that staged executable or script content.",
+                                     L"TA0002", L"T1036", 68});
+  }
+
+  if (operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE && userControlledPath &&
+      (IsExecutableExtension(extension) || IsScriptExtension(extension) ||
+       IsContainerExtension(extension) || extension == L".hta")) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_HIGH_RISK_CREATE_STAGING",
+                                     L"Fenrir intercepted high-risk create-time staging in a user-controlled path.",
+                                     L"TA0002", L"T1204.002", 64});
+  }
+
+  if ((IsOfficeOrMailImage(parentImageLower) || IsBrowserImage(parentImageLower)) && userControlledPath &&
+      (IsScriptExtension(extension) || IsContainerExtension(extension) || extension == L".hta") &&
+      (operation == ANTIVIRUS_REALTIME_FILE_OPERATION_CREATE ||
+       operation == ANTIVIRUS_REALTIME_FILE_OPERATION_RENAME || executeLike)) {
+    AddRealtimeHit(hits, RealtimeHit{L"REALTIME_PARENT_STAGE_CHAIN",
+                                     L"Office, mail, or browser parent context attempted script or container staging in user space.",
+                                     L"TA0002", L"T1204.002", 66});
   }
 
   AddContextualRealtimeHits(hits, path, extension, operation, processImageLower, parentImageLower, commandLineLower,
@@ -1393,7 +1436,7 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
   const auto nonExecuteObserveOnly = policy.realtimeObserveOnlyForNonExecute && !executeLike;
   const auto archiveObserveAllow = policy.archiveObserveOnly && IsContainerExtension(extension) && !executeLike;
 
-  if (score >= blockThreshold && !archiveObserveAllow && !nonExecuteObserveOnly) {
+  if (score >= blockThreshold && !archiveObserveAllow) {
     finding.verdict.disposition = policy.quarantineOnMalicious && highRiskFileType && score >= quarantineThreshold
                                       ? VerdictDisposition::Quarantine
                                       : VerdictDisposition::Block;
@@ -1424,9 +1467,9 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
     finding.verdict.reasons.push_back(
         {L"REALTIME_ARCHIVE_OBSERVE_ONLY", L"Archive mode is configured for observe-only handling at this confidence."});
   }
-  if (nonExecuteObserveOnly && score >= blockThreshold) {
-    finding.verdict.reasons.push_back(
-        {L"REALTIME_NON_EXECUTE_OBSERVE_ONLY", L"Policy keeps non-execute interception in observe mode at this confidence."});
+  if (nonExecuteObserveOnly && score < blockThreshold) {
+    finding.verdict.reasons.push_back({L"REALTIME_NON_EXECUTE_LOW_CONFIDENCE_OBSERVED",
+                                       L"Fenrir kept non-execute interception in observe mode because confidence stayed below the block threshold."});
   }
   finding.verdict.reasons.push_back({L"REALTIME_ALLOW", L"No blocking rule matched the intercepted file event."});
   return finding;
@@ -1632,34 +1675,52 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
         .finding = std::move(finding)};
   }
 
+  const auto immediateContainmentOperation =
+      operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE ||
+      operation == ANTIVIRUS_REALTIME_FILE_OPERATION_SECTION_MAP ||
+      IsHighRiskCreateOperation(effectiveRequest.request, finding, policy);
+
   int preQuarantineContainmentCount = 0;
-  const auto containProcessTree = [&finding, this](const bool retryingQuarantine) {
+  bool preQuarantineContainmentAttempted = false;
+  if (!finding.path.empty() && immediateContainmentOperation && policy.terminateProcessTreeOnExecuteBlock) {
+    preQuarantineContainmentAttempted = true;
     RemediationEngine remediationEngine(config_);
-    const auto containment = remediationEngine.TerminateProcessesForPath(finding.path, true);
+    const auto containment = remediationEngine.TerminateProcessesForRealtimeRequest(effectiveRequest.request, true);
+    preQuarantineContainmentCount = containment.processesTerminated;
     if (containment.processesTerminated > 0) {
       finding.verdict.reasons.push_back(
-          {L"PROCESS_TREE_CONTAINED",
-           retryingQuarantine
-               ? L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
-                     L" related process(es) before retrying quarantine."
-               : L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
-                     L" related process(es) immediately to contain execute-time malware."});
+          {L"PROCESS_TREE_TERMINATED_PRE_QUARANTINE",
+           L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+               L" process(es) immediately before quarantine to contain active execution."});
+    } else if (!containment.errorMessage.empty()) {
+      finding.verdict.reasons.push_back({L"PROCESS_TREE_TERMINATION_FAILED", containment.errorMessage});
     }
-
-    return containment.processesTerminated;
-  };
-
-  if (!finding.path.empty() && IsExecuteLikeOperation(operation)) {
-    preQuarantineContainmentCount = containProcessTree(false);
   }
 
-  if (policy.quarantineOnMalicious && !finding.path.empty()) {
+  auto quarantineEligible = policy.quarantineOnMalicious && !finding.path.empty();
+  if (immediateContainmentOperation && !policy.quarantineAfterProcessKill &&
+      preQuarantineContainmentCount > 0) {
+    quarantineEligible = false;
+    finding.verdict.reasons.push_back(
+        {L"QUARANTINE_DEFERRED_AFTER_KILL",
+         L"Policy deferred quarantine because immediate process-tree termination already contained the execution path."});
+  }
+
+  if (quarantineEligible) {
     QuarantineStore quarantineStore(config_.quarantineRootPath, config_.runtimeDatabasePath);
     auto quarantineResult = quarantineStore.QuarantineFile(finding);
-    if (!quarantineResult.success && preQuarantineContainmentCount == 0) {
-      const auto retryContainmentCount = containProcessTree(true);
+    if (!quarantineResult.success && (!preQuarantineContainmentAttempted || preQuarantineContainmentCount == 0)) {
+      RemediationEngine remediationEngine(config_);
+      const auto containment = remediationEngine.TerminateProcessesForRealtimeRequest(effectiveRequest.request, true);
+      const auto retryContainmentCount = containment.processesTerminated;
       if (retryContainmentCount > 0) {
+        finding.verdict.reasons.push_back(
+            {L"PROCESS_TREE_TERMINATED_PRE_QUARANTINE_RETRY",
+             L"Fenrir terminated " + std::to_wstring(retryContainmentCount) +
+                 L" process(es) before retrying quarantine after initial quarantine failure."});
         quarantineResult = quarantineStore.QuarantineFile(finding);
+      } else if (!containment.errorMessage.empty()) {
+        finding.verdict.reasons.push_back({L"PROCESS_TREE_TERMINATION_FAILED", containment.errorMessage});
       }
     }
 
@@ -1758,6 +1819,20 @@ ScanVerdict RealtimeProtectionBroker::EvaluateEvent(const EventEnvelope& event) 
   request.requestSize = sizeof(request);
   request.requestId = 0;
   request.operation = EventKindToRealtimeOperation(event.kind);
+  request.parentProcessId = 0;
+  request.desiredAccess = 0;
+  request.createDisposition = 0;
+  request.requestFlags = 0;
+  request.signerTrustLevel = ANTIVIRUS_REALTIME_SIGNER_TRUST_UNKNOWN;
+  request.pathRiskFlags = 0;
+
+  if (event.kind == EventKind::ProcessStart || event.kind == EventKind::FileExecute ||
+      event.kind == EventKind::ScriptScan) {
+    request.requestFlags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_EXECUTE_INTENT;
+  }
+  if (event.kind == EventKind::FileWrite || event.kind == EventKind::FileCreate) {
+    request.requestFlags |= ANTIVIRUS_REALTIME_REQUEST_FLAG_WRITE_INTENT;
+  }
 
   CopyWideField(request.correlationId, event.correlationId);
   CopyWideField(request.path, event.targetPath);
