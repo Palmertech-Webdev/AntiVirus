@@ -1,0 +1,36 @@
+{
+  "policyId": "policy-phase1-web-baseline",
+  "policyName": "Phase 1 Web And Phishing Baseline",
+  "revision": "phase1-chunk1",
+  "destinationProtection": {
+    "enabled": true,
+    "antiPhishingEnabled": true,
+    "webProtectionEnabled": true,
+    "emailLinkProtectionEnabled": true,
+    "evaluateDomains": true,
+    "evaluateUrls": true,
+    "blockKnownMaliciousDestinations": true,
+    "blockKnownPhishingDestinations": true,
+    "blockKnownScamDestinations": false,
+    "warnOnSuspiciousDestinations": true,
+    "warnOnNewlyRegisteredDomains": true,
+    "allowDegradedModeWhenOffline": true,
+    "browserContextRequiredForWarnOnly": false,
+    "suspiciousWarnThreshold": 45,
+    "phishingWarnThreshold": 55,
+    "phishingBlockThreshold": 80,
+    "destinationCacheTtlMinutes": 240
+  },
+  "alerting": {
+    "uiSurface": "endpointui",
+    "historyCategory": "web_protection",
+    "logOverrides": true,
+    "plainLanguageMode": true
+  },
+  "evidence": {
+    "recordReasonCodes": true,
+    "recordSourceApplication": true,
+    "recordDeliveryVector": true,
+    "recordPolicyIdentity": true
+  }
+}
