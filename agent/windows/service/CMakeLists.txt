@@ -70,6 +70,7 @@ add_library(antivirus-agent-core STATIC
   src/CommandJournalStore.cpp
   src/ControlPlaneClient.cpp
   src/CryptoUtils.cpp
+  src/DestinationEnforcementBridge.cpp
   src/DestinationEventRecorder.cpp
   src/DestinationProtection.cpp
   src/DestinationVerdictEngine.cpp
