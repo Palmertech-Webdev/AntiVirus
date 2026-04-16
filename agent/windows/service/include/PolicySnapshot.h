@@ -20,10 +20,10 @@ struct PolicySnapshot {
   std::uint32_t scanBenignDampeningScore{20};
   std::uint32_t genericRuleScoreScalePercent{75};
   std::uint32_t realtimeExecuteBlockThreshold{65};
-  std::uint32_t realtimeNonExecuteBlockThreshold{85};
+  std::uint32_t realtimeNonExecuteBlockThreshold{70};
   std::uint32_t realtimeQuarantineThreshold{90};
   std::uint32_t realtimeObserveTelemetryThreshold{45};
-  bool realtimeObserveOnlyForNonExecute{true};
+  bool realtimeObserveOnlyForNonExecute{false};
   bool archiveObserveOnly{false};
   bool networkObserveOnly{false};
   bool cloudLookupObserveOnly{false};
@@ -51,10 +51,10 @@ inline PolicySnapshot CreateDefaultPolicySnapshot() {
       .scanBenignDampeningScore = 20,
       .genericRuleScoreScalePercent = 75,
       .realtimeExecuteBlockThreshold = 65,
-      .realtimeNonExecuteBlockThreshold = 85,
+      .realtimeNonExecuteBlockThreshold = 70,
       .realtimeQuarantineThreshold = 90,
       .realtimeObserveTelemetryThreshold = 45,
-      .realtimeObserveOnlyForNonExecute = true,
+      .realtimeObserveOnlyForNonExecute = false,
       .archiveObserveOnly = false,
       .networkObserveOnly = false,
       .cloudLookupObserveOnly = false,

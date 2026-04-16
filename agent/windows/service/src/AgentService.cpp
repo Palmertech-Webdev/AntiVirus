@@ -1228,6 +1228,30 @@ bool TerminateProcessById(const DWORD pid) {
   return terminated;
 }
 
+bool IsMaliciousRealtimeVerdict(const ScanVerdict& verdict) {
+  return verdict.disposition == VerdictDisposition::Block || verdict.disposition == VerdictDisposition::Quarantine;
+}
+
+std::wstring BuildVerdictReasonCodesJson(const ScanVerdict& verdict) {
+  std::wstring reasonCodesJson = L"[";
+  bool first = true;
+  for (const auto& reason : verdict.reasons) {
+    if (reason.code.empty()) {
+      continue;
+    }
+
+    if (!first) {
+      reasonCodesJson += L",";
+    }
+    first = false;
+    reasonCodesJson += L"\"";
+    reasonCodesJson += Utf8ToWide(EscapeJsonString(reason.code));
+    reasonCodesJson += L"\"";
+  }
+  reasonCodesJson += L"]";
+  return reasonCodesJson;
+}
+
 DWORD ExecuteHiddenProcess(const std::wstring& commandLine, const std::wstring& workingDirectory = {}) {
   std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
   mutableCommandLine.push_back(L'\0');
@@ -4693,17 +4717,47 @@ void AgentService::DrainProcessTelemetry() {
   }
 
   for (const auto& record : telemetry) {
-    if (realtimeProtectionBroker_) {
-      if (const auto behaviorEvent = BuildBehaviorEventFromProcessTelemetry(record, state_.deviceId);
-          behaviorEvent.has_value()) {
-        realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
-      }
-    }
+    const std::optional<EventEnvelope> behaviorEvent =
+        realtimeProtectionBroker_ ? BuildBehaviorEventFromProcessTelemetry(record, state_.deviceId)
+                                  : std::optional<EventEnvelope>{};
 
     if (record.eventType == L"process.started") {
       const auto pid = ExtractPayloadUInt32(record.payloadJson, "pid");
       const auto imageName = ExtractPayloadString(record.payloadJson, "imageName").value_or(L"");
       const auto imagePath = ExtractPayloadString(record.payloadJson, "imagePath").value_or(L"");
+      bool terminatedByRealtimeContainment = false;
+
+      if (realtimeProtectionBroker_ && behaviorEvent.has_value()) {
+        const auto verdict = realtimeProtectionBroker_->EvaluateEvent(*behaviorEvent);
+        if (IsMaliciousRealtimeVerdict(verdict)) {
+          int terminatedCount = 0;
+          if (pid.has_value() && TerminateProcessById(*pid)) {
+            ++terminatedCount;
+          }
+
+          if (!imagePath.empty()) {
+            RemediationEngine remediationEngine(config_);
+            const auto remediation = remediationEngine.TerminateProcessesForPath(imagePath, true);
+            terminatedCount += remediation.processesTerminated;
+          }
+
+          terminatedByRealtimeContainment = terminatedCount > 0;
+          QueueTelemetryEvent(
+              terminatedByRealtimeContainment ? L"realtime.process.contained"
+                                             : L"realtime.process.containment_failed",
+              L"realtime-protection",
+              terminatedByRealtimeContainment
+                  ? L"Fenrir terminated a malicious process immediately after ETW process-start classification."
+                  : L"Fenrir classified a process start as malicious but could not terminate it immediately.",
+              std::wstring(L"{\"pid\":") + std::to_wstring(pid.value_or(0)) + L",\"imagePath\":\"" +
+                  Utf8ToWide(EscapeJsonString(imagePath)) + L"\",\"imageName\":\"" +
+                  Utf8ToWide(EscapeJsonString(imageName)) + L"\",\"confidence\":" +
+                  std::to_wstring(verdict.confidence) + L",\"disposition\":\"" +
+                  VerdictDispositionToString(verdict.disposition) + L"\",\"terminatedCount\":" +
+                  std::to_wstring(terminatedCount) + L",\"reasonCodes\":" +
+                  BuildVerdictReasonCodesJson(verdict) + L"}");
+        }
+      }
 
       RuntimeDatabase database(config_.runtimeDatabasePath);
       for (const auto& rule : database.ListBlockedSoftwareRules()) {
@@ -4715,7 +4769,7 @@ void AgentService::DrainProcessTelemetry() {
         const auto matchedPath = !rule.installLocation.empty() && !imagePath.empty() &&
                                  PathStartsWith(imagePath, rule.installLocation);
 
-        if ((matchedName || matchedPath) && pid && TerminateProcessById(*pid)) {
+        if ((matchedName || matchedPath) && pid && !terminatedByRealtimeContainment && TerminateProcessById(*pid)) {
           QueueTelemetryEvent(L"software.block.enforced", L"command-executor",
                               L"Fenrir terminated a blocked software process after it launched.",
                               std::wstring(L"{\"softwareId\":\"") + rule.softwareId + L"\",\"displayName\":\"" +
@@ -4724,6 +4778,11 @@ void AgentService::DrainProcessTelemetry() {
                                   Utf8ToWide(EscapeJsonString(imageName)) + L"\"}");
         }
       }
+      continue;
+    }
+
+    if (realtimeProtectionBroker_ && behaviorEvent.has_value()) {
+      realtimeProtectionBroker_->ObserveBehaviorEvent(*behaviorEvent);
     }
   }
 

@@ -1632,17 +1632,33 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
         .finding = std::move(finding)};
   }
 
+  int preQuarantineContainmentCount = 0;
+  const auto containProcessTree = [&finding, this](const bool retryingQuarantine) {
+    RemediationEngine remediationEngine(config_);
+    const auto containment = remediationEngine.TerminateProcessesForPath(finding.path, true);
+    if (containment.processesTerminated > 0) {
+      finding.verdict.reasons.push_back(
+          {L"PROCESS_TREE_CONTAINED",
+           retryingQuarantine
+               ? L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+                     L" related process(es) before retrying quarantine."
+               : L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
+                     L" related process(es) immediately to contain execute-time malware."});
+    }
+
+    return containment.processesTerminated;
+  };
+
+  if (!finding.path.empty() && IsExecuteLikeOperation(operation)) {
+    preQuarantineContainmentCount = containProcessTree(false);
+  }
+
   if (policy.quarantineOnMalicious && !finding.path.empty()) {
     QuarantineStore quarantineStore(config_.quarantineRootPath, config_.runtimeDatabasePath);
     auto quarantineResult = quarantineStore.QuarantineFile(finding);
-    if (!quarantineResult.success) {
-      RemediationEngine remediationEngine(config_);
-      const auto containment = remediationEngine.TerminateProcessesForPath(finding.path, true);
-      if (containment.processesTerminated > 0) {
-        finding.verdict.reasons.push_back(
-            {L"PROCESS_TREE_CONTAINED",
-             L"Fenrir terminated " + std::to_wstring(containment.processesTerminated) +
-                 L" related process(es) before retrying quarantine."});
+    if (!quarantineResult.success && preQuarantineContainmentCount == 0) {
+      const auto retryContainmentCount = containProcessTree(true);
+      if (retryContainmentCount > 0) {
         quarantineResult = quarantineStore.QuarantineFile(finding);
       }
     }
