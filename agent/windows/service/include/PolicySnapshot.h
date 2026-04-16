@@ -36,6 +36,23 @@ struct PolicySnapshot {
   bool allowUnsignedSuppressionPathExecutables{false};
   bool enableCleanwareSignerDampening{true};
   bool enableKnownGoodHashDampening{true};
+  bool destinationProtectionEnabled{true};
+  bool antiPhishingEnabled{true};
+  bool webProtectionEnabled{true};
+  bool emailLinkProtectionEnabled{true};
+  bool evaluateDomains{true};
+  bool evaluateUrls{true};
+  bool blockKnownMaliciousDestinations{true};
+  bool blockKnownPhishingDestinations{true};
+  bool blockKnownScamDestinations{false};
+  bool warnOnSuspiciousDestinations{true};
+  bool warnOnNewlyRegisteredDomains{true};
+  bool allowDegradedDestinationModeWhenOffline{true};
+  bool browserContextRequiredForWarnOnly{false};
+  std::uint32_t suspiciousDestinationWarnThreshold{45};
+  std::uint32_t phishingWarnThreshold{55};
+  std::uint32_t phishingBlockThreshold{80};
+  std::uint32_t destinationCacheTtlMinutes{240};
   std::vector<std::wstring> suppressionPathRoots;
   std::vector<std::wstring> suppressionSha256;
   std::vector<std::wstring> suppressionSignerNames;
@@ -72,6 +89,23 @@ inline PolicySnapshot CreateDefaultPolicySnapshot() {
       .allowUnsignedSuppressionPathExecutables = false,
       .enableCleanwareSignerDampening = true,
       .enableKnownGoodHashDampening = true,
+      .destinationProtectionEnabled = true,
+      .antiPhishingEnabled = true,
+      .webProtectionEnabled = true,
+      .emailLinkProtectionEnabled = true,
+      .evaluateDomains = true,
+      .evaluateUrls = true,
+      .blockKnownMaliciousDestinations = true,
+      .blockKnownPhishingDestinations = true,
+      .blockKnownScamDestinations = false,
+      .warnOnSuspiciousDestinations = true,
+      .warnOnNewlyRegisteredDomains = true,
+      .allowDegradedDestinationModeWhenOffline = true,
+      .browserContextRequiredForWarnOnly = false,
+      .suspiciousDestinationWarnThreshold = 45,
+      .phishingWarnThreshold = 55,
+      .phishingBlockThreshold = 80,
+      .destinationCacheTtlMinutes = 240,
       .suppressionPathRoots = {},
       .suppressionSha256 = {},
       .suppressionSignerNames = {}};
