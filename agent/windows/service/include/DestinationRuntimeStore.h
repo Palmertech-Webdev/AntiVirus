@@ -210,6 +210,54 @@ class DestinationRuntimeStore {
     return true;
   }
 
+  std::vector<DestinationIntelligenceRecord> ListActiveBlockingRecords(const std::size_t maxRecords = 512) const {
+    const auto db = OpenConnection();
+    auto statement = Prepare(db.get(),
+                             "SELECT indicator_type, normalized_indicator, canonical_url, host, source, provider, verdict, action,"
+                             " category, confidence, reason_codes, metadata_json, first_seen_at, last_seen_at, expires_at,"
+                             " suspicious, known_bad, from_cloud"
+                             " FROM destination_intelligence_cache"
+                             " WHERE action=? AND (expires_at IS NULL OR expires_at='' OR expires_at >= ?)"
+                             " ORDER BY confidence DESC, last_seen_at DESC LIMIT ?;");
+    BindText(statement.get(), 1, DestinationActionToString(DestinationAction::Block));
+    BindText(statement.get(), 2, CurrentUtcTimestamp());
+    sqlite3_bind_int(statement.get(), 3, static_cast<int>(std::clamp<std::size_t>(maxRecords, 1, 4096)));
+
+    std::vector<DestinationIntelligenceRecord> records;
+    for (;;) {
+      const auto step = sqlite3_step(statement.get());
+      if (step == SQLITE_DONE) {
+        break;
+      }
+      if (step != SQLITE_ROW) {
+        ThrowSqliteError(db.get(), "listing destination intelligence cache failed");
+      }
+
+      DestinationIntelligenceRecord record{};
+      record.indicatorType = ThreatIndicatorTypeFromString(ColumnText(statement.get(), 0));
+      record.normalizedIndicator = ColumnText(statement.get(), 1);
+      record.canonicalUrl = ColumnText(statement.get(), 2);
+      record.host = ColumnText(statement.get(), 3);
+      record.source = ColumnText(statement.get(), 4);
+      record.provider = ColumnText(statement.get(), 5);
+      record.verdict = ColumnText(statement.get(), 6);
+      record.action = DestinationActionFromString(ColumnText(statement.get(), 7));
+      record.category = DestinationThreatCategoryFromString(ColumnText(statement.get(), 8));
+      record.confidence = static_cast<std::uint32_t>(sqlite3_column_int(statement.get(), 9));
+      record.reasonCodes = SplitDestinationReasonCodes(ColumnText(statement.get(), 10));
+      record.metadataJson = ColumnText(statement.get(), 11);
+      record.firstSeenAt = ColumnText(statement.get(), 12);
+      record.lastSeenAt = ColumnText(statement.get(), 13);
+      record.expiresAt = ColumnText(statement.get(), 14);
+      record.suspicious = sqlite3_column_int(statement.get(), 15) != 0;
+      record.knownBad = sqlite3_column_int(statement.get(), 16) != 0;
+      record.fromCloud = sqlite3_column_int(statement.get(), 17) != 0;
+      records.push_back(std::move(record));
+    }
+
+    return records;
+  }
+
  private:
   using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
   using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
@@ -319,7 +367,8 @@ class DestinationRuntimeStore {
          " PRIMARY KEY(indicator_type, normalized_indicator)"
          ");"
          "CREATE INDEX IF NOT EXISTS idx_destination_cache_last_seen ON destination_intelligence_cache(last_seen_at DESC);"
-         "CREATE INDEX IF NOT EXISTS idx_destination_cache_category ON destination_intelligence_cache(category, confidence DESC);");
+         "CREATE INDEX IF NOT EXISTS idx_destination_cache_category ON destination_intelligence_cache(category, confidence DESC);"
+         "CREATE INDEX IF NOT EXISTS idx_destination_cache_action ON destination_intelligence_cache(action, expires_at);");
   }
 };
 
