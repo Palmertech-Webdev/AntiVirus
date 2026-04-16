@@ -1,3 +1,4 @@
+#include "DestinationEnforcementBridge.h"
 #include "DestinationEventRecorder.h"
 #include "DestinationProtection.h"
 #include "DestinationRuntimeStore.h"
@@ -103,6 +104,29 @@ bool IsDestinationLikeIndicator(const ThreatIndicatorType indicatorType) {
          indicatorType == ThreatIndicatorType::Ip;
 }
 
+std::vector<std::wstring> BuildRemoteAddressesForEnforcement(const DestinationContext& context,
+                                                             const ReputationLookupResult& result) {
+  std::set<std::wstring> addresses;
+  if (context.indicatorType == ThreatIndicatorType::Ip && !context.normalizedIndicator.empty()) {
+    addresses.insert(context.normalizedIndicator);
+  }
+  if (context.indicatorType == ThreatIndicatorType::Domain && !context.host.empty()) {
+    const auto resolved = ResolveHostAddresses(context.host);
+    addresses.insert(resolved.begin(), resolved.end());
+  }
+  if (context.indicatorType == ThreatIndicatorType::Url && !context.canonicalUrl.empty()) {
+    const auto host = ExtractHostFromUrl(context.canonicalUrl);
+    if (host.has_value()) {
+      const auto resolved = ResolveHostAddresses(*host);
+      addresses.insert(resolved.begin(), resolved.end());
+    }
+  }
+  if (addresses.empty() && !result.normalizedIndicator.empty() && result.indicatorType == ThreatIndicatorType::Ip) {
+    addresses.insert(result.normalizedIndicator);
+  }
+  return std::vector<std::wstring>(addresses.begin(), addresses.end());
+}
+
 }  // namespace
 
 ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator,
@@ -131,7 +155,7 @@ ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator
   const auto verdict = BuildPhase1DestinationVerdict(context, destinationPolicy, result);
   DestinationVerdictEngine evidenceBuilder(resolvedDatabasePath);
   const auto evidence = evidenceBuilder.BuildEvidenceRecord(context, destinationPolicy, verdict,
-                                                            L"policy-default", L"phase1-chunk1");
+                                                            L"policy-default", L"phase2-destination-blocking");
 
   DestinationRuntimeStore destinationStore(resolvedDatabasePath);
   destinationStore.UpsertIntelligenceRecord(BuildDestinationIntelligenceRecord(
@@ -141,6 +165,17 @@ ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator
       verdict.action == DestinationAction::DegradedAllow) {
     RuntimeDatabase(resolvedDatabasePath).RecordScanHistory(
         BuildDestinationScanHistoryRecord(context, verdict, evidence));
+  }
+
+  if (verdict.action == DestinationAction::Block) {
+    DestinationEnforcementRequest request{};
+    request.displayDestination = verdict.host.empty() ? verdict.indicator : verdict.host;
+    request.remoteAddresses = BuildRemoteAddressesForEnforcement(context, result);
+    request.sourceApplication = context.sourceApplication;
+    request.summary = verdict.summary.empty() ? BuildDestinationSummary(verdict) : verdict.summary;
+    request.reason = verdict.details.empty() ? DestinationThreatCategoryToString(verdict.category) : verdict.details;
+    std::wstring enforcementError;
+    InvokeDestinationEnforcementHandler(request, &enforcementError);
   }
 
   return result;
