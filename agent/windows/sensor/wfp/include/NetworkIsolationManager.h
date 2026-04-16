@@ -6,10 +6,12 @@
 
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "../../../service/include/AgentConfig.h"
+#include "../../../service/include/DestinationEnforcementBridge.h"
 #include "../../../service/include/TelemetryRecord.h"
 
 namespace antivirus::agent {
@@ -27,6 +29,8 @@ class NetworkIsolationManager {
 
   void SetDeviceId(std::wstring deviceId);
   bool ApplyIsolation(bool isolate, std::wstring* errorMessage = nullptr);
+  bool ApplyDestinationBlock(const DestinationEnforcementRequest& request,
+                             std::wstring* errorMessage = nullptr);
 
   bool EngineReady() const;
   bool IsolationActive() const;
@@ -36,12 +40,17 @@ class NetworkIsolationManager {
 
  private:
   static void CALLBACK NetEventCallback(void* context, const FWPM_NET_EVENT1* event);
+  static bool DestinationEnforcementThunk(void* context,
+                                          const DestinationEnforcementRequest& request,
+                                          std::wstring* errorMessage);
 
   void EnsureProviderAndSubLayer();
   void SubscribeNetEvents();
   void UnsubscribeNetEvents();
   void RemoveIsolationFilters();
   void AddIsolationFilters();
+  void RemoveDestinationBlockFilters();
+  void AddDestinationBlockFilters(const DestinationEnforcementRequest& request);
   void HandleNetEvent(const FWPM_NET_EVENT1& event);
   void QueueTelemetry(const TelemetryRecord& record);
   void QueueStateEvent(const std::wstring& eventType, const std::wstring& summary,
@@ -58,6 +67,9 @@ class NetworkIsolationManager {
   bool isolationActive_{false};
   std::vector<UINT64> activeFilterIds_{};
   std::unordered_set<UINT64> activeFilterIdIndex_{};
+  std::vector<UINT64> activeDestinationFilterIds_{};
+  std::unordered_set<UINT64> activeDestinationFilterIdIndex_{};
+  std::unordered_map<std::wstring, std::wstring> destinationBlockReasonByRemoteAddress_{};
 };
 
 }  // namespace antivirus::agent
