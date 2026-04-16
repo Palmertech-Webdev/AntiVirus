@@ -682,6 +682,18 @@ void RestoreBackupTree(const UpdateManifest& manifest, const std::filesystem::pa
       if (!std::filesystem::copy_file(backupPath, file.targetPath, std::filesystem::copy_options::overwrite_existing,
                                       error) &&
           error) {
+        // Some endpoints deny overwrite on in-place replacement even when backup is readable.
+        // Remove-and-copy fallback preserves rollback behavior before requesting reboot-time move.
+        error.clear();
+        std::filesystem::remove(file.targetPath, error);
+        error.clear();
+        if (std::filesystem::copy_file(backupPath, file.targetPath,
+                                       std::filesystem::copy_options::overwrite_existing, error) &&
+            !error) {
+          continue;
+        }
+
+        error.clear();
         if (MoveFileExW(backupPath.c_str(), file.targetPath.c_str(),
                         MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING) != FALSE) {
           *restartRequired = true;

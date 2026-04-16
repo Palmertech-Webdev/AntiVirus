@@ -53,6 +53,9 @@ static NTSTATUS
 AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_FILE_OPERATION Operation,
                       _Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
 
+static VOID
+AntivirusPopulateProcessImage(_Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
+
 static BOOLEAN
 AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME_FILE_OPERATION* Operation);
 
@@ -403,7 +406,6 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
                       _Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
   NTSTATUS status;
   PFLT_FILE_NAME_INFORMATION fileNameInformation = NULL;
-  CHAR processImageName[16] = {0};
 
   UNREFERENCED_PARAMETER(Operation);
 
@@ -440,14 +442,31 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ ANTIVIRUS_REALTIME_F
   }
 
   RtlStringCchPrintfW(Request->correlationId, ANTIVIRUS_REALTIME_CORRELATION_CAPACITY, L"%p", Data);
-
-  RtlZeroMemory(processImageName, sizeof(processImageName));
-  RtlCopyMemory(processImageName, PsGetProcessImageFileName(PsGetCurrentProcess()),
-                min(sizeof(processImageName) - 1, sizeof(processImageName)));
-  RtlStringCchPrintfW(Request->processImage, ANTIVIRUS_REALTIME_IMAGE_CAPACITY, L"%S", processImageName);
+  AntivirusPopulateProcessImage(Request);
 
   FltReleaseFileNameInformation(fileNameInformation);
   return STATUS_SUCCESS;
+}
+
+static VOID
+AntivirusPopulateProcessImage(_Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
+  NTSTATUS status;
+  PUNICODE_STRING processImage = NULL;
+
+  if (Request == NULL) {
+    return;
+  }
+
+  Request->processImage[0] = L'\0';
+
+  status = SeLocateProcessImageName(PsGetCurrentProcess(), &processImage);
+  if (!NT_SUCCESS(status) || processImage == NULL || processImage->Buffer == NULL || processImage->Length == 0) {
+    return;
+  }
+
+  RtlStringCchCopyNW(Request->processImage, ANTIVIRUS_REALTIME_IMAGE_CAPACITY, processImage->Buffer,
+                     processImage->Length / sizeof(WCHAR));
+  ExFreePool(processImage);
 }
 
 static BOOLEAN

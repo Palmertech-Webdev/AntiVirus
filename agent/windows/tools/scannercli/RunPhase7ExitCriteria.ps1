@@ -1,12 +1,12 @@
 param(
   [string]$ServicePath = "./agent/windows/out/dev/fenrir-agent-service.exe",
   [string]$WorkspaceRoot = ".",
-  [string]$WorkingRoot = "./tmp-phase4-exitcriteria",
+  [string]$WorkingRoot = "./tmp-phase7-exitcriteria",
   [string[]]$RequiredCheckIds = @(
-    "phase4_runtime_db_corruption_recovery",
-    "phase4_rollback_mode_validation",
-    "phase4_bad_content_disablement",
-    "phase4_driver_recovery_path"
+    "phase7_resource_budget_snapshot",
+    "phase7_windows_compatibility_baseline",
+    "phase7_release_promotion_gates",
+    "phase7_defender_companion_mode"
   )
 )
 
@@ -50,18 +50,33 @@ if ([string]::IsNullOrWhiteSpace($jsonText)) {
 }
 
 try {
-  $selfTestReport = $jsonText | ConvertFrom-Json
+  $selfTestReport = ConvertFrom-Json -InputObject $jsonText
 } catch {
   throw "Service returned non-JSON self-test output.`nOutput: $jsonText"
 }
 
-$phase4Checks = @()
+$phase7Checks = @()
 if ($null -ne $selfTestReport.checks) {
-  $phase4Checks = @($selfTestReport.checks | Where-Object { $_.id -like "phase4_*" })
+  foreach ($check in @($selfTestReport.checks)) {
+    if ($null -eq $check) {
+      continue
+    }
+
+    $checkId = ""
+    try {
+      $checkId = [string]$check.id
+    } catch {
+      $checkId = ""
+    }
+
+    if ($checkId.StartsWith("phase7_", [System.StringComparison]::OrdinalIgnoreCase)) {
+      $phase7Checks += $check
+    }
+  }
 }
 
 $indexedChecks = @{}
-foreach ($check in $phase4Checks) {
+foreach ($check in $phase7Checks) {
   $indexedChecks["$($check.id)"] = $check
 }
 
@@ -72,6 +87,7 @@ foreach ($requiredId in $RequiredCheckIds) {
     $criteria.Add([PSCustomObject]@{
         Criterion = $requiredId
         Status = if ("$($check.status)" -eq "pass") { "pass" } else { "fail" }
+        RawStatus = "$($check.status)"
         Details = "$($check.details)"
         Remediation = "$($check.remediation)"
       }) | Out-Null
@@ -79,15 +95,39 @@ foreach ($requiredId in $RequiredCheckIds) {
     $criteria.Add([PSCustomObject]@{
         Criterion = $requiredId
         Status = "fail"
-        Details = "Required Phase 4 check was not present in self-test output."
-        Remediation = "Ensure the service self-test publishes the required Phase 4 recovery and disaster-handling checks."
+        RawStatus = "missing"
+        Details = "Required Phase 7 check was not present in self-test output."
+        Remediation = "Ensure the service self-test publishes the required Phase 7 performance, compatibility, and promotion checks."
       }) | Out-Null
   }
 }
 
-$phase4UnexpectedChecks = @($phase4Checks | Where-Object { $RequiredCheckIds -notcontains "$($_.id)" })
-$allCriteriaPass = @($criteria | Where-Object { $_.Status -ne "pass" }).Count -eq 0
-$reportPath = Join-Path $workingRootAbsolute "phase4-exitcriteria-report.json"
+$phase7UnexpectedChecks = @()
+foreach ($check in $phase7Checks) {
+  if ($RequiredCheckIds -notcontains ([string]$check.id)) {
+    $phase7UnexpectedChecks += $check
+  }
+}
+
+$failedCriteriaCount = 0
+foreach ($criterion in $criteria) {
+  if ([string]$criterion.Status -ne "pass") {
+    $failedCriteriaCount++
+  }
+}
+$allCriteriaPass = $failedCriteriaCount -eq 0
+$reportPath = Join-Path $workingRootAbsolute "phase7-exitcriteria-report.json"
+$additionalPhase7Checks = @()
+foreach ($check in $phase7UnexpectedChecks) {
+  $additionalPhase7Checks += [PSCustomObject]@{
+    id = "$($check.id)"
+    name = "$($check.name)"
+    status = "$($check.status)"
+    details = "$($check.details)"
+    remediation = "$($check.remediation)"
+  }
+}
+
 $report = [PSCustomObject]@{
   generatedAtUtc = [DateTime]::UtcNow.ToString("o")
   servicePath = $serviceAbsolute
@@ -95,22 +135,19 @@ $report = [PSCustomObject]@{
   selfTestOverallStatus = "$($selfTestReport.overallStatus)"
   requiredCheckIds = $RequiredCheckIds
   criteria = $criteria
-  additionalPhase4Checks = @($phase4UnexpectedChecks | ForEach-Object {
-      [PSCustomObject]@{
-        id = "$($_.id)"
-        name = "$($_.name)"
-        status = "$($_.status)"
-        details = "$($_.details)"
-        remediation = "$($_.remediation)"
-      }
-    })
+  additionalPhase7Checks = $additionalPhase7Checks
   allCriteriaPass = $allCriteriaPass
 }
 
-$report | ConvertTo-Json -Depth 8 | Set-Content -Path $reportPath -Encoding UTF8
-$criteria | Format-Table -AutoSize
+$reportJson = ConvertTo-Json -InputObject $report -Depth 8
+Set-Content -Path $reportPath -Encoding UTF8 -Value $reportJson
+
+foreach ($criterion in $criteria) {
+  Write-Host ("{0}`t{1}`t{2}" -f "$($criterion.Criterion)", "$($criterion.Status)", "$($criterion.Details)")
+}
+
 Write-Host "REPORT_PATH=$reportPath"
-Write-Host ("PHASE4_EXIT_CRITERIA={0}" -f ($(if ($allCriteriaPass) { "PASS" } else { "FAIL" })))
+Write-Host ("PHASE7_EXIT_CRITERIA={0}" -f ($(if ($allCriteriaPass) { "PASS" } else { "FAIL" })))
 
 if ($allCriteriaPass) {
   exit 0

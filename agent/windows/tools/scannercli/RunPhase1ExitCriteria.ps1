@@ -6,6 +6,8 @@ param(
   [string]$UkBusinessCorpusPath = "./tmp-phase1-corpora/uk-business-software",
   [int]$MinCleanwareFiles = 1,
   [int]$MinUkBusinessFiles = 1,
+  [string]$ScannerRuntimeRoot = "./tmp-phase1-runtime",
+  [bool]$DisableCloudLookup = $true,
   [int]$RemediationRuns = 8,
   [int]$RemediationSamplesPerRun = 3,
   [int]$PerformanceRuns = 8,
@@ -126,6 +128,27 @@ $script:WorkspaceRootAbsolute = [System.IO.Path]::GetFullPath($workspaceCandidat
 $script:ScannerAbsolute = Resolve-AbsolutePath -InputPath $ScannerPath -MustExist
 $workingRootAbsolute = Resolve-AbsolutePath -InputPath $WorkingRoot
 New-Item -ItemType Directory -Force -Path $workingRootAbsolute | Out-Null
+
+$scannerRuntimeRootAbsolute = Resolve-AbsolutePath -InputPath $ScannerRuntimeRoot
+if (Test-Path -LiteralPath $scannerRuntimeRootAbsolute) {
+  Remove-Item -LiteralPath $scannerRuntimeRootAbsolute -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $scannerRuntimeRootAbsolute | Out-Null
+
+$scannerStatePath = Join-Path $scannerRuntimeRootAbsolute "agent-state.ini"
+$cloudLookupEnabledValue = if ($DisableCloudLookup) { "false" } else { "true" }
+Set-Content -Path $scannerStatePath -Encoding ASCII -Value @(
+  "policy_cloud_lookup_enabled=$cloudLookupEnabledValue",
+  "policy_cloud_lookup_observe_only=false"
+)
+
+$env:ANTIVIRUS_RUNTIME_DB_PATH = Join-Path $scannerRuntimeRootAbsolute "agent-runtime.db"
+$env:ANTIVIRUS_AGENT_STATE_FILE = $scannerStatePath
+$env:ANTIVIRUS_TELEMETRY_QUEUE_FILE = Join-Path $scannerRuntimeRootAbsolute "telemetry-queue.tsv"
+$env:ANTIVIRUS_UPDATE_ROOT = Join-Path $scannerRuntimeRootAbsolute "updates"
+$env:ANTIVIRUS_JOURNAL_ROOT = Join-Path $scannerRuntimeRootAbsolute "journal"
+$env:ANTIVIRUS_QUARANTINE_ROOT = Join-Path $scannerRuntimeRootAbsolute "quarantine"
+$env:ANTIVIRUS_EVIDENCE_ROOT = Join-Path $scannerRuntimeRootAbsolute "evidence"
 
 $cleanwareCorpusAbsolute = Resolve-AbsolutePath -InputPath $CleanwareCorpusPath
 $ukCorpusAbsolute = Resolve-AbsolutePath -InputPath $UkBusinessCorpusPath
@@ -473,6 +496,8 @@ $report = [PSCustomObject]@{
     performanceMaxP95MsPerFile = $PerformanceMaxP95MsPerFile
     minCleanwareFiles = $MinCleanwareFiles
     minUkBusinessFiles = $MinUkBusinessFiles
+    scannerRuntimeRoot = $scannerRuntimeRootAbsolute
+    disableCloudLookup = [bool]$DisableCloudLookup
     cleanwareCorpusPath = $cleanwareCorpusAbsolute
     ukBusinessCorpusPath = $ukCorpusAbsolute
     minifilterWorkingRoot = Resolve-AbsolutePath -InputPath $MinifilterWorkingRoot

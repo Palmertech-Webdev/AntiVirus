@@ -3,8 +3,16 @@ param(
   [string]$WorkspaceRoot = ".",
   [string]$WorkingRoot = "./tmp-phase6-exitcriteria",
   [string[]]$RequiredCheckIds = @(
-    "phase6_integrated_posture_snapshot",
-    "phase6_posture_output_coverage"
+    "phase6_named_pipe_local_boundary",
+    "phase6_role_separation_and_approval_routing",
+    "phase6_breakglass_recovery_controls",
+    "phase6_pam_request_queue_visibility",
+    "phase6_pam_audit_visibility",
+    "phase6_household_role_governance",
+    "phase6_admin_baseline_persistence"
+  ),
+  [string[]]$WarningAllowedCheckIds = @(
+    "phase6_household_role_governance"
   )
 )
 
@@ -82,9 +90,12 @@ $criteria = [System.Collections.Generic.List[object]]::new()
 foreach ($requiredId in $RequiredCheckIds) {
   if ($indexedChecks.ContainsKey($requiredId)) {
     $check = $indexedChecks[$requiredId]
+    $status = "$($check.status)"
+    $isPass = $status -eq "pass" -or ($WarningAllowedCheckIds -contains $requiredId -and $status -eq "warning")
     $criteria.Add([PSCustomObject]@{
         Criterion = $requiredId
-        Status = if ("$($check.status)" -eq "pass") { "pass" } else { "fail" }
+        Status = if ($isPass) { "pass" } else { "fail" }
+        RawStatus = $status
         Details = "$($check.details)"
         Remediation = "$($check.remediation)"
       }) | Out-Null
@@ -92,8 +103,9 @@ foreach ($requiredId in $RequiredCheckIds) {
     $criteria.Add([PSCustomObject]@{
         Criterion = $requiredId
         Status = "fail"
+        RawStatus = "missing"
         Details = "Required Phase 6 check was not present in self-test output."
-        Remediation = "Ensure the service self-test publishes the required Phase 6 integration checks."
+        Remediation = "Ensure the service self-test publishes the required Phase 6 local-control and PAM-governance checks."
       }) | Out-Null
   }
 }
@@ -129,6 +141,7 @@ $report = [PSCustomObject]@{
   selfTestExitCode = $selfTestExitCode
   selfTestOverallStatus = "$($selfTestReport.overallStatus)"
   requiredCheckIds = $RequiredCheckIds
+  warningAllowedCheckIds = $WarningAllowedCheckIds
   criteria = $criteria
   additionalPhase6Checks = $additionalPhase6Checks
   allCriteriaPass = $allCriteriaPass

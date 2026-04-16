@@ -185,6 +185,16 @@
 			"isBackground": false
 		},
 		{
+			"label": "run-phase7-exitcriteria",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase7ExitCriteria.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				"."
+			],
+			"isBackground": false
+		},
+		{
 			"label": "run-minifilter-edge-harness",
 			"type": "shell",
 			"command": "./agent/windows/tools/scannercli/RunMinifilterEdgeCaseHarness.ps1",
@@ -412,6 +422,24 @@
 			"args": [
 				"-WorkspaceRoot",
 				"."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-phase1-elevated-completion",
+			"type": "shell",
+			"command": "./agent/windows/tools/scannercli/RunPhase1ElevatedCompletion.ps1",
+			"args": [
+				"-WorkspaceRoot",
+				".",
+				"-CleanwareCorpusPath",
+				"./tmp-phase1-corpora/cleanware",
+				"-UkBusinessCorpusPath",
+				"./tmp-phase1-corpora/uk-business-software",
+				"-MinCleanwareFiles",
+				"100",
+				"-MinUkBusinessFiles",
+				"100"
 			],
 			"isBackground": false
 		}

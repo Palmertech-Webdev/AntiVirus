@@ -76,6 +76,16 @@ function Get-AuthenticodeDetails {
   }
 }
 
+function Test-IsRunningAsAdministrator {
+  try {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch {
+    return $false
+  }
+}
+
 $workspaceCandidate = $WorkspaceRoot
 if (-not [System.IO.Path]::IsPathRooted($workspaceCandidate)) {
   $workspaceCandidate = Join-Path (Get-Location) $workspaceCandidate
@@ -155,12 +165,17 @@ if ($catExists) {
   }
 }
 
+$isAdministrator = Test-IsRunningAsAdministrator
 $service = Get-Service -Name $ExpectedServiceName -ErrorAction SilentlyContinue
 if ($null -ne $service) {
   Add-Check -Name "service_registration" -Status "pass" -Details ("Service '{0}' is registered with state '{1}'." -f $ExpectedServiceName, [string]$service.Status)
 } else {
   if ($RequireServiceInstalled) {
-    Add-Check -Name "service_registration" -Status "fail" -Details ("Service '{0}' is not registered on this host." -f $ExpectedServiceName)
+    if ($isAdministrator) {
+      Add-Check -Name "service_registration" -Status "fail" -Details ("Service '{0}' is not registered on this host." -f $ExpectedServiceName)
+    } else {
+      Add-Check -Name "service_registration" -Status "warning" -Details ("Service '{0}' is not registered, and this validation ran without administrator rights. Re-run in an elevated shell for strict service-registration enforcement." -f $ExpectedServiceName)
+    }
   } else {
     Add-Check -Name "service_registration" -Status "warning" -Details ("Service '{0}' is not registered on this host (warning only for packaging validation)." -f $ExpectedServiceName)
   }

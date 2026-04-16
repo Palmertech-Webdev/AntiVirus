@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -385,25 +386,99 @@ void RunSchemaMigrations(sqlite3* db) {
   }
 }
 
+std::string ToLowerAsciiCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return value;
+}
+
+bool IsLikelyCorruptionError(const std::string& errorMessage) {
+  if (errorMessage.empty()) {
+    return false;
+  }
+
+  const auto lower = ToLowerAsciiCopy(errorMessage);
+  return lower.find("database disk image is malformed") != std::string::npos ||
+         lower.find("malformed") != std::string::npos ||
+         lower.find("file is not a database") != std::string::npos ||
+         lower.find("is not a database") != std::string::npos ||
+         lower.find("database schema is corrupt") != std::string::npos;
+}
+
+void ArchiveRuntimeDatabaseArtifact(const std::filesystem::path& artifactPath,
+                                   const std::filesystem::path& recoveryRoot) {
+  std::error_code existsError;
+  if (!std::filesystem::exists(artifactPath, existsError) || existsError) {
+    return;
+  }
+
+  const auto targetPath = recoveryRoot /
+                          (artifactPath.filename().wstring() + L".corrupt-" + GenerateGuidString());
+
+  std::error_code renameError;
+  std::filesystem::rename(artifactPath, targetPath, renameError);
+  if (!renameError) {
+    return;
+  }
+
+  renameError.clear();
+  std::filesystem::copy_file(artifactPath, targetPath, std::filesystem::copy_options::overwrite_existing,
+                             renameError);
+  if (!renameError) {
+    std::error_code removeError;
+    std::filesystem::remove(artifactPath, removeError);
+  }
+}
+
+void ArchiveCorruptRuntimeDatabase(const std::filesystem::path& databasePath) {
+  if (databasePath.empty()) {
+    return;
+  }
+
+  const auto recoveryRoot = databasePath.parent_path() / L"recovery";
+  std::error_code createError;
+  std::filesystem::create_directories(recoveryRoot, createError);
+  if (createError) {
+    return;
+  }
+
+  ArchiveRuntimeDatabaseArtifact(databasePath, recoveryRoot);
+  ArchiveRuntimeDatabaseArtifact(std::filesystem::path(databasePath.wstring() + L"-wal"), recoveryRoot);
+  ArchiveRuntimeDatabaseArtifact(std::filesystem::path(databasePath.wstring() + L"-shm"), recoveryRoot);
+}
+
 ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
   if (databasePath.has_parent_path()) {
     std::filesystem::create_directories(databasePath.parent_path());
   }
 
-  sqlite3* raw = nullptr;
-  if (sqlite3_open_v2(WidePathToUtf8(databasePath).c_str(), &raw,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
-    ThrowSqliteError(raw, "sqlite3_open_v2 failed");
-  }
+  const auto openAndInitialize = [&databasePath]() {
+    sqlite3* raw = nullptr;
+    if (sqlite3_open_v2(WidePathToUtf8(databasePath).c_str(), &raw,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
+      ThrowSqliteError(raw, "sqlite3_open_v2 failed");
+    }
 
-  ConnectionHandle connection(raw, sqlite3_close);
-  Exec(connection.get(), "PRAGMA journal_mode=WAL;");
-  Exec(connection.get(), "PRAGMA synchronous=FULL;");
-  Exec(connection.get(), "PRAGMA foreign_keys=ON;");
-  Exec(connection.get(), "PRAGMA busy_timeout=5000;");
-  EnsureBaseSchema(connection.get());
-  RunSchemaMigrations(connection.get());
-  return connection;
+    ConnectionHandle connection(raw, sqlite3_close);
+    Exec(connection.get(), "PRAGMA journal_mode=WAL;");
+    Exec(connection.get(), "PRAGMA synchronous=FULL;");
+    Exec(connection.get(), "PRAGMA foreign_keys=ON;");
+    Exec(connection.get(), "PRAGMA busy_timeout=5000;");
+    EnsureBaseSchema(connection.get());
+    RunSchemaMigrations(connection.get());
+    return connection;
+  };
+
+  try {
+    return openAndInitialize();
+  } catch (const std::exception& error) {
+    if (!IsLikelyCorruptionError(error.what())) {
+      throw;
+    }
+
+    ArchiveCorruptRuntimeDatabase(databasePath);
+    return openAndInitialize();
+  }
 }
 
 StatementHandle Prepare(sqlite3* db, const char* sql) {

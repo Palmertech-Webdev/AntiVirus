@@ -3,15 +3,13 @@ param(
   [string]$WorkspaceRoot = ".",
   [string]$WorkingRoot = "./tmp-phase5-exitcriteria",
   [string[]]$RequiredCheckIds = @(
-    "phase5_pam_request_queue_visibility",
-    "phase5_pam_audit_visibility",
-    "phase5_admin_membership_audit",
-    "phase5_household_role_policy_governance",
-    "phase5_admin_baseline_persistence"
+    "phase5_destination_reputation_subsystem",
+    "phase5_lineage_destination_correlation",
+    "phase5_action_bands_audit_warn_block",
+    "phase5_host_isolation_guardrail"
   ),
   [string[]]$WarningAllowedCheckIds = @(
-    "phase5_admin_membership_audit",
-    "phase5_household_role_policy_governance"
+    "phase5_lineage_destination_correlation"
   )
 )
 
@@ -104,7 +102,7 @@ foreach ($requiredId in $RequiredCheckIds) {
         Status = "fail"
         RawStatus = "missing"
         Details = "Required Phase 5 check was not present in self-test output."
-        Remediation = "Ensure the service self-test publishes the required Phase 5 PAM and admin-posture checks."
+        Remediation = "Ensure the service self-test publishes the required Phase 5 network and destination-protection checks."
       }) | Out-Null
   }
 }

@@ -2,6 +2,7 @@ param(
     [string]$ProjectPath = (Join-Path $PSScriptRoot 'AntivirusMinifilter.vcxproj'),
     [string]$BuildRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'out\dev\driver-build'),
     [string]$OutputRoot = (Join-Path $PSScriptRoot 'package'),
+    [string]$StageDriverRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'out\dev\driver'),
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
     [ValidateSet('x64')]
@@ -70,13 +71,84 @@ function Resolve-WindowsKitExecutable {
 
     $versions = Get-ChildItem -LiteralPath $kitsRoot -Directory | Sort-Object Name -Descending
     foreach ($version in $versions) {
-        $candidate = Join-Path $version.FullName (Join-Path 'x64' $Name)
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
+        foreach ($arch in @('x64', 'x86', 'arm64')) {
+            $candidate = Join-Path $version.FullName (Join-Path $arch $Name)
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
         }
     }
 
     return ''
+}
+
+function Resolve-WdkTaskVisualStudioVersion {
+    $wdkBuildRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\build'
+    if (-not (Test-Path -LiteralPath $wdkBuildRoot)) {
+        return ''
+    }
+
+    $taskAssemblies = Get-ChildItem -LiteralPath $wdkBuildRoot -Recurse -File -Filter 'Microsoft.DriverKit.Build.Tasks.*.dll' -ErrorAction SilentlyContinue
+    $taskVersions = @()
+    foreach ($assembly in $taskAssemblies) {
+        if ($assembly.Name -match '^Microsoft\.DriverKit\.Build\.Tasks\.(\d+\.\d+)\.dll$') {
+            $candidateVersion = $Matches[1]
+            try {
+                [void][Version]$candidateVersion
+                $taskVersions += $candidateVersion
+            }
+            catch {
+            }
+        }
+    }
+
+    if ($taskVersions.Count -eq 0) {
+        return ''
+    }
+
+    return ($taskVersions | Sort-Object { [Version]$_ } -Descending | Select-Object -First 1)
+}
+
+function New-DriverCatalogWithMakeCat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$MakeCatPath,
+        [Parameter(Mandatory = $true)]
+        [string]$OutputRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$CatalogPath
+    )
+
+    $cdfPath = Join-Path $OutputRoot 'AntivirusMinifilter.cdf'
+    $cdf = @(
+        '[CatalogHeader]',
+        'Name=AntivirusMinifilter.cat',
+        'ResultDir=.',
+        'PublicVersion=0x0000001',
+        'CatalogVersion=2',
+        'HashAlgorithms=SHA256',
+        '',
+        '[CatalogFiles]',
+        '<HASH>File1=AntivirusMinifilter.inf',
+        '<HASH>File2=AntivirusMinifilter.sys'
+    )
+
+    [System.IO.File]::WriteAllLines($cdfPath, $cdf)
+
+    Push-Location $OutputRoot
+    try {
+        & $MakeCatPath 'AntivirusMinifilter.cdf' | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "makecat failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    if (-not (Test-Path -LiteralPath $CatalogPath)) {
+        throw "Catalog file was not generated: $CatalogPath"
+    }
 }
 
 function Find-BuiltDriverBinary {
@@ -99,6 +171,32 @@ function Find-BuiltDriverBinary {
     }
 
     return ''
+}
+
+function Stage-DriverArtifacts {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot,
+        [string]$StageRoot
+    )
+
+    if ([string]::IsNullOrWhiteSpace($StageRoot)) {
+        return ''
+    }
+
+    $stageRootFull = [System.IO.Path]::GetFullPath($StageRoot)
+    Ensure-Directory -Path $stageRootFull
+
+    foreach ($name in @('AntivirusMinifilter.inf', 'AntivirusMinifilter.sys', 'AntivirusMinifilter.cat', 'README.md')) {
+        $sourcePath = Join-Path $SourceRoot $name
+        if (-not (Test-Path -LiteralPath $sourcePath)) {
+            continue
+        }
+
+        Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $stageRootFull $name) -Force
+    }
+
+    return $stageRootFull
 }
 
 function Sign-File {
@@ -171,8 +269,12 @@ if (-not $msbuildPath) {
 }
 
 $inf2catPath = Resolve-WindowsKitExecutable -Name 'inf2cat.exe'
+$makecatPath = ''
 if (-not $inf2catPath) {
-    throw 'inf2cat.exe was not found. Install the Windows Driver Kit (WDK).'
+    $makecatPath = Resolve-WindowsKitExecutable -Name 'makecat.exe'
+    if (-not $makecatPath) {
+        throw 'Neither inf2cat.exe nor makecat.exe was found. Install the Windows Driver Kit (WDK) or Windows SDK signing tools.'
+    }
 }
 
 $hasSigningMaterial = -not [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint) -or -not [string]::IsNullOrWhiteSpace($SigningPfxPath)
@@ -184,14 +286,23 @@ if ($hasSigningMaterial) {
     }
 }
 
+$msbuildOutDir = $buildRootFull.TrimEnd('\') + '\'
+$msbuildIntDir = $buildRootFull.TrimEnd('\') + '\obj\'
+
 $msbuildArgs = @(
     $projectPathFull,
     '/t:Build',
     "/p:Configuration=$Configuration",
     "/p:Platform=$Platform",
-    "/p:OutDir=$($buildRootFull.TrimEnd('\\'))\\",
-    "/p:IntDir=$($buildRootFull.TrimEnd('\\'))\\obj\\"
+    "/p:OutDir=$msbuildOutDir",
+    "/p:IntDir=$msbuildIntDir",
+    '/p:SignMode=Off'
 )
+
+$wdkTaskVisualStudioVersion = Resolve-WdkTaskVisualStudioVersion
+if ($wdkTaskVisualStudioVersion) {
+    $msbuildArgs += "/p:VisualStudioVersion=$wdkTaskVisualStudioVersion"
+}
 
 & $msbuildPath @msbuildArgs | Out-Host
 if ($LASTEXITCODE -ne 0) {
@@ -214,9 +325,24 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'README.md')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $outputReadmePath -Force
 }
 
-& $inf2catPath '/driver:'"$outputRootFull" '/os:10_X64' | Out-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "inf2cat failed with exit code $LASTEXITCODE"
+if ($inf2catPath) {
+    & $inf2catPath '/driver:'"$outputRootFull" '/os:10_X64' | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        if (-not $makecatPath) {
+            $makecatPath = Resolve-WindowsKitExecutable -Name 'makecat.exe'
+        }
+        if (-not $makecatPath) {
+            throw "inf2cat failed with exit code $LASTEXITCODE and makecat.exe was not found for fallback"
+        }
+
+        Write-Warning "inf2cat failed with exit code $LASTEXITCODE; falling back to makecat catalog generation."
+        New-DriverCatalogWithMakeCat -MakeCatPath $makecatPath -OutputRoot $outputRootFull -CatalogPath $outputCatPath
+        $inf2catPath = ''
+    }
+}
+else {
+    # Fallback for hosts that have SDK signing tools but not WDK inf2cat.
+    New-DriverCatalogWithMakeCat -MakeCatPath $makecatPath -OutputRoot $outputRootFull -CatalogPath $outputCatPath
 }
 
 if (-not (Test-Path -LiteralPath $outputCatPath)) {
@@ -240,6 +366,8 @@ if ((-not $sysValid -or -not $catValid) -and -not $AllowUnsignedArtifacts) {
     throw "Signature validation failed (sys=$($sysSignature.Status), cat=$($catSignature.Status))."
 }
 
+$stagedDriverRoot = Stage-DriverArtifacts -SourceRoot $outputRootFull -StageRoot $StageDriverRoot
+
 $reportPath = Join-Path $outputRootFull 'driver-build-report.json'
 $inventory = Get-ChildItem -LiteralPath $outputRootFull -File | ForEach-Object {
     [pscustomobject]@{
@@ -254,8 +382,10 @@ $report = [pscustomobject]@{
     projectPath = $projectPathFull
     buildRoot = $buildRootFull
     outputRoot = $outputRootFull
+    stagedDriverRoot = $stagedDriverRoot
     configuration = $Configuration
     platform = $Platform
+    catalogTool = if ($inf2catPath) { 'inf2cat' } else { 'makecat' }
     signed = [bool]($sysValid -and $catValid)
     signatureStatus = [pscustomobject]@{
         sys = [string]$sysSignature.Status

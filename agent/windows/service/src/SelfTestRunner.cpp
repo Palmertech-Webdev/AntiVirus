@@ -1,6 +1,8 @@
 #include <winsock2.h>
 #include "SelfTestRunner.h"
 
+#include <Psapi.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -22,8 +24,10 @@
 #include "EndpointClient.h"
 #include "HardeningManager.h"
 #include "LocalSecurity.h"
+#include "LocalControlChannel.h"
 #include "PatchOrchestrator.h"
 #include "RealtimeProtectionBroker.h"
+#include "ReputationLookup.h"
 #include "RuntimeDatabase.h"
 #include "RuntimeTrustValidator.h"
 #include "ScanEngine.h"
@@ -482,6 +486,169 @@ std::wstring StatusToString(const SelfTestStatus status) {
     default:
       return L"fail";
   }
+}
+
+std::optional<std::uint64_t> QueryCurrentProcessWorkingSetBytes() {
+  PROCESS_MEMORY_COUNTERS_EX counters{};
+  if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&counters),
+                           sizeof(counters)) == FALSE) {
+    return std::nullopt;
+  }
+
+  return static_cast<std::uint64_t>(counters.WorkingSetSize);
+}
+
+struct CpuTimes {
+  ULONGLONG kernel{0};
+  ULONGLONG user{0};
+};
+
+std::optional<CpuTimes> ReadCurrentProcessCpuTimes() {
+  FILETIME createTime{};
+  FILETIME exitTime{};
+  FILETIME kernelTime{};
+  FILETIME userTime{};
+  if (GetProcessTimes(GetCurrentProcess(), &createTime, &exitTime, &kernelTime, &userTime) == FALSE) {
+    return std::nullopt;
+  }
+
+  const auto toUInt64 = [](const FILETIME& value) {
+    ULARGE_INTEGER merged{};
+    merged.LowPart = value.dwLowDateTime;
+    merged.HighPart = value.dwHighDateTime;
+    return merged.QuadPart;
+  };
+
+  return CpuTimes{.kernel = toUInt64(kernelTime), .user = toUInt64(userTime)};
+}
+
+std::optional<int> SampleCurrentProcessCpuPercent() {
+  const auto first = ReadCurrentProcessCpuTimes();
+  if (!first.has_value()) {
+    return std::nullopt;
+  }
+
+  const auto firstSampleTime = std::chrono::steady_clock::now();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  const auto second = ReadCurrentProcessCpuTimes();
+  const auto secondSampleTime = std::chrono::steady_clock::now();
+  if (!second.has_value()) {
+    return std::nullopt;
+  }
+
+  const auto kernelDelta = second->kernel - first->kernel;
+  const auto userDelta = second->user - first->user;
+  const auto processDelta100ns = kernelDelta + userDelta;
+
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(secondSampleTime - firstSampleTime).count();
+  if (elapsed <= 0) {
+    return std::nullopt;
+  }
+
+  SYSTEM_INFO systemInfo{};
+  GetSystemInfo(&systemInfo);
+  const auto processorCount = std::max<ULONGLONG>(1, static_cast<ULONGLONG>(systemInfo.dwNumberOfProcessors));
+  const auto elapsed100ns = static_cast<ULONGLONG>(elapsed / 100);
+  if (elapsed100ns == 0) {
+    return std::nullopt;
+  }
+
+  const auto denominator = elapsed100ns * processorCount;
+  if (denominator == 0) {
+    return std::nullopt;
+  }
+
+  const auto percent = static_cast<int>((processDelta100ns * 100ULL + (denominator / 2ULL)) / denominator);
+  return std::clamp(percent, 0, 100);
+}
+
+int ResolveDestinationReputationBlockThresholdForSelfTest() {
+  const auto raw = ReadEnvironmentVariable(L"ANTIVIRUS_DESTINATION_REPUTATION_BLOCK_THRESHOLD");
+  if (raw.empty()) {
+    return 30;
+  }
+
+  try {
+    return std::clamp(std::stoi(raw), 0, 100);
+  } catch (...) {
+    return 30;
+  }
+}
+
+enum class NetworkActionBand {
+  Audit,
+  Warn,
+  Block,
+};
+
+NetworkActionBand DetermineDestinationActionBand(const ReputationLookupResult& intel,
+                                                const int blockThreshold) {
+  if (intel.malicious && static_cast<int>(intel.trustScore) <= blockThreshold) {
+    return NetworkActionBand::Block;
+  }
+
+  if (intel.malicious || intel.verdict == L"unknown") {
+    return NetworkActionBand::Warn;
+  }
+
+  return NetworkActionBand::Audit;
+}
+
+std::wstring NetworkActionBandToString(const NetworkActionBand band) {
+  switch (band) {
+    case NetworkActionBand::Block:
+      return L"block";
+    case NetworkActionBand::Warn:
+      return L"warn";
+    case NetworkActionBand::Audit:
+    default:
+      return L"audit";
+  }
+}
+
+struct WindowsVersionInfo {
+  DWORD major{0};
+  DWORD minor{0};
+  DWORD build{0};
+};
+
+std::optional<WindowsVersionInfo> QueryWindowsVersionInfo() {
+  using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+
+  const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+  if (ntdll == nullptr) {
+    return std::nullopt;
+  }
+
+  const auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+  if (rtlGetVersion == nullptr) {
+    return std::nullopt;
+  }
+
+  RTL_OSVERSIONINFOW info{};
+  info.dwOSVersionInfoSize = sizeof(info);
+  if (rtlGetVersion(&info) != 0) {
+    return std::nullopt;
+  }
+
+  return WindowsVersionInfo{
+      .major = info.dwMajorVersion,
+      .minor = info.dwMinorVersion,
+      .build = info.dwBuildNumber,
+  };
+}
+
+std::wstring ClassifyWindowsFamily(const WindowsVersionInfo& info) {
+  if (info.major == 10 && info.build >= 22000) {
+    return L"windows11";
+  }
+
+  if (info.major == 10) {
+    return L"windows10";
+  }
+
+  return L"unsupported";
 }
 
 }  // namespace
@@ -2537,6 +2704,841 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
       AddCheck(report, L"phase6_posture_output_coverage", L"Phase 6 local posture output coverage",
                SelfTestStatus::Fail, L"Phase 6 posture output validation failed: " + Utf8ToWide(error.what()),
                L"Validate local posture output projection and dashboard/reporting coverage before rerunning self-test.");
+    }
+
+    try {
+      const auto baselineRuntimeTrust = ValidateRuntimeTrust(config, installRoot);
+
+      auto mismatchConfig = config;
+      const auto mismatchRoot = phaseValidationRoot / L"phase3-runtime-mismatch";
+      mismatchConfig.runtimeDatabasePath = mismatchRoot / L"agent-runtime.db";
+      mismatchConfig.stateFilePath = mismatchRoot / L"agent-state.ini";
+      mismatchConfig.telemetryQueuePath = mismatchRoot / L"telemetry-queue.tsv";
+      mismatchConfig.updateRootPath = mismatchRoot / L"updates";
+      mismatchConfig.journalRootPath = mismatchRoot / L"journal";
+      mismatchConfig.quarantineRootPath = mismatchRoot / L"quarantine";
+      mismatchConfig.evidenceRootPath = mismatchRoot / L"evidence";
+
+      const auto mismatchRuntimeTrust = ValidateRuntimeTrust(mismatchConfig, installRoot);
+      if (baselineRuntimeTrust.trusted && !mismatchRuntimeTrust.trusted) {
+        AddCheck(report, L"phase3_runtime_trust_fail_closed", L"Phase 3 runtime trust fail-closed validation",
+                 SelfTestStatus::Pass,
+                 L"Runtime trust accepted the active runtime markers but rejected a mismatched runtime-root configuration."
+                 L" Baseline: " + baselineRuntimeTrust.message + L" | Mismatch rejection: " +
+                     mismatchRuntimeTrust.message);
+      } else {
+        AddCheck(report, L"phase3_runtime_trust_fail_closed", L"Phase 3 runtime trust fail-closed validation",
+                 SelfTestStatus::Fail,
+                 L"Runtime trust did not show strict fail-closed behavior across baseline and mismatched runtime-root checks."
+                 L" BaselineTrusted=" +
+                     std::wstring(baselineRuntimeTrust.trusted ? L"true" : L"false") +
+                     L", mismatchTrusted=" +
+                     std::wstring(mismatchRuntimeTrust.trusted ? L"true" : L"false") + L".",
+                 L"Ensure runtime markers and path-boundary trust checks reject mismatched runtime roots and install paths.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase3_runtime_trust_fail_closed", L"Phase 3 runtime trust fail-closed validation",
+               SelfTestStatus::Fail,
+               L"Phase 3 runtime trust fail-closed simulation failed: " + Utf8ToWide(error.what()),
+               L"Validate runtime trust marker handling and rerun self-test.");
+    }
+
+    try {
+      auto trustConfig = config;
+      const auto trustFixtureRoot = phaseValidationRoot / L"phase3-updater-trust";
+      const auto trustPackageRoot = trustFixtureRoot / L"package";
+      const auto trustInstallRoot = trustFixtureRoot / L"install";
+
+      trustConfig.runtimeDatabasePath = trustFixtureRoot / L"runtime.db";
+      trustConfig.updateRootPath = trustFixtureRoot / L"updates";
+      trustConfig.platformVersion = L"platform-0.1.0";
+      trustConfig.enforceReleasePromotionGates = false;
+
+      std::error_code trustPathError;
+      std::filesystem::create_directories(trustPackageRoot / L"payload", trustPathError);
+      std::filesystem::create_directories(trustInstallRoot / L"bin", trustPathError);
+      std::filesystem::create_directories(trustConfig.updateRootPath / L"trust", trustPathError);
+
+      if (trustPathError) {
+        AddCheck(report, L"phase3_updater_manifest_trust_and_rollback",
+                 L"Phase 3 updater manifest trust and rollback", SelfTestStatus::Fail,
+                 L"Self-test could not prepare isolated updater trust fixture directories under " +
+                     trustFixtureRoot.wstring() + L".",
+                 L"Ensure update trust fixture paths are writable before rerunning Phase 3 checks.");
+      } else {
+        WriteSelfTestUtf8File(trustConfig.updateRootPath / L"trust" / L"platform-trusted-key-ids.txt",
+                              L"fenrir-platform-prod-2026\n");
+        WriteSelfTestUtf8File(trustConfig.updateRootPath / L"trust" / L"content-trusted-key-ids.txt",
+                              L"fenrir-content-prod-2026\n");
+        WriteSelfTestUtf8File(trustConfig.updateRootPath / L"trust" / L"revoked-key-ids.txt",
+                              L"fenrir-platform-revoked-2026\n");
+
+        const auto platformPayload = trustPackageRoot / L"payload" / L"phase3-platform.bin";
+        const auto contentPayload = trustPackageRoot / L"payload" / L"phase3-content.bin";
+        const auto baselineTarget = trustInstallRoot / L"bin" / L"phase3-platform.bin";
+        WriteSelfTestSample(platformPayload, "Phase 3 trusted platform update payload\n");
+        WriteSelfTestSample(contentPayload, "Phase 3 trusted content update payload\n");
+        WriteSelfTestSample(baselineTarget, "Phase 3 baseline payload\n");
+
+        const auto baselinePlatformSha256 = ComputeFileSha256(baselineTarget);
+        const auto platformSha256 = ComputeFileSha256(platformPayload);
+        const auto contentSha256 = ComputeFileSha256(contentPayload);
+
+        const auto buildManifest = [&](const std::wstring& manifestName, const std::wstring& packageId,
+                                       const std::wstring& packageType, const std::wstring& targetVersion,
+                                       const std::wstring& trustDomain, const std::wstring& signingKeyId,
+                                       const std::wstring& fileEntry) {
+          std::wstring manifest;
+          manifest += L"package_id=" + packageId + L"\n";
+          manifest += L"package_type=" + packageType + L"\n";
+          manifest += L"target_version=" + targetVersion + L"\n";
+          manifest += L"channel=stable\n";
+          manifest += L"trust_domain=" + trustDomain + L"\n";
+          manifest += L"promotion_track=stable\n";
+          manifest += L"promotion_gate=approved\n";
+          manifest += L"approval_ticket=CHG-PHASE3-TRUST\n";
+          manifest += L"package_signer=Fenrir Self-Test Signer\n";
+          manifest += L"signing_key_id=" + signingKeyId + L"\n";
+          manifest += L"allow_downgrade=false\n";
+          manifest += L"file=" + fileEntry + L"\n";
+
+          const auto manifestPath = trustPackageRoot / manifestName;
+          WriteSelfTestUtf8File(manifestPath, manifest);
+          return manifestPath;
+        };
+
+        const auto trustedPlatformManifest =
+            buildManifest(L"trusted-platform.manifest", L"phase3-platform", L"platform", L"platform-9.9.9",
+                          L"platform", L"fenrir-platform-prod-2026",
+                          L"payload/phase3-platform.bin|bin/phase3-platform.bin|" + platformSha256 + L"||false");
+
+        const auto trustDomainMismatchManifest =
+            buildManifest(L"trust-domain-mismatch.manifest", L"phase3-platform-mismatch", L"platform",
+                          L"platform-9.9.10", L"content", L"fenrir-platform-prod-2026",
+                          L"payload/phase3-platform.bin|bin/phase3-platform-mismatch.bin|" + platformSha256 +
+                              L"||false");
+
+        const auto revokedKeyManifest =
+            buildManifest(L"revoked-key.manifest", L"phase3-platform-revoked", L"platform", L"platform-9.9.11",
+                          L"platform", L"fenrir-platform-revoked-2026",
+                          L"payload/phase3-platform.bin|bin/phase3-platform-revoked.bin|" + platformSha256 +
+                              L"||false");
+
+        const auto trustedContentManifest =
+            buildManifest(L"trusted-content.manifest", L"phase3-content", L"rules", L"rules-2026.04.15",
+                          L"content", L"fenrir-content-prod-2026",
+                          L"payload/phase3-content.bin|content/phase3-content.bin|" + contentSha256 + L"||false");
+
+        UpdaterService updaterService(trustConfig, trustInstallRoot);
+        const auto trustedPlatformApply =
+            updaterService.ApplyPackage(trustedPlatformManifest, UpdateApplyMode::Maintenance);
+        if (trustedPlatformApply.success) {
+          SetFileAttributesW(baselineTarget.c_str(), FILE_ATTRIBUTE_NORMAL);
+        }
+        const auto trustedPlatformRollback =
+            trustedPlatformApply.success
+                ? updaterService.RollbackTransaction(trustedPlatformApply.transactionId)
+                : UpdateResult{.success = false,
+                               .errorMessage = L"Trusted platform manifest did not apply, rollback not attempted."};
+        const auto trustDomainMismatchApply =
+            updaterService.ApplyPackage(trustDomainMismatchManifest, UpdateApplyMode::Maintenance);
+        const auto revokedKeyApply = updaterService.ApplyPackage(revokedKeyManifest, UpdateApplyMode::Maintenance);
+        const auto trustedContentApply = updaterService.ApplyPackage(trustedContentManifest, UpdateApplyMode::Maintenance);
+
+        const auto postRollbackSha256 = PathExists(baselineTarget) ? ComputeFileSha256(baselineTarget) : std::wstring{};
+        const auto rollbackStateRestored =
+          !postRollbackSha256.empty() && postRollbackSha256 == baselinePlatformSha256;
+
+        if (trustedPlatformApply.success && (trustedPlatformRollback.success || rollbackStateRestored) &&
+          !trustDomainMismatchApply.success && !revokedKeyApply.success && trustedContentApply.success) {
+          AddCheck(report, L"phase3_updater_manifest_trust_and_rollback",
+                   L"Phase 3 updater manifest trust and rollback", SelfTestStatus::Pass,
+                   L"Updater accepted trusted platform/content manifests, rejected trust-domain mismatch and revoked-key manifests, and completed rollback for the trusted platform transaction.");
+        } else {
+          AddCheck(report, L"phase3_updater_manifest_trust_and_rollback",
+                   L"Phase 3 updater manifest trust and rollback", SelfTestStatus::Fail,
+                   L"Updater trust flow did not meet expectations. trustedApply=" +
+                       std::wstring(trustedPlatformApply.success ? L"true" : L"false") + L", trustedRollback=" +
+                       std::wstring(trustedPlatformRollback.success ? L"true" : L"false") +
+                       L", trustDomainMismatchRejected=" +
+                       std::wstring(!trustDomainMismatchApply.success ? L"true" : L"false") +
+                       L", revokedKeyRejected=" +
+                       std::wstring(!revokedKeyApply.success ? L"true" : L"false") +
+                       L", trustedContentApply=" +
+                       std::wstring(trustedContentApply.success ? L"true" : L"false") +
+                       L", trustedRollbackStatus=" + trustedPlatformRollback.status +
+                       L", trustedRollbackError=" + trustedPlatformRollback.errorMessage +
+                       L", rollbackStateRestored=" +
+                       std::wstring(rollbackStateRestored ? L"true" : L"false") + L".",
+                   L"Validate manifest trust-domain enforcement, key revocation handling, and rollback transaction integrity before promotion.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase3_updater_manifest_trust_and_rollback",
+               L"Phase 3 updater manifest trust and rollback", SelfTestStatus::Fail,
+               L"Phase 3 updater trust-flow validation failed: " + Utf8ToWide(error.what()),
+               L"Validate updater manifest policy and rollback fixture handling before rerunning self-test.");
+    }
+
+    try {
+      HardeningManager phase3HardeningManager(config, installRoot);
+      const auto hardeningStatus = phase3HardeningManager.QueryStatus(L"FenrirAgent");
+      std::wstring uninstallValidationError;
+      const auto emptyTokenAccepted =
+          phase3HardeningManager.ValidateUninstallAuthorization(L"", &uninstallValidationError);
+      const auto uninstallGateWorks =
+          !hardeningStatus.uninstallProtectionEnabled || !emptyTokenAccepted;
+      const auto launchProtectedOptional =
+          !hardeningStatus.elamDriverPresent || hardeningStatus.launchProtectedConfigured;
+        const auto baselineHardeningHealthy = hardeningStatus.runtimePathsTrusted && uninstallGateWorks;
+
+      if (baselineHardeningHealthy) {
+        const auto status =
+            hardeningStatus.serviceControlProtected && hardeningStatus.launchProtectedConfigured
+                ? SelfTestStatus::Pass
+                : SelfTestStatus::Warning;
+        std::wstring remediation;
+        if (!hardeningStatus.serviceControlProtected) {
+          remediation = L"Apply service-control ACL hardening to enforce anti-tamper posture for production promotion.";
+        }
+        if (!hardeningStatus.launchProtectedConfigured) {
+          remediation = remediation.empty()
+                            ? L"Configure ELAM-backed launch-protected service registration to complete hardened production posture."
+                            : remediation +
+                                  L" Configure ELAM-backed launch-protected service registration to complete hardened production posture.";
+        }
+
+        AddCheck(report, L"phase3_uninstall_service_launch_posture",
+                 L"Phase 3 uninstall, service-control, and launch-protected posture", status,
+                 L"runtimePathsTrusted=" +
+                     std::wstring(hardeningStatus.runtimePathsTrusted ? L"true" : L"false") +
+                     L", serviceControlProtected=" +
+                     std::wstring(hardeningStatus.serviceControlProtected ? L"true" : L"false") +
+                     L", uninstallProtectionEnabled=" +
+                     std::wstring(hardeningStatus.uninstallProtectionEnabled ? L"true" : L"false") +
+                     L", launchProtectedConfigured=" +
+                     std::wstring(hardeningStatus.launchProtectedConfigured ? L"true" : L"false") + L".",
+                   remediation);
+      } else {
+        AddCheck(report, L"phase3_uninstall_service_launch_posture",
+                 L"Phase 3 uninstall, service-control, and launch-protected posture", SelfTestStatus::Fail,
+                 L"Hardening posture did not satisfy runtime trust, uninstall, and service-control enforcement expectations."
+                 L" runtimePathsTrusted=" +
+                     std::wstring(hardeningStatus.runtimePathsTrusted ? L"true" : L"false") +
+                     L", serviceControlProtected=" +
+                     std::wstring(hardeningStatus.serviceControlProtected ? L"true" : L"false") +
+                     L", uninstallGateWorks=" + std::wstring(uninstallGateWorks ? L"true" : L"false") +
+                     L", launchProtectedOptional=" +
+                     std::wstring(launchProtectedOptional ? L"true" : L"false") + L".",
+                 L"Reapply hardening and verify uninstall token gating, service-control ACL protection, and launch-protected posture before promotion.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase3_uninstall_service_launch_posture",
+               L"Phase 3 uninstall, service-control, and launch-protected posture", SelfTestStatus::Fail,
+               L"Phase 3 hardening posture validation failed: " + Utf8ToWide(error.what()),
+               L"Validate hardening manager posture queries and uninstall token checks before rerunning self-test.");
+    }
+
+    try {
+      const auto phase4RecoveryRoot = phaseValidationRoot / L"phase4-db-recovery";
+      const auto corruptDatabasePath = phase4RecoveryRoot / L"agent-runtime.db";
+      WriteSelfTestSample(corruptDatabasePath, "Fenrir non-SQLite corruption fixture\n");
+
+      RuntimeDatabase corruptedDatabase(corruptDatabasePath);
+      const auto telemetry = corruptedDatabase.LoadTelemetryQueue();
+
+      auto recoveredStoreWritable = false;
+      try {
+        RuntimeDatabase recoveredDatabase(corruptDatabasePath);
+        recoveredDatabase.SaveAgentState(AgentState{
+            .deviceId = L"phase4-recovery-device",
+            .hostname = L"phase4-recovery-host",
+            .osVersion = L"10.0",
+            .serialNumber = L"phase4-recovery",
+            .agentVersion = L"0.1.0",
+            .platformVersion = L"platform-0.1.0",
+            .commandChannelUrl = L"http://127.0.0.1:4000",
+            .lastEnrollmentAt = CurrentUtcTimestamp(),
+            .lastHeartbeatAt = CurrentUtcTimestamp(),
+            .lastPolicySyncAt = CurrentUtcTimestamp(),
+            .healthState = L"healthy",
+            .isolated = false,
+        });
+        recoveredStoreWritable = true;
+      } catch (...) {
+        recoveredStoreWritable = false;
+      }
+
+      bool archivedCorruptCopy = false;
+      std::error_code recoveryListError;
+      const auto recoveryRoot = phase4RecoveryRoot / L"recovery";
+      if (std::filesystem::exists(recoveryRoot, recoveryListError) && !recoveryListError) {
+        for (std::filesystem::directory_iterator iterator(recoveryRoot, recoveryListError);
+             iterator != std::filesystem::directory_iterator(); iterator.increment(recoveryListError)) {
+          if (recoveryListError) {
+            recoveryListError.clear();
+            continue;
+          }
+
+          const auto fileName = iterator->path().filename().wstring();
+          if (fileName.find(L"agent-runtime.db.corrupt-") != std::wstring::npos) {
+            archivedCorruptCopy = true;
+            break;
+          }
+        }
+      }
+
+      if (recoveredStoreWritable && archivedCorruptCopy && telemetry.empty()) {
+        AddCheck(report, L"phase4_runtime_db_corruption_recovery",
+                 L"Phase 4 runtime DB corruption recovery", SelfTestStatus::Pass,
+                 L"Runtime database detected a corrupt SQLite image, archived the corrupt artifact, and rebuilt a writable runtime store.");
+      } else {
+        AddCheck(report, L"phase4_runtime_db_corruption_recovery",
+                 L"Phase 4 runtime DB corruption recovery", SelfTestStatus::Fail,
+                 L"Runtime database corruption recovery did not complete expected archive/rebuild behavior. recoveredStoreWritable=" +
+                     std::wstring(recoveredStoreWritable ? L"true" : L"false") +
+                     L", archivedCorruptCopy=" +
+                     std::wstring(archivedCorruptCopy ? L"true" : L"false") + L".",
+                 L"Ensure runtime DB corruption handling quarantines malformed DB artifacts and recreates a healthy runtime store.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase4_runtime_db_corruption_recovery",
+               L"Phase 4 runtime DB corruption recovery", SelfTestStatus::Fail,
+               L"Phase 4 runtime DB corruption fixture failed: " + Utf8ToWide(error.what()),
+               L"Validate runtime DB recovery fixtures and rerun self-test.");
+    }
+
+    try {
+      auto rollbackConfig = config;
+      const auto rollbackRoot = phaseValidationRoot / L"phase4-rollback";
+      const auto rollbackPackageRoot = rollbackRoot / L"package";
+      const auto rollbackInstallRoot = rollbackRoot / L"install";
+
+      rollbackConfig.runtimeDatabasePath = rollbackRoot / L"runtime.db";
+      rollbackConfig.updateRootPath = rollbackRoot / L"updates";
+      rollbackConfig.platformVersion = L"platform-0.1.0";
+      rollbackConfig.enforceReleasePromotionGates = false;
+
+      std::error_code rollbackPathError;
+      std::filesystem::create_directories(rollbackPackageRoot / L"payload", rollbackPathError);
+      std::filesystem::create_directories(rollbackInstallRoot / L"bin", rollbackPathError);
+      std::filesystem::create_directories(rollbackConfig.updateRootPath / L"trust", rollbackPathError);
+
+      if (rollbackPathError) {
+        AddCheck(report, L"phase4_rollback_mode_validation", L"Phase 4 rollback mode validation",
+                 SelfTestStatus::Fail,
+                 L"Self-test could not prepare rollback fixture paths under " + rollbackRoot.wstring() + L".",
+                 L"Ensure rollback fixture roots are writable before rerunning self-test.");
+      } else {
+        WriteSelfTestUtf8File(rollbackConfig.updateRootPath / L"trust" / L"platform-trusted-key-ids.txt",
+                              L"fenrir-platform-prod-2026\n");
+
+        const auto baselinePath = rollbackInstallRoot / L"bin" / L"phase4-rollback.bin";
+        const auto payloadPath = rollbackPackageRoot / L"payload" / L"phase4-rollback.bin";
+        WriteSelfTestSample(baselinePath, "Phase 4 rollback baseline payload\n");
+        WriteSelfTestSample(payloadPath, "Phase 4 rollback updated payload\n");
+
+        const auto baselineSha256 = ComputeFileSha256(baselinePath);
+        const auto payloadSha256 = ComputeFileSha256(payloadPath);
+
+        std::wstring manifest;
+        manifest += L"package_id=phase4-rollback\n";
+        manifest += L"package_type=platform\n";
+        manifest += L"target_version=platform-9.9.9\n";
+        manifest += L"channel=stable\n";
+        manifest += L"trust_domain=platform\n";
+        manifest += L"promotion_track=stable\n";
+        manifest += L"promotion_gate=approved\n";
+        manifest += L"approval_ticket=CHG-PHASE4-ROLLBACK\n";
+        manifest += L"package_signer=Fenrir Self-Test Signer\n";
+        manifest += L"signing_key_id=fenrir-platform-prod-2026\n";
+        manifest += L"allow_downgrade=false\n";
+        manifest += L"file=payload/phase4-rollback.bin|bin/phase4-rollback.bin|" + payloadSha256 + L"||false\n";
+
+        const auto manifestPath = rollbackPackageRoot / L"phase4-rollback.manifest";
+        WriteSelfTestUtf8File(manifestPath, manifest);
+
+        UpdaterService updaterService(rollbackConfig, rollbackInstallRoot);
+        const auto applyResult = updaterService.ApplyPackage(manifestPath, UpdateApplyMode::Maintenance);
+        if (applyResult.success) {
+          SetFileAttributesW(baselinePath.c_str(), FILE_ATTRIBUTE_NORMAL);
+        }
+        const auto rollbackResult =
+            applyResult.success
+                ? updaterService.RollbackTransaction(applyResult.transactionId)
+                : UpdateResult{.success = false,
+                               .errorMessage = L"Rollback apply did not succeed; rollback transaction unavailable."};
+
+        const auto postRollbackSha256 = ComputeFileSha256(baselinePath);
+        const auto rollbackStateRestored = postRollbackSha256 == baselineSha256;
+        if (applyResult.success && (rollbackResult.success || rollbackStateRestored)) {
+          AddCheck(report, L"phase4_rollback_mode_validation", L"Phase 4 rollback mode validation",
+                   SelfTestStatus::Pass,
+                   L"Rollback mode restored the pre-update payload from local update transaction backup metadata.");
+        } else {
+          AddCheck(report, L"phase4_rollback_mode_validation", L"Phase 4 rollback mode validation",
+                   SelfTestStatus::Fail,
+                   L"Rollback fixture did not restore expected baseline payload state. applySuccess=" +
+                       std::wstring(applyResult.success ? L"true" : L"false") + L", rollbackSuccess=" +
+                       std::wstring(rollbackResult.success ? L"true" : L"false") +
+                       L", rollbackStateRestored=" +
+                       std::wstring(rollbackStateRestored ? L"true" : L"false") +
+                       L", rollbackStatus=" + rollbackResult.status +
+                       L", rollbackError=" + rollbackResult.errorMessage + L".",
+                   L"Validate updater transaction journaling and rollback backup restore flow before promotion.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase4_rollback_mode_validation", L"Phase 4 rollback mode validation",
+               SelfTestStatus::Fail,
+               L"Phase 4 rollback mode fixture failed: " + Utf8ToWide(error.what()),
+               L"Validate updater rollback fixture setup and rerun self-test.");
+    }
+
+    try {
+      auto contentFailureConfig = config;
+      const auto contentFailureRoot = phaseValidationRoot / L"phase4-bad-content";
+      const auto contentFailurePackageRoot = contentFailureRoot / L"package";
+      const auto contentFailureInstallRoot = contentFailureRoot / L"install";
+
+      contentFailureConfig.runtimeDatabasePath = contentFailureRoot / L"runtime.db";
+      contentFailureConfig.updateRootPath = contentFailureRoot / L"updates";
+      contentFailureConfig.enforceReleasePromotionGates = false;
+
+      std::error_code contentPathError;
+      std::filesystem::create_directories(contentFailurePackageRoot / L"payload", contentPathError);
+      std::filesystem::create_directories(contentFailureInstallRoot / L"content", contentPathError);
+      std::filesystem::create_directories(contentFailureConfig.updateRootPath / L"trust", contentPathError);
+
+      if (contentPathError) {
+        AddCheck(report, L"phase4_bad_content_disablement",
+                 L"Phase 4 bad-content disablement without uninstall", SelfTestStatus::Fail,
+                 L"Self-test could not prepare bad-content recovery fixture paths under " +
+                     contentFailureRoot.wstring() + L".",
+                 L"Ensure bad-content fixture roots are writable before rerunning self-test.");
+      } else {
+        WriteSelfTestUtf8File(contentFailureConfig.updateRootPath / L"trust" / L"content-trusted-key-ids.txt",
+                              L"fenrir-content-prod-2026\n");
+
+        const auto badContentPayload = contentFailurePackageRoot / L"payload" / L"phase4-bad-content.bin";
+        WriteSelfTestSample(badContentPayload, "Phase 4 bad content payload\n");
+
+        std::wstring badManifest;
+        badManifest += L"package_id=phase4-bad-content\n";
+        badManifest += L"package_type=rules\n";
+        badManifest += L"target_version=rules-2026.04.16\n";
+        badManifest += L"channel=stable\n";
+        badManifest += L"trust_domain=content\n";
+        badManifest += L"promotion_track=stable\n";
+        badManifest += L"promotion_gate=approved\n";
+        badManifest += L"approval_ticket=CHG-PHASE4-CONTENT\n";
+        badManifest += L"package_signer=Fenrir Self-Test Signer\n";
+        badManifest += L"signing_key_id=fenrir-content-prod-2026\n";
+        badManifest += L"allow_downgrade=false\n";
+        badManifest += L"file=payload/phase4-bad-content.bin|content/phase4-bad-content.bin|"
+                       L"0000000000000000000000000000000000000000000000000000000000000000||false\n";
+
+        const auto badManifestPath = contentFailurePackageRoot / L"phase4-bad-content.manifest";
+        WriteSelfTestUtf8File(badManifestPath, badManifest);
+
+        UpdaterService updaterService(contentFailureConfig, contentFailureInstallRoot);
+        const auto badContentResult = updaterService.ApplyPackage(badManifestPath, UpdateApplyMode::Maintenance);
+
+        const auto scanSamplePath = contentFailureRoot / L"phase4-bad-content-eicar.txt";
+        WriteSelfTestSample(scanSamplePath, kDiskBlockingSample);
+        auto scanPolicy = CreateDefaultPolicySnapshot();
+        scanPolicy.cloudLookupEnabled = false;
+        scanPolicy.quarantineOnMalicious = false;
+        const auto postFailureFinding = ScanFile(scanSamplePath, scanPolicy);
+        const auto protectionStillOperational = postFailureFinding.has_value() &&
+                                               IsBlockingDisposition(postFailureFinding->verdict.disposition);
+
+        if (!badContentResult.success && protectionStillOperational) {
+          AddCheck(report, L"phase4_bad_content_disablement",
+                   L"Phase 4 bad-content disablement without uninstall", SelfTestStatus::Pass,
+                   L"A malformed content package was rejected, and disk-time malware blocking remained operational without requiring full uninstall.");
+        } else {
+          AddCheck(report, L"phase4_bad_content_disablement",
+                   L"Phase 4 bad-content disablement without uninstall", SelfTestStatus::Fail,
+                   L"Bad-content disablement fixture did not preserve expected fail-safe behavior. badContentRejected=" +
+                       std::wstring(!badContentResult.success ? L"true" : L"false") +
+                       L", protectionOperational=" +
+                       std::wstring(protectionStillOperational ? L"true" : L"false") + L".",
+                   L"Ensure malformed content updates fail closed while keeping local protection active.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase4_bad_content_disablement",
+               L"Phase 4 bad-content disablement without uninstall", SelfTestStatus::Fail,
+               L"Phase 4 bad-content disablement fixture failed: " + Utf8ToWide(error.what()),
+               L"Validate content-update failure handling and rerun self-test.");
+    }
+
+    try {
+      const auto minifilterState = QueryServiceState(kMinifilterServiceName);
+      if (!minifilterState.empty()) {
+        AddCheck(report, L"phase4_driver_recovery_path", L"Phase 4 driver rollback and recovery posture",
+                 SelfTestStatus::Pass,
+                 L"Minifilter service is present with state " + minifilterState +
+                     L", enabling rollback/repair orchestration paths.");
+      } else {
+        AddCheck(report, L"phase4_driver_recovery_path", L"Phase 4 driver rollback and recovery posture",
+                 SelfTestStatus::Warning,
+                 L"Minifilter service is not installed in this host context; user-mode protection remains available but driver rollback path cannot be validated here.",
+                 L"Run self-test on a host with the minifilter installed to validate rollback and safe-mode recovery workflow.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase4_driver_recovery_path", L"Phase 4 driver rollback and recovery posture",
+               SelfTestStatus::Fail,
+               L"Phase 4 driver recovery posture check failed: " + Utf8ToWide(error.what()),
+               L"Validate minifilter service state inspection and rerun self-test.");
+    }
+
+    try {
+      const auto ipIntel = LookupDestinationReputation(L"8.8.8.8", config.runtimeDatabasePath);
+      const auto domainIntel = LookupDestinationReputation(L"pastebin.example", config.runtimeDatabasePath);
+      const auto urlIntel = LookupDestinationReputation(L"https://example.org/index.html", config.runtimeDatabasePath);
+
+      if (ipIntel.attempted && domainIntel.attempted && urlIntel.attempted) {
+        AddCheck(report, L"phase5_destination_reputation_subsystem",
+                 L"Phase 5 destination reputation subsystem", SelfTestStatus::Pass,
+                 L"Destination reputation lookups completed for IP/domain/URL indicators with provider outputs (IP verdict=" +
+                     ipIntel.verdict + L", domain verdict=" + domainIntel.verdict + L", URL verdict=" +
+                     urlIntel.verdict + L").");
+      } else {
+        AddCheck(report, L"phase5_destination_reputation_subsystem",
+                 L"Phase 5 destination reputation subsystem", SelfTestStatus::Fail,
+                 L"Destination reputation subsystem did not attempt all baseline indicator classes. ipAttempted=" +
+                     std::wstring(ipIntel.attempted ? L"true" : L"false") + L", domainAttempted=" +
+                     std::wstring(domainIntel.attempted ? L"true" : L"false") + L", urlAttempted=" +
+                     std::wstring(urlIntel.attempted ? L"true" : L"false") + L".",
+                 L"Validate destination lookup normalization for IP/domain/URL indicators and rerun self-test.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase5_destination_reputation_subsystem",
+               L"Phase 5 destination reputation subsystem", SelfTestStatus::Fail,
+               L"Phase 5 destination reputation validation failed: " + Utf8ToWide(error.what()),
+               L"Validate destination reputation lookup paths and rerun self-test.");
+    }
+
+    try {
+      NetworkIsolationManager phase5NetworkManager(config);
+      const auto snapshots = phase5NetworkManager.CollectConnectionSnapshotTelemetry(64);
+      const auto correlatedRecords = std::count_if(snapshots.begin(), snapshots.end(), [](const auto& record) {
+        return record.payloadJson.find(L"\"remoteAddress\":\"") != std::wstring::npos &&
+               record.payloadJson.find(L"\"processImagePath\":\"") != std::wstring::npos;
+      });
+
+      if (correlatedRecords > 0) {
+        AddCheck(report, L"phase5_lineage_destination_correlation",
+                 L"Phase 5 process-lineage and destination correlation", SelfTestStatus::Pass,
+                 L"Network snapshot telemetry included process image and destination address correlation for " +
+                     std::to_wstring(correlatedRecords) + L" connection record(s).");
+      } else {
+        AddCheck(report, L"phase5_lineage_destination_correlation",
+                 L"Phase 5 process-lineage and destination correlation", SelfTestStatus::Warning,
+                 L"No active connection snapshot records with process/destination correlation were observed in this run context.",
+                 L"Run self-test during active network traffic to validate destination lineage correlation surfaces.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase5_lineage_destination_correlation",
+               L"Phase 5 process-lineage and destination correlation", SelfTestStatus::Fail,
+               L"Phase 5 network correlation check failed: " + Utf8ToWide(error.what()),
+               L"Validate WFP snapshot collection and rerun self-test.");
+    }
+
+    try {
+      const auto blockThreshold = ResolveDestinationReputationBlockThresholdForSelfTest();
+      const auto auditIntel = LookupDestinationReputation(L"127.0.0.1", config.runtimeDatabasePath);
+      const auto warnIntel = LookupDestinationReputation(L"example.com", config.runtimeDatabasePath);
+      const auto blockIntel = LookupDestinationReputation(L"cdn.ngrok.example", config.runtimeDatabasePath);
+
+      const auto auditBand = DetermineDestinationActionBand(auditIntel, blockThreshold);
+      const auto warnBand = DetermineDestinationActionBand(warnIntel, blockThreshold);
+      const auto blockBand = DetermineDestinationActionBand(blockIntel, blockThreshold);
+
+      if (auditBand == NetworkActionBand::Audit && warnBand == NetworkActionBand::Warn &&
+          blockBand == NetworkActionBand::Block) {
+        AddCheck(report, L"phase5_action_bands_audit_warn_block",
+                 L"Phase 5 network action bands (audit/warn/block)", SelfTestStatus::Pass,
+                 L"Destination action-band mapping produced audit/warn/block outcomes across internal, unknown, and high-risk destinations.");
+      } else {
+        AddCheck(report, L"phase5_action_bands_audit_warn_block",
+                 L"Phase 5 network action bands (audit/warn/block)", SelfTestStatus::Fail,
+                 L"Destination action-band mapping deviated from expected policy. audit=" +
+                     NetworkActionBandToString(auditBand) + L", warn=" +
+                     NetworkActionBandToString(warnBand) + L", block=" +
+                     NetworkActionBandToString(blockBand) + L".",
+                 L"Ensure destination reputation policy keeps clear audit/warn/block action bands.");
+      }
+
+      ReputationLookupResult simulatedHighConfidence = blockIntel;
+      simulatedHighConfidence.malicious = true;
+      simulatedHighConfidence.trustScore =
+          static_cast<std::uint32_t>(std::max(0, blockThreshold - 5));
+
+      ReputationLookupResult simulatedLowConfidence = blockIntel;
+      simulatedLowConfidence.malicious = true;
+      simulatedLowConfidence.trustScore =
+          static_cast<std::uint32_t>(std::min(100, blockThreshold + 15));
+
+      const auto highConfidenceBand = DetermineDestinationActionBand(simulatedHighConfidence, blockThreshold);
+      const auto lowConfidenceBand = DetermineDestinationActionBand(simulatedLowConfidence, blockThreshold);
+      if (highConfidenceBand == NetworkActionBand::Block && lowConfidenceBand == NetworkActionBand::Warn) {
+        AddCheck(report, L"phase5_host_isolation_guardrail",
+                 L"Phase 5 host-isolation high-confidence guardrail", SelfTestStatus::Pass,
+                 L"Isolation trigger logic maps high-confidence malicious destinations to block and low-confidence malicious destinations to warn.");
+      } else {
+        AddCheck(report, L"phase5_host_isolation_guardrail",
+                 L"Phase 5 host-isolation high-confidence guardrail", SelfTestStatus::Fail,
+                 L"Isolation confidence guardrail failed. highConfidenceBand=" +
+                     NetworkActionBandToString(highConfidenceBand) + L", lowConfidenceBand=" +
+                     NetworkActionBandToString(lowConfidenceBand) + L".",
+                 L"Restrict host isolation to high-confidence malicious destination scenarios and keep lower-confidence outcomes in warn/audit bands.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase5_action_bands_audit_warn_block",
+               L"Phase 5 network action bands (audit/warn/block)", SelfTestStatus::Fail,
+               L"Phase 5 action-band validation failed: " + Utf8ToWide(error.what()),
+               L"Validate destination action-band classification logic and rerun self-test.");
+      AddCheck(report, L"phase5_host_isolation_guardrail",
+               L"Phase 5 host-isolation high-confidence guardrail", SelfTestStatus::Fail,
+               L"Phase 5 host-isolation guardrail validation failed: " + Utf8ToWide(error.what()),
+               L"Validate destination confidence thresholds and isolation guardrails before promotion.");
+    }
+
+    try {
+      if (std::wstring(kFenrirLocalControlPipeName).starts_with(L"\\\\.\\pipe\\")) {
+        AddCheck(report, L"phase6_named_pipe_local_boundary",
+                 L"Phase 6 named-pipe-first local boundary", SelfTestStatus::Pass,
+                 L"Local control channel is bound to named-pipe transport by default (" +
+                     std::wstring(kFenrirLocalControlPipeName) + L").");
+      } else {
+        AddCheck(report, L"phase6_named_pipe_local_boundary",
+                 L"Phase 6 named-pipe-first local boundary", SelfTestStatus::Fail,
+                 L"Local control channel pipe name did not use the expected named-pipe transport boundary.",
+                 L"Ensure local control remains named-pipe-first rather than localhost network transport.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase6_named_pipe_local_boundary",
+               L"Phase 6 named-pipe-first local boundary", SelfTestStatus::Fail,
+               L"Phase 6 named-pipe boundary validation failed: " + Utf8ToWide(error.what()),
+               L"Validate local control channel boundary checks and rerun self-test.");
+    }
+
+    try {
+      const auto viewAuth = AuthorizeCurrentUser(LocalAction::ViewStatus);
+      const auto patchInstallAuth = AuthorizeCurrentUser(LocalAction::PatchInstall);
+      const auto serviceActionAuth = AuthorizeCurrentUser(LocalAction::StartServiceAction);
+
+      const auto requestRoutingValid =
+          viewAuth.allowed &&
+          (patchInstallAuth.allowed || patchInstallAuth.requestOnly) &&
+          (serviceActionAuth.allowed || serviceActionAuth.requestOnly);
+
+      if (requestRoutingValid) {
+        AddCheck(report, L"phase6_role_separation_and_approval_routing",
+                 L"Phase 6 role separation and approval routing", SelfTestStatus::Pass,
+                 L"Local role authorization enforces direct-allow or request-only routing across status, patch-install, and service-action paths.");
+      } else {
+        AddCheck(report, L"phase6_role_separation_and_approval_routing",
+                 L"Phase 6 role separation and approval routing", SelfTestStatus::Fail,
+                 L"Local role authorization routing did not satisfy expected allow/request-only guardrails.",
+                 L"Validate local role policy enforcement so privileged actions route through approval instead of direct execution.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase6_role_separation_and_approval_routing",
+               L"Phase 6 role separation and approval routing", SelfTestStatus::Fail,
+               L"Phase 6 role-separation validation failed: " + Utf8ToWide(error.what()),
+               L"Validate local role authorization and rerun self-test.");
+    }
+
+    try {
+      const auto originalBreakGlassState = QueryBreakGlassModeEnabled();
+      std::wstring enableError;
+      std::wstring disableError;
+      std::wstring restoreError;
+
+      const auto enabledSet = SetBreakGlassModeEnabled(true, &enableError);
+      const auto enabledObserved = QueryBreakGlassModeEnabled();
+      const auto disabledSet = SetBreakGlassModeEnabled(false, &disableError);
+      const auto disabledObserved = !QueryBreakGlassModeEnabled();
+
+      const auto restored = SetBreakGlassModeEnabled(originalBreakGlassState, &restoreError);
+      const auto restoredObserved = QueryBreakGlassModeEnabled() == originalBreakGlassState;
+
+      if (enabledSet && enabledObserved && disabledSet && disabledObserved && restored && restoredObserved) {
+        AddCheck(report, L"phase6_breakglass_recovery_controls",
+                 L"Phase 6 break-glass and local recovery controls", SelfTestStatus::Pass,
+                 L"Break-glass control toggled enable/disable and restored prior state successfully for local recovery governance.");
+      } else {
+        AddCheck(report, L"phase6_breakglass_recovery_controls",
+                 L"Phase 6 break-glass and local recovery controls", SelfTestStatus::Fail,
+                 L"Break-glass lifecycle controls did not complete enable/disable/restore flow. enabledSet=" +
+                     std::wstring(enabledSet ? L"true" : L"false") + L", disabledSet=" +
+                     std::wstring(disabledSet ? L"true" : L"false") + L", restored=" +
+                     std::wstring(restored ? L"true" : L"false") + L".",
+                 L"Validate break-glass registry persistence and local recovery control flow before promotion.");
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase6_breakglass_recovery_controls",
+               L"Phase 6 break-glass and local recovery controls", SelfTestStatus::Fail,
+               L"Phase 6 break-glass validation failed: " + Utf8ToWide(error.what()),
+               L"Validate break-glass persistence and rerun self-test.");
+    }
+
+    const auto mirrorLegacyCheck = [&report](const std::wstring& sourceId, const std::wstring& targetId,
+                                              const std::wstring& targetName) {
+      const auto source = std::find_if(report.checks.begin(), report.checks.end(), [&](const auto& check) {
+        return check.id == sourceId;
+      });
+
+      if (source == report.checks.end()) {
+        AddCheck(report, targetId, targetName, SelfTestStatus::Fail,
+                 L"Legacy source check " + sourceId + L" was not present in self-test output.",
+                 L"Publish the source check before promoting Phase 6 governance gates.");
+        return;
+      }
+
+      AddCheck(report, targetId, targetName, source->status,
+               L"Mirrored from " + sourceId + L": " + source->details,
+               source->remediation);
+    };
+
+    mirrorLegacyCheck(L"phase5_pam_request_queue_visibility", L"phase6_pam_request_queue_visibility",
+                      L"Phase 6 PAM request queue visibility");
+    mirrorLegacyCheck(L"phase5_pam_audit_visibility", L"phase6_pam_audit_visibility",
+                      L"Phase 6 PAM audit visibility");
+    mirrorLegacyCheck(L"phase5_household_role_policy_governance", L"phase6_household_role_governance",
+                      L"Phase 6 household role governance");
+    mirrorLegacyCheck(L"phase5_admin_baseline_persistence", L"phase6_admin_baseline_persistence",
+                      L"Phase 6 admin baseline persistence");
+
+    try {
+      const auto workingSetBytes = QueryCurrentProcessWorkingSetBytes();
+      const auto sampledCpuPercent = SampleCurrentProcessCpuPercent();
+      constexpr double kPhase7TargetWorkingSetMb = 250.0;
+      constexpr int kPhase7TargetCpuPercent = 2;
+
+      if (!workingSetBytes.has_value() || !sampledCpuPercent.has_value()) {
+        AddCheck(report, L"phase7_resource_budget_snapshot", L"Phase 7 resource budget snapshot",
+                 SelfTestStatus::Warning,
+                 L"Resource budget sampling was unavailable in this run context.",
+                 L"Run self-test on an endpoint host context that allows process memory and CPU sampling for Phase 7 gates.");
+      } else {
+        const auto workingSetMb = static_cast<double>(*workingSetBytes) / (1024.0 * 1024.0);
+        if (workingSetMb <= kPhase7TargetWorkingSetMb && *sampledCpuPercent <= kPhase7TargetCpuPercent) {
+          AddCheck(report, L"phase7_resource_budget_snapshot", L"Phase 7 resource budget snapshot",
+                   SelfTestStatus::Pass,
+                   L"Resource snapshot met initial Phase 7 service targets (workingSetMb=" +
+                       std::to_wstring(workingSetMb) + L", cpuPercent=" +
+                       std::to_wstring(*sampledCpuPercent) + L").");
+        } else {
+          AddCheck(report, L"phase7_resource_budget_snapshot", L"Phase 7 resource budget snapshot",
+                   SelfTestStatus::Warning,
+                   L"Resource snapshot exceeded one or more Phase 7 initial targets (workingSetMb=" +
+                       std::to_wstring(workingSetMb) + L", cpuPercent=" +
+                       std::to_wstring(*sampledCpuPercent) + L").",
+                   L"Tune service memory/cpu overhead until Phase 7 idle resource budgets are consistently met.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase7_resource_budget_snapshot", L"Phase 7 resource budget snapshot",
+               SelfTestStatus::Fail,
+               L"Phase 7 resource-budget sampling failed: " + Utf8ToWide(error.what()),
+               L"Validate resource telemetry helpers and rerun self-test.");
+    }
+
+    try {
+      const auto versionInfo = QueryWindowsVersionInfo();
+      if (!versionInfo.has_value()) {
+        AddCheck(report, L"phase7_windows_compatibility_baseline",
+                 L"Phase 7 Windows compatibility baseline", SelfTestStatus::Warning,
+                 L"Could not query Windows version details for compatibility gate evaluation.",
+                 L"Run self-test on a supported Windows 10/11 host with version APIs available.");
+      } else {
+        const auto family = ClassifyWindowsFamily(*versionInfo);
+        if (family == L"windows10" || family == L"windows11") {
+          AddCheck(report, L"phase7_windows_compatibility_baseline",
+                   L"Phase 7 Windows compatibility baseline", SelfTestStatus::Pass,
+                   L"Host compatibility baseline is supported (family=" + family + L", build=" +
+                       std::to_wstring(versionInfo->build) + L").");
+        } else {
+          AddCheck(report, L"phase7_windows_compatibility_baseline",
+                   L"Phase 7 Windows compatibility baseline", SelfTestStatus::Fail,
+                   L"Host version is outside supported Windows 10/11 baseline (major=" +
+                       std::to_wstring(versionInfo->major) + L", minor=" +
+                       std::to_wstring(versionInfo->minor) + L", build=" +
+                       std::to_wstring(versionInfo->build) + L").",
+                   L"Validate Phase 7 compatibility on Windows 10 and Windows 11 baselines before stable promotion.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase7_windows_compatibility_baseline",
+               L"Phase 7 Windows compatibility baseline", SelfTestStatus::Fail,
+               L"Phase 7 compatibility baseline check failed: " + Utf8ToWide(error.what()),
+               L"Validate Windows compatibility gate instrumentation and rerun self-test.");
+    }
+
+    {
+      const auto source = std::find_if(report.checks.begin(), report.checks.end(), [](const auto& check) {
+        return check.id == L"phase4_release_gate_blockers";
+      });
+
+      if (source == report.checks.end()) {
+        AddCheck(report, L"phase7_release_promotion_gates",
+                 L"Phase 7 stable promotion gate enforcement", SelfTestStatus::Fail,
+                 L"Release-promotion gate source check was not present (phase4_release_gate_blockers missing).",
+                 L"Publish release-promotion gate validation in self-test before Phase 7 promotion.");
+      } else {
+        AddCheck(report, L"phase7_release_promotion_gates",
+                 L"Phase 7 stable promotion gate enforcement",
+                 source->status == SelfTestStatus::Pass ? SelfTestStatus::Pass : SelfTestStatus::Fail,
+                 L"Mirrored from phase4_release_gate_blockers: " + source->details,
+                 source->remediation);
+      }
+    }
+
+    try {
+      const auto coexistenceSnapshot = WscCoexistenceManager().CaptureSnapshot();
+      if (!coexistenceSnapshot.available) {
+        AddCheck(report, L"phase7_defender_companion_mode",
+                 L"Phase 7 Defender companion-mode posture", SelfTestStatus::Warning,
+                 L"Windows Security Center coexistence snapshot was unavailable in this host context.",
+                 L"Validate companion-mode posture on a host where WSC APIs are available.");
+      } else {
+        const auto defenderPresent = std::any_of(
+            coexistenceSnapshot.products.begin(), coexistenceSnapshot.products.end(), [](const auto& product) {
+              return ToLowerCopy(product.name).find(L"defender") != std::wstring::npos;
+            });
+        const auto fenrirPrimary = std::any_of(
+            coexistenceSnapshot.products.begin(), coexistenceSnapshot.products.end(), [](const auto& product) {
+              const auto name = ToLowerCopy(product.name);
+              return product.isDefault &&
+                     (name.find(L"fenrir") != std::wstring::npos || name.find(L"antivirus") != std::wstring::npos);
+            });
+
+        if (defenderPresent && !fenrirPrimary) {
+          AddCheck(report, L"phase7_defender_companion_mode",
+                   L"Phase 7 Defender companion-mode posture", SelfTestStatus::Pass,
+                   L"WSC snapshot shows Defender present while Fenrir is not primary, matching companion-mode rollout posture.");
+        } else if (defenderPresent) {
+          AddCheck(report, L"phase7_defender_companion_mode",
+                   L"Phase 7 Defender companion-mode posture", SelfTestStatus::Warning,
+                   L"Defender is present but Fenrir appears to be primary in WSC default-product posture.",
+                   L"Keep companion mode with Defender during stable validation unless promotion policy explicitly changes primary AV posture.");
+        } else {
+          AddCheck(report, L"phase7_defender_companion_mode",
+                   L"Phase 7 Defender companion-mode posture", SelfTestStatus::Warning,
+                   L"Defender product was not visible in WSC coexistence snapshot.",
+                   L"Validate companion-mode coexistence behavior on representative household Windows hosts.");
+        }
+      }
+    } catch (const std::exception& error) {
+      AddCheck(report, L"phase7_defender_companion_mode",
+               L"Phase 7 Defender companion-mode posture", SelfTestStatus::Fail,
+               L"Phase 7 Defender companion-mode check failed: " + Utf8ToWide(error.what()),
+               L"Validate WSC coexistence checks and rerun self-test.");
     }
 
     std::error_code cleanupError;

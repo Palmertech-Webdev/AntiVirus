@@ -74,6 +74,19 @@ Use `ValidateMinifilterPackage.ps1` to validate staged minifilter release artifa
 .\ValidateMinifilterPackage.ps1 -WorkspaceRoot ..\..\..\.. -DriverRoot ./agent/windows/out/dev/driver
 ```
 
+Use `RunPhase1ElevatedCompletion.ps1` when you need strict elevated service-registration enforcement and a full
+Phase 1 rerun in one command:
+
+```powershell
+.\RunPhase1ElevatedCompletion.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+By default this helper requests elevation (if needed), attempts INF installation via `pnputil` and SetupAPI,
+verifies `AntivirusMinifilter` service registration, runs `ValidateMinifilterPackage.ps1` with strict service
+requirements, and then runs `RunPhase1ExitCriteria.ps1` with the standard corpus thresholds.
+
+Use `-SkipFullPhase1Gate` to only perform elevated service registration and strict package validation.
+
 ## Phase 2 Exit-Criteria Harness
 
 Use `RunPhase2ExitCriteria.ps1` to evaluate the Phase 2 ransomware-specific exit criteria from the service self-test
@@ -107,45 +120,33 @@ That corpus is designed for Phase 2 behavior validation and tuning rather than f
 
 ## Phase 3 Exit-Criteria Harness
 
-Use `RunPhase3ExitCriteria.ps1` to evaluate the Phase 3 AMSI and script-scoring exit criteria from the service
-self-test and the synthetic adversarial AMSI corpus without treating unrelated hardening posture warnings as a Phase 3 failure.
+Use `RunPhase3ExitCriteria.ps1` to evaluate Phase 3 runtime trust, updater trust, and anti-tamper posture from
+the service self-test.
 
 Current required checks:
 
-- AMSI blocks staged script content with layered delivery, suspicious destination, and memory-loader or LOLBin reasoning
-- AMSI avoids blocking benign administrative script content
-- AMSI blocks the malicious Phase 3 adversarial corpus
-- AMSI allows the benign Phase 3 adversarial corpus
-- hostile-input scanner/parser fuzz harness completes without runtime failures
+- runtime trust markers enforce fail-closed startup posture
+- updater manifest trust validation and rollback simulation remain safe
+- uninstall token gating and protected-service launch posture stay hardened
 
 Example:
 
 ```powershell
-.\GeneratePhase3AdversarialCorpus.ps1 -WorkspaceRoot ..\..\..\..
 .\RunPhase3ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
 ```
 
 The script writes a JSON report to `tmp-phase3-exitcriteria/phase3-exitcriteria-report.json`.
-The corpus generator writes repeatable test content and a manifest to `tmp-phase3-corpora/`.
-
-Use `RunHostileInputFuzzHarness.ps1` directly for focused malformed-input parser stress:
-
-```powershell
-.\RunHostileInputFuzzHarness.ps1 -WorkspaceRoot ..\..\..\..
-```
 
 ## Phase 4 Exit-Criteria Harness
 
-Use `RunPhase4ExitCriteria.ps1` to evaluate the Phase 4 patch-orchestration exit criteria from the service self-test
-without treating unrelated signing, hardening, or protected-service posture warnings as a Phase 4 failure.
+Use `RunPhase4ExitCriteria.ps1` to evaluate Phase 4 recovery and disaster-handling criteria from the service self-test.
 
 Current required checks:
 
-- patch policy persists maintenance windows, reboot grace periods, and provider toggles cleanly
-- patch refresh populates local policy, reboot coordination, and patch state inventory surfaces
-- recipe catalog covers the initial high-risk software baseline for the free edition
-- patch snapshot preserves failed, reboot-pending, manual-only, and unsupported states for user-facing reporting
-- release-gate blockers reject promoted updates when pass-rate, risk-budget, hotfix, or ticket metadata requirements are not met
+- runtime database corruption detection and clean recovery path
+- rollback mode validation for signed update state transitions
+- bad-content disablement and operator safety interlocks
+- driver recovery posture across rollback and re-enable flows
 
 Example:
 
@@ -157,15 +158,14 @@ The script writes a JSON report to `tmp-phase4-exitcriteria/phase4-exitcriteria-
 
 ## Phase 5 Exit-Criteria Harness
 
-Use `RunPhase5ExitCriteria.ps1` to evaluate the Phase 5 PAM and local-admin posture criteria from the service self-test.
+Use `RunPhase5ExitCriteria.ps1` to evaluate Phase 5 destination and network-protection criteria from the service self-test.
 
 Current required checks:
 
-- PAM request queue state is visible in endpoint posture
-- PAM audit approvals and denials are visible in endpoint posture
-- local Administrators membership posture can be audited
-- household role propagation policy governance is validated
-- local admin baseline persistence is validated through runtime database roundtrip
+- destination reputation subsystem resolves IP/domain/URL indicators
+- destination telemetry preserves process-lineage and remote-endpoint correlation
+- network action bands remain separated (audit, warn, block)
+- host isolation is guarded for high-confidence malicious outcomes
 
 Example:
 
@@ -177,12 +177,15 @@ The script writes a JSON report to `tmp-phase5-exitcriteria/phase5-exitcriteria-
 
 ## Phase 6 Exit-Criteria Harness
 
-Use `RunPhase6ExitCriteria.ps1` to evaluate the Phase 6 integration criteria from the service self-test.
+Use `RunPhase6ExitCriteria.ps1` to evaluate Phase 6 local-control, PAM, and household governance criteria from the service self-test.
 
 Current required checks:
 
-- unified local posture snapshot combines AV, patch, reboot, PAM, and admin posture signals
-- local posture output preserves patch debt and PAM decision history (including built-in patch/remediation PAM actions) for dashboard/reporting surfaces
+- named-pipe-first local control boundary remains enforced
+- role separation and request-only approval routing for privileged actions
+- break-glass and local recovery controls remain safe and reversible
+- PAM queue and PAM audit visibility checks are present for local governance
+- household role governance and admin baseline persistence checks are preserved
 
 Example:
 
@@ -191,3 +194,22 @@ Example:
 ```
 
 The script writes a JSON report to `tmp-phase6-exitcriteria/phase6-exitcriteria-report.json`.
+
+## Phase 7 Exit-Criteria Harness
+
+Use `RunPhase7ExitCriteria.ps1` to evaluate Phase 7 performance, compatibility, and stable-promotion gates from the service self-test.
+
+Current required checks:
+
+- resource budget snapshots for service memory and CPU posture
+- Windows 10/11 compatibility baseline validation
+- stable release-promotion gate linkage
+- Defender companion-mode coexistence posture
+
+Example:
+
+```powershell
+.\RunPhase7ExitCriteria.ps1 -WorkspaceRoot ..\..\..\..
+```
+
+The script writes a JSON report to `tmp-phase7-exitcriteria/phase7-exitcriteria-report.json`.
