@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
@@ -42,6 +43,7 @@ constexpr GUID kConditionIpRemoteAddressV6 = {0x246e1d8c, 0x8bee, 0x4018, {0x9b,
 #ifndef FWPM_SESSION_FLAG_DYNAMIC
 #define FWPM_SESSION_FLAG_DYNAMIC (0x00000001)
 #endif
+constexpr auto kDestinationReconcileInterval = std::chrono::minutes(5);
 
 std::wstring SafeBlobToWideString(const FWP_BYTE_BLOB* blob) {
   if (blob == nullptr || blob->data == nullptr || blob->size == 0) {
@@ -156,13 +158,8 @@ std::optional<FWP_BYTE_ARRAY16> ParseIpv6Address(const std::wstring& addressText
   return value;
 }
 
-UINT16 HostToNetworkOrder(const UINT16 value) {
-  return htons(value);
-}
-
-UINT16 NetworkToHostOrder(const UINT16 value) {
-  return ntohs(value);
-}
+UINT16 HostToNetworkOrder(const UINT16 value) { return htons(value); }
+UINT16 NetworkToHostOrder(const UINT16 value) { return ntohs(value); }
 
 std::optional<std::wstring> ExtractHostFromUrl(const std::wstring& url) {
   URL_COMPONENTSW components{};
@@ -437,8 +434,7 @@ void NetworkIsolationManager::Start() {
     SubscribeNetEvents();
     engineReady_ = true;
     RegisterDestinationEnforcementHandler(&NetworkIsolationManager::DestinationEnforcementThunk, this);
-    PurgeExpiredDestinationBlocksLocked();
-    ReplayPersistedDestinationBlocksLocked();
+    ReconcileDestinationBlocksLocked(true);
     QueueStateEvent(L"network.wfp.started", L"The WFP isolation manager opened the filtering engine and subscribed to net events.",
                     L"{\"mode\":\"user-mode\"}");
   } catch (const std::exception& error) {
@@ -523,7 +519,7 @@ bool NetworkIsolationManager::ApplyDestinationBlock(const DestinationEnforcement
     return false;
   }
   try {
-    PurgeExpiredDestinationBlocksLocked();
+    ReconcileDestinationBlocksLocked();
     AddDestinationBlockFiltersLocked(request);
     const auto commitStatus = FwpmTransactionCommit0(engineHandle_);
     if (commitStatus != ERROR_SUCCESS) {
@@ -757,6 +753,30 @@ void NetworkIsolationManager::PurgeExpiredDestinationBlocksLocked() {
   }
 }
 
+void NetworkIsolationManager::ReconcileDestinationBlocksLocked(const bool force) {
+  const auto now = std::chrono::steady_clock::now();
+  if (!force && lastDestinationReconcileAt_ != std::chrono::steady_clock::time_point{} &&
+      now - lastDestinationReconcileAt_ < kDestinationReconcileInterval) {
+    return;
+  }
+
+  const auto beforeCount = activeDestinationBlocks_.size();
+  PurgeExpiredDestinationBlocksLocked();
+  lastDestinationReconcileAt_ = now;
+
+  if (force) {
+    ReplayPersistedDestinationBlocksLocked();
+  }
+
+  const auto afterCount = activeDestinationBlocks_.size();
+  if (beforeCount != afterCount) {
+    QueueStateEvent(L"network.destination.block.reconciled",
+                    L"Fenrir reconciled active destination block filters.",
+                    std::wstring(L"{\"beforeCount\":") + std::to_wstring(beforeCount) +
+                        L",\"afterCount\":" + std::to_wstring(afterCount) + L"}");
+  }
+}
+
 void NetworkIsolationManager::ReplayPersistedDestinationBlocksLocked() {
   DestinationRuntimeStore store(config_.runtimeDatabasePath);
   const auto records = store.ListActiveBlockingRecords(256);
@@ -792,7 +812,7 @@ void NetworkIsolationManager::AddDestinationBlockFiltersLocked(const Destination
   if (activeDestinationBlocks_.size() >= kMaxActiveDestinationBlocks) {
     auto oldest = activeDestinationBlocks_.begin();
     for (auto it = activeDestinationBlocks_.begin(); it != activeDestinationBlocks_.end(); ++it) {
-      if (it->second.addedAt < oldest->second.addedAt) {
+      if (it->second.lastTouchedAt < oldest->second.lastTouchedAt) {
         oldest = it;
       }
     }
@@ -815,6 +835,7 @@ void NetworkIsolationManager::AddDestinationBlockFiltersLocked(const Destination
     block.expiresAt = request.expiresAt;
     block.filterIds.clear();
     block.addedAt = std::chrono::steady_clock::now();
+    block.lastTouchedAt = block.addedAt;
 
     for (int layerIndex = 0; layerIndex < 2; ++layerIndex) {
       auto remoteCondition = BuildRemoteAddressCondition(remoteAddress, LayerUsesIpv6(layerIndex));
@@ -864,6 +885,7 @@ void CALLBACK NetworkIsolationManager::NetEventCallback(void* context, const FWP
 
 void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
   const std::scoped_lock lock(stateMutex_);
+  ReconcileDestinationBlocksLocked();
   if (event.type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP || event.classifyDrop == nullptr) {
     return;
   }
@@ -892,6 +914,7 @@ void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
         reason = blockIt->second.reason;
         displayDestination = blockIt->second.displayDestination;
         sourceApplication = blockIt->second.sourceApplication;
+        blockIt->second.lastTouchedAt = std::chrono::steady_clock::now();
       }
     }
   }
