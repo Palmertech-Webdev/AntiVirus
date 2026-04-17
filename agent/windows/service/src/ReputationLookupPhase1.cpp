@@ -4,6 +4,13 @@
 #include "DestinationRuntimeStore.h"
 #include "DestinationVerdictEngine.h"
 
+#include <winsock2.h>
+#include <Windows.h>
+#include <winhttp.h>
+#include <ws2tcpip.h>
+
+#include <set>
+
 #define LookupDestinationReputation LookupDestinationReputation_Legacy
 #include "ReputationLookup.cpp"
 #undef LookupDestinationReputation
@@ -104,12 +111,74 @@ bool IsDestinationLikeIndicator(const ThreatIndicatorType indicatorType) {
          indicatorType == ThreatIndicatorType::Ip;
 }
 
+std::optional<std::wstring> ExtractHostFromUrl(const std::wstring& url) {
+  URL_COMPONENTSW components{};
+  components.dwStructSize = sizeof(components);
+  components.dwHostNameLength = static_cast<DWORD>(-1);
+  std::wstring mutableUrl = url;
+  if (WinHttpCrackUrl(mutableUrl.data(), static_cast<DWORD>(mutableUrl.size()), 0, &components) == FALSE ||
+      components.dwHostNameLength == 0) {
+    return std::nullopt;
+  }
+  return std::wstring(components.lpszHostName, components.dwHostNameLength);
+}
+
+std::vector<std::wstring> ResolveHostAddresses(const std::wstring& host) {
+  std::vector<std::wstring> results;
+  if (host.empty()) {
+    return results;
+  }
+
+  ADDRINFOW hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+
+  ADDRINFOW* resultList = nullptr;
+  if (GetAddrInfoW(host.c_str(), nullptr, &hints, &resultList) != 0 || resultList == nullptr) {
+    return results;
+  }
+
+  std::set<std::wstring> unique;
+  for (auto* entry = resultList; entry != nullptr; entry = entry->ai_next) {
+    wchar_t buffer[INET6_ADDRSTRLEN] = {};
+    if (entry->ai_family == AF_INET) {
+      const auto* sockaddr = reinterpret_cast<const SOCKADDR_IN*>(entry->ai_addr);
+      if (InetNtopW(AF_INET, &sockaddr->sin_addr, buffer, ARRAYSIZE(buffer)) != nullptr) {
+        unique.insert(buffer);
+      }
+    } else if (entry->ai_family == AF_INET6) {
+      const auto* sockaddr = reinterpret_cast<const SOCKADDR_IN6*>(entry->ai_addr);
+      if (InetNtopW(AF_INET6, &sockaddr->sin6_addr, buffer, ARRAYSIZE(buffer)) != nullptr) {
+        unique.insert(buffer);
+      }
+    }
+  }
+
+  FreeAddrInfoW(resultList);
+  results.assign(unique.begin(), unique.end());
+  return results;
+}
+
 std::vector<std::wstring> BuildRemoteAddressesForEnforcement(const DestinationContext& context) {
   std::vector<std::wstring> addresses;
   if (context.indicatorType == ThreatIndicatorType::Ip && !context.normalizedIndicator.empty()) {
     addresses.push_back(context.normalizedIndicator);
+    return addresses;
   }
-  return addresses;
+
+  std::wstring host = context.host;
+  if (host.empty() && context.indicatorType == ThreatIndicatorType::Url && !context.canonicalUrl.empty()) {
+    const auto extracted = ExtractHostFromUrl(context.canonicalUrl);
+    if (extracted.has_value()) {
+      host = *extracted;
+    }
+  }
+  if (host.empty()) {
+    host = context.normalizedIndicator;
+  }
+
+  return ResolveHostAddresses(host);
 }
 
 }  // namespace
