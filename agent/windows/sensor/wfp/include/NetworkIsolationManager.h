@@ -49,6 +49,7 @@ class NetworkIsolationManager {
     std::wstring expiresAt;
     std::vector<UINT64> filterIds;
     std::chrono::steady_clock::time_point addedAt{};
+    std::chrono::steady_clock::time_point lastTouchedAt{};
   };
 
   static void CALLBACK NetEventCallback(void* context, const FWPM_NET_EVENT1* event);
@@ -67,6 +68,7 @@ class NetworkIsolationManager {
   void AddDestinationBlockFilters(const DestinationEnforcementRequest& request);
   void AddDestinationBlockFiltersLocked(const DestinationEnforcementRequest& request);
   void PurgeExpiredDestinationBlocksLocked();
+  void ReconcileDestinationBlocksLocked(bool force = false);
   void ReplayPersistedDestinationBlocksLocked();
   void HandleNetEvent(const FWPM_NET_EVENT1& event);
   void QueueTelemetry(const TelemetryRecord& record);
@@ -86,6 +88,7 @@ class NetworkIsolationManager {
   std::unordered_set<UINT64> activeFilterIdIndex_{};
   std::unordered_map<std::wstring, ActiveDestinationBlock> activeDestinationBlocks_{};
   std::unordered_map<UINT64, std::wstring> activeDestinationBlockKeyByFilterId_{};
+  std::chrono::steady_clock::time_point lastDestinationReconcileAt_{};
 };
 
 }  // namespace antivirus::agent
