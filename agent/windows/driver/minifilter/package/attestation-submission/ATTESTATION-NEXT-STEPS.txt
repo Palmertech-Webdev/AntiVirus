@@ -1,0 +1,9 @@
+Fenrir minifilter attestation submission bundle
+Generated (UTC): 2026-04-17T18:58:08.3545487Z
+
+1. Upload the CAB in Microsoft Partner Center (Hardware -> Driver signing -> Attestation signing).
+2. Download the Microsoft-signed package from the portal.
+3. Replace AntivirusMinifilter.sys and AntivirusMinifilter.cat in:
+   - agent/windows/driver/minifilter/package
+   - agent/windows/out/dev/driver
+4. Rebuild FenrirSetup.exe and rerun repair/install to restore full minifilter enforcement.

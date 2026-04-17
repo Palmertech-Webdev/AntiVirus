@@ -535,6 +535,9 @@ int wmain(int argc, wchar_t* argv[]) {
   const auto elamDriver = GetArgumentValue(argc, argv, L"--elam-driver");
   if (!elamDriver.empty()) {
     SetEnvironmentVariableW(L"ANTIVIRUS_ELAM_DRIVER_PATH", elamDriver.c_str());
+    SetEnvironmentVariableW(L"ANTIVIRUS_ELAM_DRIVER_REQUIRED", L"1");
+  } else {
+    SetEnvironmentVariableW(L"ANTIVIRUS_ELAM_DRIVER_REQUIRED", L"0");
   }
   if (argc > 1) {
     const std::wstring command = argv[1];

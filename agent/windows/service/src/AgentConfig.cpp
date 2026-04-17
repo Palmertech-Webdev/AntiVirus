@@ -781,6 +781,8 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   }
 
   const auto elamDriverPath = ReadEnvironmentVariable(L"ANTIVIRUS_ELAM_DRIVER_PATH");
+  const auto elamDriverRequired =
+      ParseBooleanValue(ReadEnvironmentVariable(L"ANTIVIRUS_ELAM_DRIVER_REQUIRED"), false);
   if (!elamDriverPath.empty()) {
     config.elamDriverPath = std::filesystem::path(elamDriverPath);
   }
@@ -957,6 +959,12 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   if (!config.elamDriverPath.empty()) {
     config.elamDriverPath = ResolveRuntimePath(config.elamDriverPath, moduleHandle);
     config.elamDriverPath = NormalizeAbsolutePath(config.elamDriverPath);
+    std::error_code elamError;
+    const auto elamDriverPresent = std::filesystem::exists(config.elamDriverPath, elamError) && !elamError;
+    if (!elamDriverPresent && !elamDriverRequired) {
+      // Ignore stale/global ELAM path environment values unless ELAM was explicitly requested.
+      config.elamDriverPath.clear();
+    }
   }
   config.quarantineRootPath = ResolveRuntimePath(config.quarantineRootPath, moduleHandle, preferredRuntimeRoot);
   config.evidenceRootPath = ResolveRuntimePath(config.evidenceRootPath, moduleHandle, preferredRuntimeRoot);

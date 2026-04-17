@@ -23,6 +23,14 @@ What is still required before this becomes production-usable:
 - Add per-policy exclusions, cache lifetimes, and fail-open/fail-closed tuning
 - Add installer packaging, altitude assignment, and production service registration
 
-This repository environment does not currently include the WDK kernel headers or MSVC driver toolchain, so this driver source is checked in but not compiled here yet.
+This driver can be built in this repository when WDK/MSVC tooling is available.
 
-When you do have a signed WDK build output, use [BuildDriverPackage.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/driver/minifilter/BuildDriverPackage.ps1) to stage the `.inf`, `.sys`, and `.cat` into a releaseable driver package, then run [ValidateMinifilterPackage.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/ValidateMinifilterPackage.ps1) to verify package completeness and Authenticode posture.
+## Production Signing Path
+
+1. Build and locally package the driver with [BuildMinifilterDriver.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/driver/minifilter/BuildMinifilterDriver.ps1).
+2. Generate an attestation CAB submission bundle with [PrepareAttestationSubmission.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/driver/minifilter/PrepareAttestationSubmission.ps1).
+3. Submit that CAB in Microsoft Partner Center for attestation signing.
+4. Restage the returned Microsoft-signed `.sys` and `.cat` with [ApplyAttestedMinifilterPayload.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/driver/minifilter/ApplyAttestedMinifilterPayload.ps1).
+5. Rebuild the installer and validate with [ValidateMinifilterPackage.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/ValidateMinifilterPackage.ps1).
+
+Until Microsoft-attested artifacts are staged, Windows can reject driver load with `error 577` on Secure Boot systems, and setup will continue in reduced-protection mode.

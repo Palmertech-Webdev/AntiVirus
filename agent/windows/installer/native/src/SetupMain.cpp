@@ -31,6 +31,13 @@ constexpr wchar_t kCompanyName[] = L"Fenrir";
 constexpr wchar_t kProductName[] = L"Fenrir Endpoint";
 constexpr wchar_t kServiceName[] = L"FenrirAgent";
 constexpr wchar_t kMinifilterServiceName[] = L"AntivirusMinifilter";
+constexpr wchar_t kMinifilterServiceDisplayName[] = L"AntiVirus Real-Time Protection Minifilter";
+constexpr wchar_t kMinifilterServiceDescription[] =
+    L"Intercepts file activity and asks the user-mode broker for real-time allow or block decisions.";
+constexpr wchar_t kMinifilterServiceBinaryPath[] = L"\\SystemRoot\\System32\\drivers\\AntivirusMinifilter.sys";
+constexpr wchar_t kMinifilterLoadOrderGroup[] = L"FSFilter Activity Monitor";
+constexpr wchar_t kMinifilterDefaultInstanceName[] = L"AntivirusMinifilter Instance";
+constexpr wchar_t kMinifilterDefaultInstanceAltitude[] = L"370030";
 constexpr wchar_t kAgentRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
 constexpr wchar_t kArpRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\FenrirEndpoint";
@@ -61,6 +68,8 @@ constexpr wchar_t kToolsWfpTestCliRelativePath[] = L"tools\\fenrir-wfptestcli.ex
 constexpr wchar_t kToolsWinpthreadRelativePath[] = L"tools\\libwinpthread-1.dll";
 constexpr DWORD kPnpUtilUntrustedRootExitCode = static_cast<DWORD>(CERT_E_UNTRUSTEDROOT);
 constexpr DWORD kPnpUtilNoMoreItemsExitCode = ERROR_NO_MORE_ITEMS;
+constexpr DWORD kWin32InvalidImageHashError = 577;
+constexpr DWORD kWin32DriverBlockedError = 1275;
 
 constexpr UINT kInstallerLogMessage = WM_APP + 1;
 constexpr UINT kInstallerStatusMessage = WM_APP + 2;
@@ -192,6 +201,67 @@ std::wstring FormatWin32ErrorMessage(const DWORD errorCode) {
   std::wstring message(messageBuffer, messageLength);
   LocalFree(messageBuffer);
   return TrimCopy(message);
+}
+
+std::filesystem::path CreateTemporaryCaptureFilePath() {
+  wchar_t temporaryDirectory[MAX_PATH]{};
+  const auto temporaryDirectoryLength =
+      GetTempPathW(static_cast<DWORD>(std::size(temporaryDirectory)), temporaryDirectory);
+  if (temporaryDirectoryLength == 0 || temporaryDirectoryLength >= std::size(temporaryDirectory)) {
+    return {};
+  }
+
+  wchar_t temporaryFile[MAX_PATH]{};
+  if (GetTempFileNameW(temporaryDirectory, L"FNR", 0, temporaryFile) == 0) {
+    return {};
+  }
+
+  return std::filesystem::path(temporaryFile);
+}
+
+std::wstring DecodeProcessOutputText(const std::string& text) {
+  if (text.empty()) {
+    return {};
+  }
+
+  const auto sourceLength = static_cast<int>(text.size());
+  int convertedLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), sourceLength, nullptr, 0);
+  UINT codePage = CP_UTF8;
+  DWORD decodeFlags = MB_ERR_INVALID_CHARS;
+  if (convertedLength <= 0) {
+    codePage = CP_ACP;
+    decodeFlags = 0;
+    convertedLength = MultiByteToWideChar(codePage, decodeFlags, text.data(), sourceLength, nullptr, 0);
+  }
+
+  if (convertedLength <= 0) {
+    return {};
+  }
+
+  std::wstring decoded(static_cast<std::size_t>(convertedLength), L'\0');
+  MultiByteToWideChar(codePage, decodeFlags, text.data(), sourceLength, decoded.data(), convertedLength);
+  return decoded;
+}
+
+std::wstring LoadCapturedProcessOutput(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return {};
+  }
+
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream.good()) {
+    return {};
+  }
+
+  std::ostringstream bytes;
+  bytes << stream.rdbuf();
+  auto decoded = TrimCopy(DecodeProcessOutputText(bytes.str()));
+  constexpr std::size_t kMaxCapturedOutputCharacters = 3'000;
+  if (decoded.size() > kMaxCapturedOutputCharacters) {
+    decoded.resize(kMaxCapturedOutputCharacters);
+    decoded += L" ... (truncated)";
+  }
+  return decoded;
 }
 
 std::wstring QueryCertificateSubject(PCCERT_CONTEXT certificateContext) {
@@ -420,6 +490,8 @@ bool WriteRegistryDword(HKEY root, const wchar_t* subKey, const wchar_t* valueNa
 bool DeleteRegistryTree(HKEY root, const wchar_t* subKey);
 std::filesystem::path GetDefaultInstallRoot();
 std::filesystem::path QueryInstallRoot();
+std::filesystem::path ResolveSystemExecutablePath(const std::filesystem::path& windowsRoot,
+                                                  const wchar_t* executableName);
 std::wstring QueryServiceStateByName(const wchar_t* serviceName);
 bool ServiceExists();
 bool IsInstalledAt(const std::filesystem::path& installRoot);
@@ -431,11 +503,17 @@ bool RunProcessHidden(const std::filesystem::path& executable, const std::wstrin
                       const std::filesystem::path& workingDirectory, DWORD* exitCode, std::wstring* errorMessage);
 bool WaitForServiceStateByName(const wchar_t* serviceName, DWORD targetState, DWORD timeoutMs);
 bool WaitForServiceState(DWORD targetState, DWORD timeoutMs);
-bool StartServiceByName(const wchar_t* serviceName, DWORD timeoutMs, std::wstring* errorMessage);
+bool StartServiceByName(const wchar_t* serviceName, DWORD timeoutMs, std::wstring* errorMessage,
+                        DWORD* startFailureCode = nullptr);
 bool StopServiceByName(const wchar_t* serviceName, DWORD timeoutMs, std::wstring* errorMessage);
 bool StartInstalledService(std::wstring* errorMessage);
 bool StopInstalledService(std::wstring* errorMessage);
-bool InstallMinifilterDriver(const std::filesystem::path& installRoot, bool repair, std::wstring* errorMessage);
+bool ConfigureMinifilterInstanceRegistry(std::wstring* errorMessage);
+bool EnsureMinifilterServiceRegistrationFallback(const std::filesystem::path& windowsRoot,
+                                                 const std::filesystem::path& driverSysPath,
+                                                 std::wstring* errorMessage);
+bool InstallMinifilterDriver(const std::filesystem::path& installRoot, bool repair, std::wstring* errorMessage,
+                             std::wstring* warningMessage = nullptr);
 bool UninstallMinifilterDriver(const std::filesystem::path& installRoot, std::wstring* errorMessage);
 bool RunPostInstallHealthChecks(const std::filesystem::path& installRoot, std::wstring* errorMessage);
 bool StopMatchingProcess(const std::filesystem::path& imagePath);
@@ -590,6 +668,32 @@ std::filesystem::path GetDefaultInstallRoot() {
 
 std::filesystem::path QueryInstallRoot() {
   return GetDefaultInstallRoot();
+}
+
+std::filesystem::path ResolveSystemExecutablePath(const std::filesystem::path& windowsRoot,
+                                                  const wchar_t* executableName) {
+  if (executableName == nullptr || *executableName == L'\0') {
+    return {};
+  }
+
+  if (!windowsRoot.empty()) {
+    for (const auto& candidate : {windowsRoot / L"System32" / executableName,
+                                  windowsRoot / L"Sysnative" / executableName}) {
+      std::error_code existsError;
+      if (std::filesystem::exists(candidate, existsError) && !existsError) {
+        return candidate;
+      }
+    }
+  }
+
+  std::array<wchar_t, MAX_PATH> resolvedPath{};
+  const auto resolvedLength = SearchPathW(nullptr, executableName, nullptr,
+                                          static_cast<DWORD>(resolvedPath.size()), resolvedPath.data(), nullptr);
+  if (resolvedLength != 0 && resolvedLength < resolvedPath.size()) {
+    return std::filesystem::path(resolvedPath.data());
+  }
+
+  return {};
 }
 
 std::wstring QueryServiceStateByName(const wchar_t* serviceName) {
@@ -778,15 +882,42 @@ bool RunProcessHidden(const std::filesystem::path& executable, const std::wstrin
   startupInfo.dwFlags = STARTF_USESHOWWINDOW;
   startupInfo.wShowWindow = SW_HIDE;
 
+  SECURITY_ATTRIBUTES outputSecurity{};
+  outputSecurity.nLength = sizeof(outputSecurity);
+  outputSecurity.bInheritHandle = TRUE;
+  const auto capturedOutputPath = CreateTemporaryCaptureFilePath();
+  HANDLE outputCaptureHandle = INVALID_HANDLE_VALUE;
+  if (!capturedOutputPath.empty()) {
+    outputCaptureHandle =
+        CreateFileW(capturedOutputPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &outputSecurity,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (outputCaptureHandle != INVALID_HANDLE_VALUE) {
+      startupInfo.dwFlags |= STARTF_USESTDHANDLES;
+      startupInfo.hStdOutput = outputCaptureHandle;
+      startupInfo.hStdError = outputCaptureHandle;
+      const auto standardInput = GetStdHandle(STD_INPUT_HANDLE);
+      startupInfo.hStdInput = standardInput == INVALID_HANDLE_VALUE ? nullptr : standardInput;
+    }
+  }
+
   PROCESS_INFORMATION processInfo{};
   auto mutableCommandLine = commandLine;
-  const auto launched = CreateProcessW(nullptr, mutableCommandLine.data(), nullptr, nullptr, FALSE,
+  const auto launched = CreateProcessW(nullptr, mutableCommandLine.data(), nullptr, nullptr,
+                                       outputCaptureHandle != INVALID_HANDLE_VALUE,
                                        CREATE_NO_WINDOW, nullptr,
                                        workingDirectory.empty() ? nullptr : workingDirectory.c_str(),
                                        &startupInfo, &processInfo);
+  if (outputCaptureHandle != INVALID_HANDLE_VALUE) {
+    CloseHandle(outputCaptureHandle);
+  }
   if (!launched) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Could not start " + executable.wstring();
+      const auto processError = GetLastError();
+      *errorMessage = L"Could not start " + executable.wstring() + L" (error " + std::to_wstring(processError) +
+                      L"). " + FormatWin32ErrorMessage(processError);
+    }
+    if (!capturedOutputPath.empty()) {
+      DeleteFileW(capturedOutputPath.c_str());
     }
     return false;
   }
@@ -799,8 +930,15 @@ bool RunProcessHidden(const std::filesystem::path& executable, const std::wstrin
   if (exitCode != nullptr) {
     *exitCode = processExitCode;
   }
+  const auto capturedOutput = LoadCapturedProcessOutput(capturedOutputPath);
+  if (!capturedOutputPath.empty()) {
+    DeleteFileW(capturedOutputPath.c_str());
+  }
   if (processExitCode != 0 && errorMessage != nullptr) {
     *errorMessage = executable.filename().wstring() + L" exited with code " + std::to_wstring(processExitCode);
+    if (!capturedOutput.empty()) {
+      *errorMessage += L". " + capturedOutput;
+    }
   }
   return processExitCode == 0;
 }
@@ -845,30 +983,51 @@ bool WaitForServiceState(const DWORD targetState, const DWORD timeoutMs) {
   return WaitForServiceStateByName(kServiceName, targetState, timeoutMs);
 }
 
-bool StartServiceByName(const wchar_t* serviceName, const DWORD timeoutMs, std::wstring* errorMessage) {
+bool StartServiceByName(const wchar_t* serviceName, const DWORD timeoutMs, std::wstring* errorMessage,
+                        DWORD* startFailureCode) {
+  if (startFailureCode != nullptr) {
+    *startFailureCode = ERROR_SUCCESS;
+  }
+
   const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (manager == nullptr) {
     if (errorMessage != nullptr) {
-      *errorMessage = L"Could not open the Service Control Manager.";
+      const auto managerError = GetLastError();
+      *errorMessage = L"Could not open the Service Control Manager (error " + std::to_wstring(managerError) +
+                      L"). " + FormatWin32ErrorMessage(managerError);
+      if (startFailureCode != nullptr) {
+        *startFailureCode = managerError;
+      }
     }
     return false;
   }
 
   const auto service = OpenServiceW(manager, serviceName, SERVICE_START | SERVICE_QUERY_STATUS);
   if (service == nullptr) {
+    const auto openError = GetLastError();
     CloseServiceHandle(manager);
     if (errorMessage != nullptr) {
-      *errorMessage = std::wstring(L"Could not open service '") + serviceName + L"'.";
+      *errorMessage = std::wstring(L"Could not open service '") + serviceName + L"' (error " +
+                      std::to_wstring(openError) + L"). " + FormatWin32ErrorMessage(openError);
+    }
+    if (startFailureCode != nullptr) {
+      *startFailureCode = openError;
     }
     return false;
   }
 
-  const auto started = StartServiceW(service, 0, nullptr) != FALSE || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
+  const auto startResult = StartServiceW(service, 0, nullptr);
+  const auto startError = startResult != FALSE ? ERROR_SUCCESS : GetLastError();
+  const auto started = startResult != FALSE || startError == ERROR_SERVICE_ALREADY_RUNNING;
   CloseServiceHandle(service);
   CloseServiceHandle(manager);
   if (!started) {
     if (errorMessage != nullptr) {
-      *errorMessage = std::wstring(L"Service '") + serviceName + L"' could not be started.";
+      *errorMessage = std::wstring(L"Service '") + serviceName + L"' could not be started (error " +
+                      std::to_wstring(startError) + L"). " + FormatWin32ErrorMessage(startError);
+    }
+    if (startFailureCode != nullptr) {
+      *startFailureCode = startError;
     }
     return false;
   }
@@ -876,6 +1035,9 @@ bool StartServiceByName(const wchar_t* serviceName, const DWORD timeoutMs, std::
   if (!WaitForServiceStateByName(serviceName, SERVICE_RUNNING, timeoutMs)) {
     if (errorMessage != nullptr) {
       *errorMessage = std::wstring(L"Service '") + serviceName + L"' did not reach the running state.";
+    }
+    if (startFailureCode != nullptr) {
+      *startFailureCode = ERROR_SERVICE_REQUEST_TIMEOUT;
     }
     return false;
   }
@@ -990,13 +1152,133 @@ bool StartInstalledService(std::wstring* errorMessage) {
   return StartServiceByName(kServiceName, 20'000, errorMessage);
 }
 
+bool ConfigureMinifilterInstanceRegistry(std::wstring* errorMessage) {
+  const auto instancesRoot =
+      std::wstring(L"SYSTEM\\CurrentControlSet\\Services\\") + kMinifilterServiceName + L"\\Instances";
+  const auto instanceKey = instancesRoot + L"\\" + kMinifilterDefaultInstanceName;
+
+  if (!WriteRegistryString(HKEY_LOCAL_MACHINE, instancesRoot.c_str(), L"DefaultInstance",
+                           kMinifilterDefaultInstanceName) ||
+      !WriteRegistryString(HKEY_LOCAL_MACHINE, instanceKey.c_str(), L"Altitude", kMinifilterDefaultInstanceAltitude) ||
+      !WriteRegistryDword(HKEY_LOCAL_MACHINE, instanceKey.c_str(), L"Flags", 0)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not configure AntivirusMinifilter instance registry settings.";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+bool EnsureMinifilterServiceRegistrationFallback(const std::filesystem::path& windowsRoot,
+                                                 const std::filesystem::path& driverSysPath,
+                                                 std::wstring* errorMessage) {
+  const auto stagedSystemDriverPath = windowsRoot / L"System32" / L"drivers" / driverSysPath.filename();
+  auto driverAlreadyStaged = false;
+  if (std::filesystem::exists(driverSysPath)) {
+    std::error_code equivalentError;
+    if (std::filesystem::exists(stagedSystemDriverPath)) {
+      driverAlreadyStaged = std::filesystem::equivalent(driverSysPath, stagedSystemDriverPath, equivalentError);
+    }
+  }
+  if (std::filesystem::exists(driverSysPath) && !driverAlreadyStaged) {
+    if (CopyFileW(driverSysPath.c_str(), stagedSystemDriverPath.c_str(), FALSE) == FALSE) {
+      const auto copyError = GetLastError();
+      if (copyError != ERROR_SHARING_VIOLATION && copyError != ERROR_ACCESS_DENIED) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Could not stage AntivirusMinifilter.sys into the system drivers directory (error " +
+                          std::to_wstring(copyError) + L").";
+        }
+        return false;
+      }
+    }
+  }
+  if (!std::filesystem::exists(stagedSystemDriverPath)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"AntivirusMinifilter.sys is not staged in the system drivers directory after fallback setup.";
+    }
+    return false;
+  }
+
+  const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+  if (manager == nullptr) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not open the Service Control Manager for minifilter fallback registration.";
+    }
+    return false;
+  }
+
+  const auto dependencies = std::wstring(L"FltMgr");
+  std::vector<wchar_t> dependencyMultiSz(dependencies.begin(), dependencies.end());
+  dependencyMultiSz.push_back(L'\0');
+  dependencyMultiSz.push_back(L'\0');
+
+  auto service = OpenServiceW(manager, kMinifilterServiceName,
+                              SERVICE_QUERY_STATUS | SERVICE_CHANGE_CONFIG | SERVICE_START);
+  if (service == nullptr) {
+    const auto openError = GetLastError();
+    if (openError == ERROR_SERVICE_DOES_NOT_EXIST) {
+      service = CreateServiceW(
+          manager, kMinifilterServiceName, kMinifilterServiceDisplayName,
+          SERVICE_QUERY_STATUS | SERVICE_CHANGE_CONFIG | SERVICE_START,
+          SERVICE_FILE_SYSTEM_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+          kMinifilterServiceBinaryPath, kMinifilterLoadOrderGroup, nullptr,
+          dependencyMultiSz.data(), nullptr, nullptr);
+      if (service == nullptr) {
+        CloseServiceHandle(manager);
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Could not create AntivirusMinifilter service fallback registration.";
+        }
+        return false;
+      }
+    } else {
+      CloseServiceHandle(manager);
+      if (errorMessage != nullptr) {
+        *errorMessage = L"Could not open AntivirusMinifilter service fallback registration.";
+      }
+      return false;
+    }
+  }
+
+  if (ChangeServiceConfigW(service, SERVICE_FILE_SYSTEM_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
+                           kMinifilterServiceBinaryPath, kMinifilterLoadOrderGroup, nullptr, dependencyMultiSz.data(),
+                           nullptr, nullptr, kMinifilterServiceDisplayName) == FALSE) {
+    const auto configError = GetLastError();
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not configure AntivirusMinifilter service fallback registration (error " +
+                      std::to_wstring(configError) + L").";
+    }
+    return false;
+  }
+
+  SERVICE_DESCRIPTIONW description{};
+  description.lpDescription = const_cast<LPWSTR>(kMinifilterServiceDescription);
+  if (ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &description) == FALSE) {
+    const auto descriptionError = GetLastError();
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not set AntivirusMinifilter service description during fallback registration (error " +
+                      std::to_wstring(descriptionError) + L").";
+    }
+    return false;
+  }
+
+  CloseServiceHandle(service);
+  CloseServiceHandle(manager);
+
+  return ConfigureMinifilterInstanceRegistry(errorMessage);
+}
+
 bool RegisterMinifilterWithSetupApi(const std::filesystem::path& windowsRoot,
                                     const std::filesystem::path& driverInfPath,
                                     const std::filesystem::path& installRoot,
                                     DWORD* setupApiExitCode,
                                     std::wstring* errorMessage) {
-  const auto rundll32Path = windowsRoot / L"System32" / L"rundll32.exe";
-  if (!std::filesystem::exists(rundll32Path)) {
+  const auto rundll32Path = ResolveSystemExecutablePath(windowsRoot, L"rundll32.exe");
+  if (rundll32Path.empty()) {
     if (errorMessage != nullptr) {
       *errorMessage = L"rundll32.exe is unavailable on this host; cannot invoke SetupAPI fallback.";
     }
@@ -1005,24 +1287,49 @@ bool RegisterMinifilterWithSetupApi(const std::filesystem::path& windowsRoot,
 
   DWORD localExitCode = 0;
   std::wstring localError;
-  const auto setupApiArgs = std::wstring(L"setupapi.dll,InstallHinfSection DefaultInstall 132 ") +
-                            QuotePath(driverInfPath);
-  const auto success = RunProcessHidden(rundll32Path, setupApiArgs, installRoot, &localExitCode, &localError);
+
+  const auto trySection = [&](const std::wstring& section) {
+    const auto setupApiArgs = std::wstring(L"setupapi.dll,InstallHinfSection ") + section + L" 132 " +
+                              QuotePath(driverInfPath);
+    localError.clear();
+    localExitCode = 0;
+    return RunProcessHidden(rundll32Path, setupApiArgs, installRoot, &localExitCode, &localError);
+  };
+
+  if (trySection(L"DefaultInstall")) {
+    if (setupApiExitCode != nullptr) {
+      *setupApiExitCode = localExitCode;
+    }
+    return true;
+  }
+
+  const auto defaultInstallError = localError;
+  const auto defaultInstallExitCode = localExitCode;
+  if (trySection(L"DefaultInstall.Services")) {
+    if (setupApiExitCode != nullptr) {
+      *setupApiExitCode = localExitCode;
+    }
+    return true;
+  }
+
   if (setupApiExitCode != nullptr) {
     *setupApiExitCode = localExitCode;
   }
-
-  if (!success) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"SetupAPI INF install fallback failed. " + localError;
-    }
-    return false;
+  if (errorMessage != nullptr) {
+    *errorMessage = L"SetupAPI INF install fallback failed. DefaultInstall exit code " +
+                    std::to_wstring(defaultInstallExitCode) + L"; DefaultInstall.Services exit code " +
+                    std::to_wstring(localExitCode) + L". " +
+                    (localError.empty() ? defaultInstallError : localError);
   }
-
-  return true;
+  return false;
 }
 
-bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const bool repair, std::wstring* errorMessage) {
+bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const bool repair, std::wstring* errorMessage,
+                             std::wstring* warningMessage) {
+  if (warningMessage != nullptr) {
+    warningMessage->clear();
+  }
+
   const auto driverInfPath = installRoot / kDriverInfRelativePath;
   const auto driverSysPath = installRoot / kDriverSysRelativePath;
   const auto driverCatPath = installRoot / kDriverCatRelativePath;
@@ -1054,90 +1361,103 @@ bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const boo
     windowsRoot = std::filesystem::path(windir);
   }
 
-  const auto pnputilPath = windowsRoot / L"System32" / L"pnputil.exe";
-  if (!std::filesystem::exists(pnputilPath)) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"pnputil.exe is unavailable on this host; cannot register minifilter payload.";
-    }
-    return false;
-  }
-
-  DWORD pnputilExitCode = 0;
+  const auto pnputilPath = ResolveSystemExecutablePath(windowsRoot, L"pnputil.exe");
+  DWORD pnputilExitCode = ERROR_FILE_NOT_FOUND;
   std::wstring pnputilError;
-  const auto pnputilArgs = std::wstring(L"/add-driver ") + QuotePath(driverInfPath) + L" /install";
-  const auto pnputilInitialSucceeded =
-      RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
-  auto pnputilSucceeded = pnputilInitialSucceeded;
+  auto pnputilSucceeded = false;
   const auto pnputilExitCodeAccepted = [&](const DWORD exitCode) {
     return exitCode == ERROR_SUCCESS_REBOOT_REQUIRED || exitCode == kPnpUtilNoMoreItemsExitCode;
   };
-  if (!pnputilSucceeded && pnputilExitCode != ERROR_SUCCESS_REBOOT_REQUIRED) {
-    if (pnputilExitCode == kPnpUtilUntrustedRootExitCode) {
-      std::wstring signerSubject;
-      std::wstring trustBootstrapError;
-      if (!BootstrapMinifilterSigningTrust(driverCatPath, &signerSubject, &trustBootstrapError)) {
-        if (errorMessage != nullptr) {
-          *errorMessage = L"Could not register AntivirusMinifilter with pnputil because the minifilter signing "
-                          L"certificate is not trusted on this host (CERT_E_UNTRUSTEDROOT / 0x800B0109). " +
-                          trustBootstrapError;
+  if (!pnputilPath.empty()) {
+    const auto pnputilArgs = std::wstring(L"/add-driver ") + QuotePath(driverInfPath) + L" /install";
+    const auto pnputilInitialSucceeded =
+        RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+    pnputilSucceeded = pnputilInitialSucceeded;
+    if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
+      if (pnputilExitCode == kPnpUtilUntrustedRootExitCode) {
+        std::wstring signerSubject;
+        std::wstring trustBootstrapError;
+        if (!BootstrapMinifilterSigningTrust(driverCatPath, &signerSubject, &trustBootstrapError)) {
+          if (errorMessage != nullptr) {
+            *errorMessage = L"Could not register AntivirusMinifilter with pnputil because the minifilter signing "
+                            L"certificate is not trusted on this host (CERT_E_UNTRUSTEDROOT / 0x800B0109). " +
+                            trustBootstrapError;
+          }
+          return false;
         }
-        return false;
-      }
 
-      pnputilError.clear();
-      pnputilExitCode = 0;
-      pnputilSucceeded =
-          RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
-      if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
+        pnputilError.clear();
+        pnputilExitCode = 0;
+        pnputilSucceeded =
+            RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+        if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
+          if (errorMessage != nullptr) {
+            *errorMessage = L"Could not register AntivirusMinifilter with pnputil after trusting signer certificate" +
+                            std::wstring(signerSubject.empty() ? L"" : (L" '" + signerSubject + L"'")) +
+                            L". " + pnputilError;
+          }
+          return false;
+        }
+      } else {
         if (errorMessage != nullptr) {
-          *errorMessage = L"Could not register AntivirusMinifilter with pnputil after trusting signer certificate" +
-                          std::wstring(signerSubject.empty() ? L"" : (L" '" + signerSubject + L"'")) +
-                          L". " + pnputilError;
+          *errorMessage = L"Could not register AntivirusMinifilter with pnputil. " + pnputilError;
         }
         return false;
       }
-    } else {
+    }
+
+    if (pnputilExitCode == ERROR_SUCCESS_REBOOT_REQUIRED) {
+      // PnP package registration is complete, but a reboot may be required before the driver can load.
+      if (errorMessage != nullptr) {
+        *errorMessage = L"AntivirusMinifilter driver registration completed and requested a reboot.";
+      }
+    }
+
+    if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
       if (errorMessage != nullptr) {
         *errorMessage = L"Could not register AntivirusMinifilter with pnputil. " + pnputilError;
       }
       return false;
     }
-  }
-
-  if (pnputilExitCode == ERROR_SUCCESS_REBOOT_REQUIRED) {
-    // PnP package registration is complete, but a reboot may be required before the driver can load.
-    if (errorMessage != nullptr) {
-      *errorMessage = L"AntivirusMinifilter driver registration completed and requested a reboot.";
-    }
-  }
-
-  if (!pnputilSucceeded && !pnputilExitCodeAccepted(pnputilExitCode)) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Could not register AntivirusMinifilter with pnputil. " + pnputilError;
-    }
-    return false;
+  } else {
+    pnputilError = L"pnputil.exe is unavailable on this host; proceeding with SetupAPI fallback.";
   }
 
   auto minifilterState = QueryServiceStateByName(kMinifilterServiceName);
   if (minifilterState == L"missing") {
     DWORD setupApiExitCode = 0;
     std::wstring setupApiError;
-    if (!RegisterMinifilterWithSetupApi(windowsRoot, driverInfPath, installRoot, &setupApiExitCode,
-                                        &setupApiError)) {
-      if (errorMessage != nullptr) {
-        *errorMessage = L"Minifilter service 'AntivirusMinifilter' was not registered after driver install. " +
-                        setupApiError;
-      }
-      return false;
-    }
+    const auto setupApiSucceeded =
+        RegisterMinifilterWithSetupApi(windowsRoot, driverInfPath, installRoot, &setupApiExitCode, &setupApiError);
 
     minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+    if (minifilterState == L"missing") {
+      std::wstring fallbackError;
+      if (!EnsureMinifilterServiceRegistrationFallback(windowsRoot, driverSysPath, &fallbackError)) {
+        if (errorMessage != nullptr) {
+          *errorMessage =
+              L"Minifilter service 'AntivirusMinifilter' was not registered after driver install "
+              L"(pnputil exit code " +
+              std::to_wstring(pnputilExitCode) + L", SetupAPI exit code " + std::to_wstring(setupApiExitCode) +
+              L"). SetupAPI " + (setupApiSucceeded ? L"succeeded." : L"failed: " + setupApiError) +
+              L" Fallback registration failed: " + fallbackError +
+              std::wstring(pnputilError.empty() ? L"" : (L" " + pnputilError));
+        }
+        return false;
+      }
+
+      minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+    }
+
     if (minifilterState == L"missing") {
       if (errorMessage != nullptr) {
         *errorMessage = L"Minifilter service 'AntivirusMinifilter' was not registered after driver install "
                         L"(pnputil exit code " +
                         std::to_wstring(pnputilExitCode) +
-                        L", SetupAPI exit code " + std::to_wstring(setupApiExitCode) + L").";
+                        L", SetupAPI exit code " + std::to_wstring(setupApiExitCode) + L"). " +
+                        (setupApiSucceeded ? L"SetupAPI fallback completed but service is still missing."
+                                           : L"SetupAPI fallback failed. " + setupApiError) +
+                        std::wstring(pnputilError.empty() ? L"" : (L" " + pnputilError));
       }
       return false;
     }
@@ -1147,6 +1467,23 @@ bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const boo
       minifilterState == L"query-failed") {
     if (errorMessage != nullptr) {
       *errorMessage = L"Could not query AntivirusMinifilter service state after driver install.";
+    }
+    return false;
+  }
+
+  std::wstring minifilterServiceConfigurationError;
+  if (!EnsureMinifilterServiceRegistrationFallback(windowsRoot, driverSysPath, &minifilterServiceConfigurationError)) {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not refresh AntivirusMinifilter service configuration before startup. " +
+                      minifilterServiceConfigurationError;
+    }
+    return false;
+  }
+  minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+  if (minifilterState == L"scm-unavailable" || minifilterState == L"open-failed" ||
+      minifilterState == L"query-failed") {
+    if (errorMessage != nullptr) {
+      *errorMessage = L"Could not query AntivirusMinifilter service state after configuration refresh.";
     }
     return false;
   }
@@ -1161,8 +1498,20 @@ bool InstallMinifilterDriver(const std::filesystem::path& installRoot, const boo
     }
 
     std::wstring serviceStartError;
-    if (!StartServiceByName(kMinifilterServiceName, 20'000, &serviceStartError)) {
+    DWORD minifilterStartFailureCode = ERROR_SUCCESS;
+    if (!StartServiceByName(kMinifilterServiceName, 20'000, &serviceStartError, &minifilterStartFailureCode)) {
       minifilterState = QueryServiceStateByName(kMinifilterServiceName);
+      if ((minifilterStartFailureCode == kWin32InvalidImageHashError ||
+           minifilterStartFailureCode == kWin32DriverBlockedError) &&
+          warningMessage != nullptr) {
+        *warningMessage =
+            L"AntivirusMinifilter could not be started because Windows rejected the driver signature "
+            L"(error " +
+            std::to_wstring(minifilterStartFailureCode) +
+            L"). The endpoint will continue in reduced-protection mode until a Microsoft-attested production "
+            L"minifilter signature is deployed.";
+        return true;
+      }
       if (errorMessage != nullptr) {
         *errorMessage = L"AntivirusMinifilter did not reach running state (current state: " + minifilterState +
                         L"). " + serviceStartError;
@@ -1302,24 +1651,19 @@ bool UninstallMinifilterDriver(const std::filesystem::path& installRoot, std::ws
 
   const auto driverInfPath = installRoot / kDriverInfRelativePath;
   if (std::filesystem::exists(driverInfPath)) {
-    const auto pnputilPath = windowsRoot / L"System32" / L"pnputil.exe";
-    if (!std::filesystem::exists(pnputilPath)) {
-      if (errorMessage != nullptr) {
-        *errorMessage = L"Could not run minifilter uninstall cleanup because pnputil.exe is unavailable.";
+    const auto pnputilPath = ResolveSystemExecutablePath(windowsRoot, L"pnputil.exe");
+    if (!pnputilPath.empty()) {
+      DWORD pnputilExitCode = 0;
+      std::wstring pnputilError;
+      const auto pnputilArgs = std::wstring(L"/delete-driver ") + QuotePath(driverInfPath) + L" /uninstall /force";
+      RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
+      if (pnputilExitCode != ERROR_SUCCESS && pnputilExitCode != kPnpUtilNoMoreItemsExitCode) {
+        if (errorMessage != nullptr) {
+          *errorMessage = L"Could not remove AntivirusMinifilter driver package with pnputil (exit code " +
+                          std::to_wstring(pnputilExitCode) + L"). " + pnputilError;
+        }
+        return false;
       }
-      return false;
-    }
-
-    DWORD pnputilExitCode = 0;
-    std::wstring pnputilError;
-    const auto pnputilArgs = std::wstring(L"/delete-driver ") + QuotePath(driverInfPath) + L" /uninstall /force";
-    RunProcessHidden(pnputilPath, pnputilArgs, installRoot, &pnputilExitCode, &pnputilError);
-    if (pnputilExitCode != ERROR_SUCCESS && pnputilExitCode != kPnpUtilNoMoreItemsExitCode) {
-      if (errorMessage != nullptr) {
-        *errorMessage = L"Could not remove AntivirusMinifilter driver package with pnputil (exit code " +
-                        std::to_wstring(pnputilExitCode) + L"). " + pnputilError;
-      }
-      return false;
     }
   }
 
@@ -1798,9 +2142,14 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
 
   PostStatus(hwnd, repair ? L"Repairing minifilter registration..." : L"Registering minifilter driver...", 84);
   PostLog(hwnd, repair ? L"Refreshing AntivirusMinifilter deployment" : L"Installing AntivirusMinifilter driver package");
-  if (!InstallMinifilterDriver(context->installRoot, repair, &errorMessage)) {
+  std::wstring minifilterWarning;
+  if (!InstallMinifilterDriver(context->installRoot, repair, &errorMessage, &minifilterWarning)) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;
+  }
+  const auto minifilterDegraded = !minifilterWarning.empty();
+  if (minifilterDegraded) {
+    PostLog(hwnd, L"Warning: " + minifilterWarning);
   }
 
   PostStatus(hwnd, L"Starting protection service...", 87);
@@ -1810,11 +2159,16 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
     return;
   }
 
-  PostStatus(hwnd, L"Running post-install health checks...", 90);
-  PostLog(hwnd, L"Validating minifilter runtime state, broker enforcement probe, and strict self-test");
-  if (!RunPostInstallHealthChecks(context->installRoot, &errorMessage)) {
-    PostComplete(hwnd, false, false, false, errorMessage);
-    return;
+  if (!minifilterDegraded) {
+    PostStatus(hwnd, L"Running post-install health checks...", 90);
+    PostLog(hwnd, L"Validating minifilter runtime state, broker enforcement probe, and strict self-test");
+    if (!RunPostInstallHealthChecks(context->installRoot, &errorMessage)) {
+      PostComplete(hwnd, false, false, false, errorMessage);
+      return;
+    }
+  } else {
+    PostStatus(hwnd, L"Running post-install health checks...", 90);
+    PostLog(hwnd, L"Skipping strict minifilter health checks because the minifilter is unavailable on this host.");
   }
 
   PostStatus(hwnd, L"Configuring startup and shortcuts...", 93);
@@ -1842,6 +2196,11 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
   LaunchInstalledEndpointClient(context->installRoot, true);
   auto completionMessage = repair ? std::wstring(L"Fenrir Endpoint was repaired successfully.")
                                   : std::wstring(L"Fenrir Endpoint was installed successfully.");
+  if (minifilterDegraded) {
+    completionMessage +=
+        L" Real-time minifilter enforcement is currently unavailable because Windows rejected the driver signature. "
+        L"Deploy a Microsoft-attested signed AntivirusMinifilter.sys/.cat package to restore full protection.";
+  }
   if (!webViewRuntimeReady) {
     completionMessage += hasEmbeddedWebViewInstaller
                              ? L" Fenrir attempted to install the bundled WebView2 runtime dependency, but modern dashboard rendering is still unavailable on this host. The endpoint client will stay on the legacy native view until Microsoft Edge WebView2 Runtime is available."
