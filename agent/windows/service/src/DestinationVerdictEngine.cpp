@@ -45,6 +45,27 @@ std::vector<DestinationReasonCode> BuildReasonCodes(const ReputationLookupResult
   if (context.attachmentOriginated) {
     reasons.push_back(DestinationReasonCode::AttachmentDeliveredLink);
   }
+  if (context.redirectNavigation) {
+    reasons.push_back(DestinationReasonCode::RedirectDrivenNavigation);
+  }
+  if (context.downloadInitiated) {
+    reasons.push_back(DestinationReasonCode::BrowserDownloadInitiation);
+  }
+  if (context.browserLaunchedFile) {
+    reasons.push_back(DestinationReasonCode::BrowserLaunchedFile);
+  }
+  if (context.browserExtensionHost) {
+    reasons.push_back(DestinationReasonCode::BrowserExtensionHost);
+  }
+  if (context.abusivePermissionPrompt) {
+    reasons.push_back(DestinationReasonCode::AbusiveNotificationPrompt);
+  }
+  if (context.suspiciousBrowserChildProcess) {
+    reasons.push_back(DestinationReasonCode::SuspiciousBrowserChildProcess);
+  }
+  if (context.fakeUpdatePattern) {
+    reasons.push_back(DestinationReasonCode::FakeUpdatePattern);
+  }
   if (result.fromCache || context.fromCache) {
     reasons.push_back(DestinationReasonCode::CacheHit);
   }
@@ -57,6 +78,35 @@ std::vector<DestinationReasonCode> BuildReasonCodes(const ReputationLookupResult
   }
 
   return reasons;
+}
+
+std::uint32_t ApplyContextConfidenceUplift(const DestinationContext& context, std::uint32_t confidence) {
+  std::uint32_t uplift = 0;
+  if (context.emailOriginated) {
+    uplift += 16;
+  }
+  if (context.attachmentOriginated) {
+    uplift += 8;
+  }
+  if (context.redirectNavigation) {
+    uplift += 10;
+  }
+  if (context.downloadInitiated || context.browserLaunchedFile) {
+    uplift += 8;
+  }
+  if (context.browserExtensionHost) {
+    uplift += 6;
+  }
+  if (context.abusivePermissionPrompt) {
+    uplift += 12;
+  }
+  if (context.suspiciousBrowserChildProcess) {
+    uplift += 14;
+  }
+  if (context.fakeUpdatePattern) {
+    uplift += 14;
+  }
+  return std::min<std::uint32_t>(100, confidence + uplift);
 }
 
 }  // namespace
@@ -84,7 +134,7 @@ DestinationVerdict DestinationVerdictEngine::Evaluate(const DestinationContext& 
   const auto lookup = LookupDestinationReputation(verdict.indicator, runtimeDatabasePath_);
   verdict.provider = lookup.provider;
   verdict.category = MapReputationToDestinationCategory(lookup);
-  verdict.confidence = lookup.trustScore;
+  verdict.confidence = ApplyContextConfidenceUplift(context, lookup.trustScore);
   verdict.knownBad = lookup.malicious;
   verdict.suspicious = verdict.category == DestinationThreatCategory::Suspicious ||
                        verdict.category == DestinationThreatCategory::Phishing ||
@@ -96,6 +146,7 @@ DestinationVerdict DestinationVerdictEngine::Evaluate(const DestinationContext& 
   verdict.userOverrideAllowed = verdict.action == DestinationAction::Warn ||
                                 verdict.action == DestinationAction::DegradedAllow;
   verdict.reasonCodes = BuildReasonCodes(lookup, context, verdict);
+  verdict.alertTitle = BuildDestinationSummary(verdict);
   verdict.summary = BuildDestinationSummary(verdict);
   verdict.details = BuildDestinationDetails(lookup, context, verdict);
   return verdict;
@@ -174,6 +225,30 @@ std::wstring BuildDestinationDetails(const ReputationLookupResult& result,
   }
   if (context.attachmentOriginated) {
     details += details.empty() ? L"Attachment-originated request." : L" Attachment-originated request.";
+  }
+  if (context.redirectNavigation) {
+    details += details.empty() ? L"Redirect-driven navigation." : L" Redirect-driven navigation.";
+  }
+  if (context.downloadInitiated) {
+    details += details.empty() ? L"Download initiation detected." : L" Download initiation detected.";
+  }
+  if (context.browserLaunchedFile) {
+    details += details.empty() ? L"Browser launched a local file." : L" Browser launched a local file.";
+  }
+  if (context.browserExtensionHost) {
+    details += details.empty() ? L"Browser extension host context." : L" Browser extension host context.";
+  }
+  if (context.abusivePermissionPrompt) {
+    details += details.empty() ? L"Notification or permission prompt abuse indicators present."
+                               : L" Notification or permission prompt abuse indicators present.";
+  }
+  if (context.suspiciousBrowserChildProcess) {
+    details += details.empty() ? L"Suspicious browser child process activity."
+                               : L" Suspicious browser child process activity.";
+  }
+  if (context.fakeUpdatePattern) {
+    details += details.empty() ? L"Fake update or fake download pattern present."
+                               : L" Fake update or fake download pattern present.";
   }
   if (verdict.degradedMode) {
     details += details.empty() ? L"Decision produced in degraded mode." : L" Decision produced in degraded mode.";

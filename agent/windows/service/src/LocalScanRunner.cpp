@@ -127,6 +127,37 @@ void RecordEvidence(const AgentConfig& config, const PolicySnapshot& policy, std
   }
 }
 
+void AttachStoredOriginContext(const AgentConfig& config, std::vector<ScanFinding>& findings) {
+  RuntimeDatabase database(config.runtimeDatabasePath);
+  for (auto& finding : findings) {
+    if (!finding.originContext.channel.empty() || finding.path.empty()) {
+      continue;
+    }
+
+    DownloadContextRecord record{};
+    if (!database.TryGetDownloadContextRecord(finding.path, record)) {
+      continue;
+    }
+
+    finding.originContext.channel = record.channel;
+    finding.originContext.browserFamily = record.browserFamily;
+    finding.originContext.sourceApplication = record.sourceApplication;
+    finding.originContext.parentApplication = record.parentApplication;
+    finding.originContext.sourceDomain = record.sourceDomain;
+    finding.originContext.sourceUrl = record.sourceUrl;
+    finding.originContext.navigationType = record.navigationType;
+    finding.originContext.observedAt = record.observedAt;
+    finding.originContext.browserOriginated = record.channel == L"browser";
+    finding.originContext.emailOriginated = record.channel == L"email";
+    finding.originContext.attachmentOriginated = record.channel == L"email";
+    finding.originContext.downloadOriginated = record.channel == L"browser";
+    if (finding.alertTitle.empty()) {
+      finding.alertTitle = finding.originContext.attachmentOriginated ? L"Suspicious email attachment"
+                                                                     : L"Risky download from website";
+    }
+  }
+}
+
 std::wstring BuildScanSessionLabel(const std::wstring& source) {
   if (_wcsicmp(source.c_str(), L"endpoint-ui.quick-scan") == 0) {
     return L"[Quick scan]";
@@ -299,6 +330,7 @@ LocalScanExecutionResult ExecuteLocalScan(const AgentConfig& config, const Agent
         .currentTarget = update.currentPath,
     });
   }, config.scanExcludedPaths);
+  AttachStoredOriginContext(config, findings);
 
   ApplyLocalRemediation(config, findings, options.applyRemediation);
   RecordEvidence(config, state.policy, findings, options.source);

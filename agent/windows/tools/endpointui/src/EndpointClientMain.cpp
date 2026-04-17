@@ -1729,6 +1729,16 @@ std::wstring HistorySourceLabel(const std::wstring& source) {
   return source.empty() ? std::wstring(L"(unknown)") : source;
 }
 
+std::wstring HistoryContextLabel(const antivirus::agent::ScanHistoryRecord& record) {
+  if (!record.contextType.empty()) {
+    return record.contextType;
+  }
+  if (_wcsicmp(record.contentType.c_str(), L"destination") == 0) {
+    return L"web";
+  }
+  return L"local";
+}
+
 std::wstring HistoryDispositionLabel(const antivirus::agent::ScanHistoryRecord& record) {
   if (_wcsicmp(record.contentType.c_str(), L"scan-session") != 0) {
     return record.disposition.empty() ? std::wstring(L"(unknown)") : record.disposition;
@@ -1747,9 +1757,13 @@ std::wstring BuildThreatDetailText(const antivirus::agent::ScanHistoryRecord& re
   std::wstringstream stream;
   stream << L"Threat detail\r\n\r\n"
          << L"Detected: " << NullableText(record.recordedAt) << L"\r\n"
+         << L"Alert: " << NullableText(record.alertTitle, L"(none)") << L"\r\n"
          << L"Item: " << ThreatDisplayPath(record) << L"\r\n"
          << L"Disposition: " << NullableText(record.disposition) << L"\r\n"
          << L"Confidence: " << record.confidence << L"\r\n"
+         << L"Context: " << NullableText(HistoryContextLabel(record), L"(unknown)") << L"\r\n"
+         << L"Source app: " << NullableText(record.sourceApplication, L"(unknown)") << L"\r\n"
+         << L"Origin: " << NullableText(record.originReference, L"(unknown)") << L"\r\n"
          << L"Tactic / Technique: " << NullableText(record.tacticId, L"(n/a)") << L" / "
          << NullableText(record.techniqueId, L"(n/a)") << L"\r\n"
          << L"Remediation: " << NullableText(record.remediationStatus, L"(none)") << L"\r\n"
@@ -1789,7 +1803,11 @@ std::wstring BuildHistoryDetailText(const antivirus::agent::ScanHistoryRecord& r
   std::wstringstream stream;
   stream << L"Detection history\r\n\r\n"
          << L"Recorded: " << NullableText(record.recordedAt) << L"\r\n"
+         << L"Alert: " << NullableText(record.alertTitle, L"(none)") << L"\r\n"
          << L"Source: " << HistorySourceLabel(record.source) << L"\r\n"
+         << L"Context: " << NullableText(HistoryContextLabel(record), L"(unknown)") << L"\r\n"
+         << L"Source app: " << NullableText(record.sourceApplication, L"(unknown)") << L"\r\n"
+         << L"Origin: " << NullableText(record.originReference, L"(unknown)") << L"\r\n"
          << L"Item: " << ThreatDisplayPath(record) << L"\r\n"
          << L"Disposition: " << HistoryDispositionLabel(record) << L"\r\n"
          << L"Reputation: " << NullableText(record.reputation, L"(unknown)") << L"\r\n"
@@ -4083,10 +4101,10 @@ void PopulateThreatsList(UiContext& context) {
     const auto attack = record.techniqueId.empty() ? record.tacticId : record.tacticId + L" / " + record.techniqueId;
     InsertListViewRow(context.threatsList, row++,
                       {record.recordedAt,
-                       ThreatDisplayPath(record),
+                       record.alertTitle.empty() ? ThreatDisplayPath(record) : record.alertTitle,
                        record.disposition,
                        std::to_wstring(record.confidence),
-                       attack.empty() ? std::wstring(L"(n/a)") : attack,
+                       HistoryContextLabel(record),
                        record.remediationStatus.empty() ? std::wstring(L"(none)") : record.remediationStatus});
   }
 }
@@ -4115,9 +4133,9 @@ void PopulateHistoryList(UiContext& context) {
     InsertListViewRow(context.historyList, row++,
                       {record.recordedAt,
                        HistoryDispositionLabel(record),
-                      ThreatDisplayPath(record),
-                      HistorySourceLabel(record.source),
-                      record.techniqueId.empty() ? std::wstring(L"(n/a)") : record.techniqueId,
+                      record.alertTitle.empty() ? ThreatDisplayPath(record) : record.alertTitle,
+                      HistoryContextLabel(record),
+                      record.originReference.empty() ? HistorySourceLabel(record.source) : record.originReference,
                       record.remediationStatus.empty() ? std::wstring(L"(none)") : record.remediationStatus});
   }
 }
@@ -5810,14 +5828,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       SendMessageW(context->progressBar, PBM_SETBARCOLOR, 0, static_cast<LPARAM>(AccentBlue()));
 
       ConfigureListViewColumns(context->threatsList,
-                               {{L"Detected", 170}, {L"Item", 360}, {L"Action", 110},
-                                {L"Confidence", 100}, {L"ATT&CK", 180}, {L"Remediation", 130}});
+                               {{L"Detected", 170}, {L"Alert", 360}, {L"Action", 110},
+                                {L"Confidence", 100}, {L"Context", 180}, {L"Remediation", 130}});
       ConfigureListViewColumns(context->quarantineList,
                                {{L"Captured", 170}, {L"Original path", 380}, {L"Status", 120},
                                 {L"Technique", 160}, {L"SHA-256", 260}});
       ConfigureListViewColumns(context->historyList,
-                               {{L"Recorded", 170}, {L"Result", 110}, {L"Item", 360},
-                                {L"Source", 150}, {L"Technique", 140}, {L"Remediation", 130}});
+                               {{L"Recorded", 170}, {L"Result", 110}, {L"Alert", 360},
+                                {L"Context", 150}, {L"Origin", 140}, {L"Remediation", 130}});
 
       SetScanRunning(*context, false, L"Ready.");
       RefreshSnapshot(*context);

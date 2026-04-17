@@ -3,6 +3,7 @@
 #include <filesystem>
 
 #include "DestinationProtection.h"
+#include "ReputationLookup.h"
 
 namespace antivirus::agent {
 

@@ -927,6 +927,39 @@ std::wstring GuessTechnique(const FileData& file) {
   return L"T1204.002";
 }
 
+std::wstring BuildAlertTitle(const ScanFinding& finding) {
+  if (!finding.alertTitle.empty()) {
+    return finding.alertTitle;
+  }
+
+  if (finding.originContext.attachmentOriginated) {
+    return finding.verdict.disposition == VerdictDisposition::Allow ? L"Email attachment checked"
+                                                                    : L"Suspicious email attachment";
+  }
+  if (finding.originContext.downloadOriginated || finding.originContext.browserLaunchedFile) {
+    return finding.verdict.disposition == VerdictDisposition::Allow ? L"Website download checked"
+                                                                    : L"Risky download from website";
+  }
+  return finding.verdict.disposition == VerdictDisposition::Allow ? L"File check completed" : L"Suspicious file blocked";
+}
+
+std::wstring BuildAlertSummary(const ScanFinding& finding) {
+  if (!finding.alertSummary.empty()) {
+    return finding.alertSummary;
+  }
+
+  const auto item = finding.path.filename().empty() ? finding.path.wstring() : finding.path.filename().wstring();
+  const auto origin = BuildContentOriginLabel(finding.originContext);
+  if (finding.verdict.disposition == VerdictDisposition::Allow) {
+    return origin + L": " + item + L" was checked.";
+  }
+
+  if (finding.originContext.browserLaunchedFile) {
+    return origin + L" tried to open " + item + L".";
+  }
+  return origin + L" delivered " + item + L".";
+}
+
 ScanFinding BuildAllowOverrideFindingInternal(const std::filesystem::path& path, const std::optional<FileData>& loaded,
                                               const AllowOverrideMatch& match) {
   ScanFinding finding{
@@ -950,13 +983,17 @@ ScanFinding BuildAllowOverrideFindingInternal(const std::filesystem::path& path,
     finding.verdict.reasons.push_back({L"SIGNER_CONTEXT", L"Embedded signer: " + loaded->signer});
   }
 
+  finding.alertTitle = L"Protection policy allow";
+  finding.alertSummary = L"Fenrir allowed this file because a local suppression or exclusion matched.";
+
   return finding;
 }
 
 }  // namespace
 
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
-                                    const std::vector<std::filesystem::path>& excludedPaths) {
+                                    const std::vector<std::filesystem::path>& excludedPaths,
+                                    const ContentOriginContext& originContext) {
   if (IsExcludedPath(path, excludedPaths)) {
     return std::nullopt;
   }
@@ -967,6 +1004,8 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   }
 
   const auto& file = *loaded;
+  ContentOriginContext effectiveOrigin = originContext;
+
   if (ShouldSuppressNoisyCacheFile(file)) {
     return std::nullopt;
   }
@@ -1266,6 +1305,16 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
     maliciousPressure += 8;
   }
 
+  for (const auto& originSignal : CollectContentOriginSignals(effectiveOrigin, path)) {
+    AddHit(hits, Hit{originSignal.code, originSignal.message, L"TA0001",
+                     effectiveOrigin.attachmentOriginated ? L"T1566.001" : L"T1204.002", originSignal.score});
+    if (originSignal.score >= 0) {
+      maliciousPressure += originSignal.score;
+    } else {
+      benignPressure += std::abs(originSignal.score);
+    }
+  }
+
   const auto netPressure = std::clamp(maliciousPressure - benignPressure, 0, 99);
   const auto shouldSurfaceFinding = netPressure >= detectThreshold ||
                                     (highSeverity && maliciousPressure >= detectThreshold);
@@ -1314,7 +1363,8 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
               .confidence = static_cast<std::uint32_t>(std::clamp(std::max(netPressure, maliciousPressure / 2), 1, 99)),
               .tacticId = top != hits.end() ? top->tacticId : L"TA0002",
               .techniqueId = top != hits.end() ? top->techniqueId : GuessTechnique(file),
-              .reasons = {}}};
+              .reasons = {}},
+      .originContext = effectiveOrigin};
 
   if (signerLookup.attempted) {
     finding.verdict.reasons.push_back(
@@ -1359,11 +1409,18 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
     finding.verdict.reasons.push_back({L"BLOCK_FIRST",
                                        L"Fenrir blocked this item immediately and can quarantine it during remediation."});
   }
+  finding.alertTitle = BuildAlertTitle(finding);
+  finding.alertSummary = BuildAlertSummary(finding);
   return finding;
 }
 
+std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
+                                    const std::vector<std::filesystem::path>& excludedPaths) {
+  return ScanFile(path, policy, excludedPaths, {});
+}
+
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy) {
-  return ScanFile(path, policy, {});
+  return ScanFile(path, policy, {}, {});
 }
 
 std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy,
@@ -1541,23 +1598,10 @@ TelemetryRecord BuildScanFindingTelemetry(const ScanFinding& finding, const std:
   const auto disposition = VerdictDispositionToString(finding.verdict.disposition);
   const auto techniqueId = finding.verdict.techniqueId.empty() ? L"unknown" : finding.verdict.techniqueId;
   const auto remediationStatus = RemediationStatusToString(finding.remediationStatus);
+  const auto alertTitle = BuildAlertTitle(finding);
+  const auto alertSummary = BuildAlertSummary(finding);
 
-  std::wstring summary = finding.verdict.disposition == VerdictDisposition::Allow ? L"On-demand scan verified "
-                                                                                  : L"On-demand scan flagged ";
-  summary += finding.path.filename().wstring();
-  if (finding.verdict.disposition == VerdictDisposition::Allow) {
-    summary += L" after reputation verification.";
-  } else {
-    summary += L" for ";
-    summary += disposition;
-    if (finding.remediationStatus == RemediationStatus::Quarantined) {
-      summary += L" and moved it into local quarantine.";
-    } else if (finding.remediationStatus == RemediationStatus::Failed) {
-      summary += L", but remediation failed locally.";
-    } else {
-      summary += L".";
-    }
-  }
+  std::wstring summary = alertTitle + L": " + alertSummary;
 
   std::wstring payload = L"{\"path\":\"";
   payload += Utf8ToWide(EscapeJsonString(finding.path.wstring()));
@@ -1592,7 +1636,17 @@ TelemetryRecord BuildScanFindingTelemetry(const ScanFinding& finding, const std:
   payload += Utf8ToWide(EscapeJsonString(finding.quarantinedPath.wstring()));
   payload += L"\",\"remediationError\":\"";
   payload += Utf8ToWide(EscapeJsonString(finding.remediationError));
-  payload += L"\"}";
+  payload += L"\",\"alertTitle\":\"";
+  payload += Utf8ToWide(EscapeJsonString(alertTitle));
+  payload += L"\",\"alertSummary\":\"";
+  payload += Utf8ToWide(EscapeJsonString(alertSummary));
+  payload += L"\",\"contextType\":\"";
+  payload += Utf8ToWide(EscapeJsonString(finding.originContext.channel));
+  payload += L"\",\"originLabel\":\"";
+  payload += Utf8ToWide(EscapeJsonString(BuildContentOriginLabel(finding.originContext)));
+  payload += L"\",\"originContext\":";
+  payload += SerializeContentOriginContext(finding.originContext);
+  payload += L"}";
 
   return TelemetryRecord{
       .eventId = GenerateGuidString(),

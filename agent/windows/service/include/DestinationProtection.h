@@ -47,6 +47,13 @@ enum class DestinationReasonCode {
   EmailDeliveredLink,
   BrowserDeliveredNavigation,
   AttachmentDeliveredLink,
+  RedirectDrivenNavigation,
+  BrowserDownloadInitiation,
+  BrowserLaunchedFile,
+  BrowserExtensionHost,
+  AbusiveNotificationPrompt,
+  SuspiciousBrowserChildProcess,
+  FakeUpdatePattern,
   LocalPolicyAllow,
   LocalPolicyWarn,
   LocalPolicyBlock,
@@ -86,10 +93,20 @@ struct DestinationContext {
   std::wstring userName;
   std::wstring browserFamily;
   std::wstring deliveryVector;
+  std::wstring navigationType;
+  std::wstring sourceDomain;
+  std::wstring sourceUrl;
   std::wstring observedAt;
   bool browserInitiated{false};
   bool emailOriginated{false};
   bool attachmentOriginated{false};
+  bool redirectNavigation{false};
+  bool downloadInitiated{false};
+  bool browserLaunchedFile{false};
+  bool browserExtensionHost{false};
+  bool abusivePermissionPrompt{false};
+  bool suspiciousBrowserChildProcess{false};
+  bool fakeUpdatePattern{false};
   bool fromCache{false};
   bool offlineMode{false};
 };
@@ -128,6 +145,7 @@ struct DestinationVerdict {
   DestinationThreatCategory category{DestinationThreatCategory::Unknown};
   std::uint32_t confidence{0};
   std::vector<DestinationReasonCode> reasonCodes{};
+  std::wstring alertTitle;
   bool suspicious{false};
   bool knownBad{false};
   bool fromCache{false};

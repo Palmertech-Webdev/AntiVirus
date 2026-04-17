@@ -24,6 +24,7 @@
 #include "EvidenceRecorder.h"
 #include "QuarantineStore.h"
 #include "RemediationEngine.h"
+#include "RuntimeDatabase.h"
 #include "StringUtils.h"
 
 namespace antivirus::agent {
@@ -1311,15 +1312,20 @@ bool ApplyBehaviorChainCorrelation(const RealtimeFileScanRequest& request, const
 ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const RealtimeFileOperation operation,
                                  const RealtimeFileScanRequest& request, const PolicySnapshot& policy,
                                  const std::vector<std::filesystem::path>& excludedPaths) {
-  if (const auto allowOverride = BuildAllowOverrideFinding(path, policy, excludedPaths); allowOverride.has_value()) {
-    return *allowOverride;
-  }
-
   const auto extension = ToLowerCopy(path.extension().wstring());
   const auto userControlledPath = IsUserControlledPath(path);
   const auto processImageLower = ToLowerCopy(SafeCopy(request.processImage));
   const auto parentImageLower = ToLowerCopy(SafeCopy(request.parentImage));
   const auto commandLineLower = ToLowerCopy(SafeCopy(request.commandLine));
+  const auto originContext =
+      BuildContentOriginContext(path, SafeCopy(request.processImage), SafeCopy(request.parentImage),
+                                SafeCopy(request.commandLine), CurrentUtcTimestamp());
+
+  if (const auto allowOverride = BuildAllowOverrideFinding(path, policy, excludedPaths); allowOverride.has_value()) {
+    auto finding = *allowOverride;
+    finding.originContext = originContext;
+    return finding;
+  }
 
   ScanFinding finding{
       .path = path,
@@ -1330,7 +1336,8 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
       .quarantinedPath = {},
       .quarantineRecordId = {},
       .evidenceRecordId = {},
-      .remediationError = {}};
+      .remediationError = {},
+      .originContext = originContext};
 
   std::error_code error;
   if (std::filesystem::exists(path, error)) {
@@ -1344,7 +1351,7 @@ ScanFinding BuildRealtimeFinding(const std::filesystem::path& path, const Realti
             {L"HASH_UNAVAILABLE", L"SHA-256 computation failed during real-time evaluation."});
       }
 
-      if (const auto analyzedFinding = ScanFile(path, policy, excludedPaths); analyzedFinding.has_value()) {
+      if (const auto analyzedFinding = ScanFile(path, policy, excludedPaths, originContext); analyzedFinding.has_value()) {
         auto promoted = *analyzedFinding;
         if (promoted.verdict.disposition == VerdictDisposition::Block &&
             operation == ANTIVIRUS_REALTIME_FILE_OPERATION_EXECUTE) {
@@ -1539,7 +1546,14 @@ TelemetryRecord BuildRealtimeProtectionTelemetry(const ScanFinding& finding, con
   payload += Utf8ToWide(EscapeJsonString(SafeCopy(request.userSid)));
   payload += L"\",\"contextEnriched\":";
   payload += contextEnriched ? L"true" : L"false";
-  payload += L",\"reasonCodes\":[";
+  payload += L",\"alertTitle\":\"";
+  payload += Utf8ToWide(EscapeJsonString(finding.alertTitle));
+  payload += L"\",\"contextType\":\"";
+  payload += Utf8ToWide(EscapeJsonString(finding.originContext.channel));
+  payload += L"\",\"originReference\":\"";
+  payload += Utf8ToWide(EscapeJsonString(
+      !finding.originContext.sourceDomain.empty() ? finding.originContext.sourceDomain : finding.originContext.navigationType));
+  payload += L"\",\"reasonCodes\":[";
   for (std::size_t index = 0; index < finding.verdict.reasons.size(); ++index) {
     if (index != 0) {
       payload += L",";
@@ -1632,6 +1646,10 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
   const auto effectiveRequest = EnrichRequestProcessContext(request);
   const auto operation = static_cast<RealtimeFileOperation>(request.operation);
   const std::filesystem::path targetPath(SafeCopy(request.path));
+  const auto observedOrigin =
+      BuildContentOriginContext(targetPath, SafeCopy(effectiveRequest.request.processImage),
+                                SafeCopy(effectiveRequest.request.parentImage),
+                                SafeCopy(effectiveRequest.request.commandLine), CurrentUtcTimestamp());
 
   if (!policy.realtimeProtectionEnabled) {
     return RealtimeInspectionOutcome{
@@ -1647,6 +1665,23 @@ RealtimeInspectionOutcome RealtimeProtectionBroker::InspectFile(const RealtimeFi
                         .tacticId = L"",
                         .techniqueId = L"",
                         .reasons = {{L"REALTIME_DISABLED", L"Real-time protection is disabled by policy."}}}}};
+  }
+
+  if (!targetPath.empty() &&
+      (observedOrigin.browserOriginated || observedOrigin.attachmentOriginated || observedOrigin.downloadOriginated)) {
+    RuntimeDatabase(config_.runtimeDatabasePath)
+        .UpsertDownloadContextRecord(DownloadContextRecord{
+            .targetPath = targetPath,
+            .observedAt = CurrentUtcTimestamp(),
+            .channel = observedOrigin.channel,
+            .browserFamily = observedOrigin.browserFamily,
+            .sourceApplication = observedOrigin.sourceApplication,
+            .parentApplication = observedOrigin.parentApplication,
+            .sourceDomain = observedOrigin.sourceDomain,
+            .sourceUrl = observedOrigin.sourceUrl,
+            .navigationType = observedOrigin.navigationType,
+            .reputationAtObservation = observedOrigin.browserOriginated ? L"browser-context" : L"email-context",
+            .contextJson = SerializeContentOriginContext(observedOrigin)});
   }
 
   auto finding =

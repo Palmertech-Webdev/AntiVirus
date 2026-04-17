@@ -61,6 +61,9 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
   output << "  \"quarantineRecordId\": \"" << EscapeJsonString(finding.quarantineRecordId) << "\",\n";
   output << "  \"quarantinedPath\": \"" << EscapeJsonString(finding.quarantinedPath.wstring()) << "\",\n";
   output << "  \"remediationError\": \"" << EscapeJsonString(finding.remediationError) << "\",\n";
+  output << "  \"alertTitle\": \"" << EscapeJsonString(finding.alertTitle) << "\",\n";
+  output << "  \"alertSummary\": \"" << EscapeJsonString(finding.alertSummary) << "\",\n";
+  output << "  \"originContext\": " << WideToUtf8(SerializeContentOriginContext(finding.originContext)) << ",\n";
   output << "  \"reasons\": [\n";
   for (std::size_t index = 0; index < finding.verdict.reasons.size(); ++index) {
     const auto& reason = finding.verdict.reasons[index];
@@ -91,7 +94,13 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
       .tacticId = finding.verdict.tacticId,
       .techniqueId = finding.verdict.techniqueId,
       .appName = L"",
-      .contentName = L""});
+      .contentName = L"",
+      .alertTitle = finding.alertTitle,
+      .contextType = finding.originContext.channel,
+      .sourceApplication = finding.originContext.sourceApplication,
+      .originReference = !finding.originContext.sourceDomain.empty() ? finding.originContext.sourceDomain
+                                                                     : finding.originContext.navigationType,
+      .contextJson = SerializeContentOriginContext(finding.originContext)});
   RuntimeDatabase(databasePath_).RecordScanHistory(ScanHistoryRecord{
       .recordedAt = CurrentUtcTimestamp(),
       .source = source,
@@ -105,7 +114,13 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
       .techniqueId = finding.verdict.techniqueId,
       .remediationStatus = RemediationStatusToString(finding.remediationStatus),
       .evidenceRecordId = result.recordId,
-      .quarantineRecordId = finding.quarantineRecordId});
+      .quarantineRecordId = finding.quarantineRecordId,
+      .alertTitle = finding.alertTitle,
+      .contextType = finding.originContext.channel,
+      .sourceApplication = finding.originContext.sourceApplication,
+      .originReference = !finding.originContext.sourceDomain.empty() ? finding.originContext.sourceDomain
+                                                                     : finding.originContext.navigationType,
+      .contextJson = SerializeContentOriginContext(finding.originContext)});
 
   return result;
 }

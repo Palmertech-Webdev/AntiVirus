@@ -36,6 +36,11 @@ struct EvidenceIndexRecord {
   std::wstring techniqueId;
   std::wstring appName;
   std::wstring contentName;
+  std::wstring alertTitle;
+  std::wstring contextType;
+  std::wstring sourceApplication;
+  std::wstring originReference;
+  std::wstring contextJson;
 };
 
 struct ScanHistoryRecord {
@@ -52,6 +57,25 @@ struct ScanHistoryRecord {
   std::wstring remediationStatus;
   std::wstring evidenceRecordId;
   std::wstring quarantineRecordId;
+  std::wstring alertTitle;
+  std::wstring contextType;
+  std::wstring sourceApplication;
+  std::wstring originReference;
+  std::wstring contextJson;
+};
+
+struct DownloadContextRecord {
+  std::filesystem::path targetPath;
+  std::wstring observedAt;
+  std::wstring channel;
+  std::wstring browserFamily;
+  std::wstring sourceApplication;
+  std::wstring parentApplication;
+  std::wstring sourceDomain;
+  std::wstring sourceUrl;
+  std::wstring navigationType;
+  std::wstring reputationAtObservation;
+  std::wstring contextJson;
 };
 
 struct UpdateJournalRecord {
@@ -185,6 +209,8 @@ class RuntimeDatabase {
   std::vector<EvidenceIndexRecord> ListEvidenceRecords(std::size_t limit = 100) const;
   void RecordScanHistory(const ScanHistoryRecord& record) const;
   std::vector<ScanHistoryRecord> ListScanHistory(std::size_t limit = 100) const;
+  void UpsertDownloadContextRecord(const DownloadContextRecord& record) const;
+  bool TryGetDownloadContextRecord(const std::filesystem::path& targetPath, DownloadContextRecord& record) const;
 
   void UpsertUpdateJournal(const UpdateJournalRecord& record) const;
   bool LoadUpdateJournal(const std::wstring& transactionId, UpdateJournalRecord& record) const;

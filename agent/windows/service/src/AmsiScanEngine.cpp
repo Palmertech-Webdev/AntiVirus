@@ -533,7 +533,7 @@ AmsiInspectionOutcome InspectAmsiContent(const AmsiContentRequest& request, cons
   int score = 0;
   for (const auto& hit : hits) {
     score += hit.score;
-    outcome.finding.verdict.reasons.push_back({hit.code, hit.message});
+    outcome.finding.verdict.reasons.push_back(VerdictReason{hit.code, hit.message});
   }
 
   if (score < 55) {

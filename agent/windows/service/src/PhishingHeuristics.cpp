@@ -1,5 +1,6 @@
 #include "PhishingHeuristics.h"
 
+#include <Windows.h>
 #include <winhttp.h>
 
 #include <algorithm>

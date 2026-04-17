@@ -147,6 +147,20 @@ std::wstring DestinationReasonCodeToString(const DestinationReasonCode value) {
       return L"browser_delivered_navigation";
     case DestinationReasonCode::AttachmentDeliveredLink:
       return L"attachment_delivered_link";
+    case DestinationReasonCode::RedirectDrivenNavigation:
+      return L"redirect_driven_navigation";
+    case DestinationReasonCode::BrowserDownloadInitiation:
+      return L"browser_download_initiation";
+    case DestinationReasonCode::BrowserLaunchedFile:
+      return L"browser_launched_file";
+    case DestinationReasonCode::BrowserExtensionHost:
+      return L"browser_extension_host";
+    case DestinationReasonCode::AbusiveNotificationPrompt:
+      return L"abusive_notification_prompt";
+    case DestinationReasonCode::SuspiciousBrowserChildProcess:
+      return L"suspicious_browser_child_process";
+    case DestinationReasonCode::FakeUpdatePattern:
+      return L"fake_update_pattern";
     case DestinationReasonCode::LocalPolicyAllow:
       return L"local_policy_allow";
     case DestinationReasonCode::LocalPolicyWarn:
@@ -217,6 +231,27 @@ DestinationReasonCode DestinationReasonCodeFromString(std::wstring value) {
   }
   if (value == L"attachment_delivered_link") {
     return DestinationReasonCode::AttachmentDeliveredLink;
+  }
+  if (value == L"redirect_driven_navigation") {
+    return DestinationReasonCode::RedirectDrivenNavigation;
+  }
+  if (value == L"browser_download_initiation") {
+    return DestinationReasonCode::BrowserDownloadInitiation;
+  }
+  if (value == L"browser_launched_file") {
+    return DestinationReasonCode::BrowserLaunchedFile;
+  }
+  if (value == L"browser_extension_host") {
+    return DestinationReasonCode::BrowserExtensionHost;
+  }
+  if (value == L"abusive_notification_prompt") {
+    return DestinationReasonCode::AbusiveNotificationPrompt;
+  }
+  if (value == L"suspicious_browser_child_process") {
+    return DestinationReasonCode::SuspiciousBrowserChildProcess;
+  }
+  if (value == L"fake_update_pattern") {
+    return DestinationReasonCode::FakeUpdatePattern;
   }
   if (value == L"local_policy_allow") {
     return DestinationReasonCode::LocalPolicyAllow;
@@ -306,9 +341,18 @@ std::wstring BuildDestinationSummary(const DestinationVerdict& verdict) {
 
   switch (verdict.action) {
     case DestinationAction::Block:
-      return L"Blocked risky destination: " + subject;
+      if (verdict.category == DestinationThreatCategory::Phishing) {
+        return L"Dangerous website blocked: " + subject;
+      }
+      if (verdict.category == DestinationThreatCategory::Scam) {
+        return L"Scam-style destination blocked: " + subject;
+      }
+      return L"Dangerous website blocked: " + subject;
     case DestinationAction::Warn:
-      return L"Suspicious destination warning: " + subject;
+      if (verdict.category == DestinationThreatCategory::Phishing) {
+        return L"Possible phishing page: " + subject;
+      }
+      return L"Suspicious website warning: " + subject;
     case DestinationAction::DegradedAllow:
       return L"Allowed destination in degraded mode: " + subject;
     case DestinationAction::Allow:
@@ -382,8 +426,18 @@ std::wstring SerializeDestinationVerdictJson(const DestinationVerdict& verdict,
          << L"\"browserInitiated\":" << (context.browserInitiated ? L"true" : L"false") << L"," 
          << L"\"emailOriginated\":" << (context.emailOriginated ? L"true" : L"false") << L"," 
          << L"\"attachmentOriginated\":" << (context.attachmentOriginated ? L"true" : L"false") << L"," 
+         << L"\"redirectNavigation\":" << (context.redirectNavigation ? L"true" : L"false") << L"," 
+         << L"\"downloadInitiated\":" << (context.downloadInitiated ? L"true" : L"false") << L"," 
+         << L"\"browserLaunchedFile\":" << (context.browserLaunchedFile ? L"true" : L"false") << L"," 
+         << L"\"browserExtensionHost\":" << (context.browserExtensionHost ? L"true" : L"false") << L"," 
+         << L"\"abusivePermissionPrompt\":" << (context.abusivePermissionPrompt ? L"true" : L"false") << L"," 
+         << L"\"suspiciousBrowserChildProcess\":" << (context.suspiciousBrowserChildProcess ? L"true" : L"false") << L"," 
+         << L"\"fakeUpdatePattern\":" << (context.fakeUpdatePattern ? L"true" : L"false") << L"," 
          << L"\"browserFamily\":\"" << JsonEscape(context.browserFamily) << L"\"," 
          << L"\"deliveryVector\":\"" << JsonEscape(context.deliveryVector) << L"\"," 
+         << L"\"navigationType\":\"" << JsonEscape(context.navigationType) << L"\"," 
+         << L"\"sourceDomain\":\"" << JsonEscape(context.sourceDomain) << L"\"," 
+         << L"\"sourceUrl\":\"" << JsonEscape(context.sourceUrl) << L"\"," 
          << L"\"sourceApplication\":\"" << JsonEscape(context.sourceApplication) << L"\""
          << L"}";
   return stream.str();

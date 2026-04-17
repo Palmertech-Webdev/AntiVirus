@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 
+#include "ContextAwareness.h"
 #include "PolicySnapshot.h"
 #include "ScanVerdict.h"
 #include "TelemetryRecord.h"
@@ -33,6 +34,9 @@ struct ScanFinding {
   std::wstring quarantineRecordId;
   std::wstring evidenceRecordId;
   std::wstring remediationError;
+  std::wstring alertTitle;
+  std::wstring alertSummary;
+  ContentOriginContext originContext;
 };
 
 struct ScanProgressUpdate {
@@ -47,6 +51,9 @@ using ScanProgressCallback = std::function<void(const ScanProgressUpdate&)>;
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy);
 std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
                                     const std::vector<std::filesystem::path>& excludedPaths);
+std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const PolicySnapshot& policy,
+                                    const std::vector<std::filesystem::path>& excludedPaths,
+                                    const ContentOriginContext& originContext);
 std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy);
 std::optional<ScanFinding> BuildAllowOverrideFinding(const std::filesystem::path& path, const PolicySnapshot& policy,
                                                      const std::vector<std::filesystem::path>& excludedPaths);

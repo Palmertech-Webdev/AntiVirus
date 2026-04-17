@@ -69,6 +69,7 @@ add_library(antivirus-agent-core STATIC
   src/AgentService.cpp
   src/CommandJournalStore.cpp
   src/ControlPlaneClient.cpp
+  src/ContextAwareness.cpp
   src/CryptoUtils.cpp
   src/DestinationEnforcementBridge.cpp
   src/DestinationEventRecorder.cpp

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -19,7 +20,7 @@ using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
 using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
 
 constexpr int kSingletonKey = 1;
-constexpr int kRuntimeDatabaseSchemaVersion = 7;
+constexpr int kRuntimeDatabaseSchemaVersion = 8;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -130,14 +131,24 @@ void EnsureBaseSchema(sqlite3* db) {
        "CREATE TABLE IF NOT EXISTS evidence_index ("
        " record_id TEXT PRIMARY KEY, recorded_at TEXT, source TEXT NOT NULL,"
        " record_path TEXT NOT NULL, subject_path TEXT, sha256 TEXT, disposition TEXT,"
-       " tactic_id TEXT, technique_id TEXT, app_name TEXT, content_name TEXT"
+       " tactic_id TEXT, technique_id TEXT, app_name TEXT, content_name TEXT,"
+       " alert_title TEXT, context_type TEXT, source_application TEXT, origin_reference TEXT,"
+       " context_json TEXT"
        ");"
        "CREATE TABLE IF NOT EXISTS scan_history ("
        " scan_id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at TEXT NOT NULL,"
        " source TEXT NOT NULL, subject_path TEXT, sha256 TEXT, content_type TEXT,"
        " reputation TEXT, disposition TEXT NOT NULL, confidence INTEGER NOT NULL,"
        " tactic_id TEXT, technique_id TEXT, remediation_status TEXT,"
-       " evidence_record_id TEXT, quarantine_record_id TEXT"
+       " evidence_record_id TEXT, quarantine_record_id TEXT,"
+       " alert_title TEXT, context_type TEXT, source_application TEXT, origin_reference TEXT,"
+       " context_json TEXT"
+       ");"
+       "CREATE TABLE IF NOT EXISTS download_context ("
+       " path_key TEXT PRIMARY KEY, target_path TEXT NOT NULL, observed_at TEXT NOT NULL,"
+       " channel TEXT, browser_family TEXT, source_application TEXT, parent_application TEXT,"
+       " source_domain TEXT, source_url TEXT, navigation_type TEXT,"
+       " reputation_at_observation TEXT, context_json TEXT"
        ");"
        "CREATE TABLE IF NOT EXISTS update_journal ("
        " transaction_id TEXT PRIMARY KEY, package_id TEXT NOT NULL, package_type TEXT NOT NULL,"
@@ -300,7 +311,8 @@ void EnsureBaseSchema(sqlite3* db) {
        "CREATE INDEX IF NOT EXISTS idx_exclusion_policy_state ON exclusion_policy(state, expires_at);"
       "CREATE INDEX IF NOT EXISTS idx_quarantine_approvals_decision ON quarantine_approvals(decision, requested_at DESC);"
       "CREATE INDEX IF NOT EXISTS idx_local_admin_baseline_group ON local_admin_baseline(baseline_id, captured_at DESC);"
-      "CREATE INDEX IF NOT EXISTS idx_local_admin_baseline_sid ON local_admin_baseline(sid, baseline_id);");
+      "CREATE INDEX IF NOT EXISTS idx_local_admin_baseline_sid ON local_admin_baseline(sid, baseline_id);"
+      "CREATE INDEX IF NOT EXISTS idx_download_context_observed_at ON download_context(observed_at DESC);");
 }
 
 void RunSchemaMigrations(sqlite3* db) {
@@ -378,6 +390,20 @@ void RunSchemaMigrations(sqlite3* db) {
       EnsureBaseSchema(db);
     }
 
+    if (currentVersion < 8) {
+      EnsureBaseSchema(db);
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE evidence_index ADD COLUMN alert_title TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE evidence_index ADD COLUMN context_type TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE evidence_index ADD COLUMN source_application TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE evidence_index ADD COLUMN origin_reference TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE evidence_index ADD COLUMN context_json TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE scan_history ADD COLUMN alert_title TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE scan_history ADD COLUMN context_type TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE scan_history ADD COLUMN source_application TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE scan_history ADD COLUMN origin_reference TEXT;");
+      ExecIgnoreDuplicateColumn(db, "ALTER TABLE scan_history ADD COLUMN context_json TEXT;");
+    }
+
     SetUserVersion(db, kRuntimeDatabaseSchemaVersion);
     Commit(db);
   } catch (...) {
@@ -390,6 +416,24 @@ std::string ToLowerAsciiCopy(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   return value;
+}
+
+std::wstring NormalizePathKey(const std::filesystem::path& path) {
+  if (path.empty()) {
+    return {};
+  }
+
+  std::error_code error;
+  auto absolute = std::filesystem::absolute(path, error);
+  if (error) {
+    absolute = path;
+  }
+
+  auto normalized = absolute.lexically_normal().wstring();
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](const wchar_t ch) {
+    return ch == L'/' ? L'\\' : static_cast<wchar_t>(std::towlower(ch));
+  });
+  return normalized;
 }
 
 bool IsLikelyCorruptionError(const std::string& errorMessage) {
@@ -917,13 +961,17 @@ void RuntimeDatabase::UpsertEvidenceRecord(const EvidenceIndexRecord& record) co
   auto statement = Prepare(db.get(),
                            "INSERT INTO evidence_index("
                            " record_id, recorded_at, source, record_path, subject_path, sha256, disposition,"
-                           " tactic_id, technique_id, app_name, content_name)"
-                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           " tactic_id, technique_id, app_name, content_name, alert_title, context_type,"
+                           " source_application, origin_reference, context_json)"
+                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                            " ON CONFLICT(record_id) DO UPDATE SET"
                            " recorded_at=excluded.recorded_at, source=excluded.source, record_path=excluded.record_path,"
                            " subject_path=excluded.subject_path, sha256=excluded.sha256, disposition=excluded.disposition,"
                            " tactic_id=excluded.tactic_id, technique_id=excluded.technique_id,"
-                           " app_name=excluded.app_name, content_name=excluded.content_name;");
+                           " app_name=excluded.app_name, content_name=excluded.content_name,"
+                           " alert_title=excluded.alert_title, context_type=excluded.context_type,"
+                           " source_application=excluded.source_application,"
+                           " origin_reference=excluded.origin_reference, context_json=excluded.context_json;");
   BindText(statement.get(), 1, record.recordId);
   BindText(statement.get(), 2, record.recordedAt);
   BindText(statement.get(), 3, record.source);
@@ -935,6 +983,11 @@ void RuntimeDatabase::UpsertEvidenceRecord(const EvidenceIndexRecord& record) co
   BindText(statement.get(), 9, record.techniqueId);
   BindText(statement.get(), 10, record.appName);
   BindText(statement.get(), 11, record.contentName);
+  BindText(statement.get(), 12, record.alertTitle);
+  BindText(statement.get(), 13, record.contextType);
+  BindText(statement.get(), 14, record.sourceApplication);
+  BindText(statement.get(), 15, record.originReference);
+  BindText(statement.get(), 16, record.contextJson);
   StepDone(db.get(), statement.get());
 }
 
@@ -942,7 +995,8 @@ std::vector<EvidenceIndexRecord> RuntimeDatabase::ListEvidenceRecords(const std:
   const auto db = OpenConnection(databasePath_);
   auto statement = Prepare(db.get(),
                            "SELECT record_id, recorded_at, source, record_path, subject_path, sha256, disposition,"
-                           " tactic_id, technique_id, app_name, content_name FROM evidence_index"
+                           " tactic_id, technique_id, app_name, content_name, alert_title, context_type,"
+                           " source_application, origin_reference, context_json FROM evidence_index"
                            " ORDER BY recorded_at DESC, record_id DESC LIMIT ?;");
   sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
 
@@ -967,7 +1021,12 @@ std::vector<EvidenceIndexRecord> RuntimeDatabase::ListEvidenceRecords(const std:
         .tacticId = ColumnText(statement.get(), 7),
         .techniqueId = ColumnText(statement.get(), 8),
         .appName = ColumnText(statement.get(), 9),
-        .contentName = ColumnText(statement.get(), 10)});
+        .contentName = ColumnText(statement.get(), 10),
+        .alertTitle = ColumnText(statement.get(), 11),
+        .contextType = ColumnText(statement.get(), 12),
+        .sourceApplication = ColumnText(statement.get(), 13),
+        .originReference = ColumnText(statement.get(), 14),
+        .contextJson = ColumnText(statement.get(), 15)});
   }
 
   return records;
@@ -978,8 +1037,10 @@ void RuntimeDatabase::RecordScanHistory(const ScanHistoryRecord& record) const {
   auto statement = Prepare(db.get(),
                            "INSERT INTO scan_history("
                            " recorded_at, source, subject_path, sha256, content_type, reputation, disposition,"
-                           " confidence, tactic_id, technique_id, remediation_status, evidence_record_id, quarantine_record_id)"
-                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+                           " confidence, tactic_id, technique_id, remediation_status, evidence_record_id,"
+                           " quarantine_record_id, alert_title, context_type, source_application,"
+                           " origin_reference, context_json)"
+                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
   BindText(statement.get(), 1, record.recordedAt);
   BindText(statement.get(), 2, record.source);
   BindPath(statement.get(), 3, record.subjectPath);
@@ -993,6 +1054,11 @@ void RuntimeDatabase::RecordScanHistory(const ScanHistoryRecord& record) const {
   BindText(statement.get(), 11, record.remediationStatus);
   BindText(statement.get(), 12, record.evidenceRecordId);
   BindText(statement.get(), 13, record.quarantineRecordId);
+  BindText(statement.get(), 14, record.alertTitle);
+  BindText(statement.get(), 15, record.contextType);
+  BindText(statement.get(), 16, record.sourceApplication);
+  BindText(statement.get(), 17, record.originReference);
+  BindText(statement.get(), 18, record.contextJson);
   StepDone(db.get(), statement.get());
 }
 
@@ -1001,7 +1067,8 @@ std::vector<ScanHistoryRecord> RuntimeDatabase::ListScanHistory(const std::size_
   auto statement = Prepare(db.get(),
                            "SELECT recorded_at, source, subject_path, sha256, content_type, reputation,"
                            " disposition, confidence, tactic_id, technique_id, remediation_status,"
-                           " evidence_record_id, quarantine_record_id FROM scan_history"
+                           " evidence_record_id, quarantine_record_id, alert_title, context_type,"
+                           " source_application, origin_reference, context_json FROM scan_history"
                            " ORDER BY recorded_at DESC, scan_id DESC LIMIT ?;");
   sqlite3_bind_int64(statement.get(), 1, static_cast<sqlite3_int64>(limit));
 
@@ -1028,10 +1095,78 @@ std::vector<ScanHistoryRecord> RuntimeDatabase::ListScanHistory(const std::size_
         .techniqueId = ColumnText(statement.get(), 9),
         .remediationStatus = ColumnText(statement.get(), 10),
         .evidenceRecordId = ColumnText(statement.get(), 11),
-        .quarantineRecordId = ColumnText(statement.get(), 12)});
+        .quarantineRecordId = ColumnText(statement.get(), 12),
+        .alertTitle = ColumnText(statement.get(), 13),
+        .contextType = ColumnText(statement.get(), 14),
+        .sourceApplication = ColumnText(statement.get(), 15),
+        .originReference = ColumnText(statement.get(), 16),
+        .contextJson = ColumnText(statement.get(), 17)});
   }
 
   return records;
+}
+
+void RuntimeDatabase::UpsertDownloadContextRecord(const DownloadContextRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "INSERT INTO download_context("
+                           " path_key, target_path, observed_at, channel, browser_family, source_application,"
+                           " parent_application, source_domain, source_url, navigation_type,"
+                           " reputation_at_observation, context_json)"
+                           " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           " ON CONFLICT(path_key) DO UPDATE SET"
+                           " target_path=excluded.target_path, observed_at=excluded.observed_at,"
+                           " channel=excluded.channel, browser_family=excluded.browser_family,"
+                           " source_application=excluded.source_application,"
+                           " parent_application=excluded.parent_application, source_domain=excluded.source_domain,"
+                           " source_url=excluded.source_url, navigation_type=excluded.navigation_type,"
+                           " reputation_at_observation=excluded.reputation_at_observation,"
+                           " context_json=excluded.context_json;");
+  BindText(statement.get(), 1, NormalizePathKey(record.targetPath));
+  BindPath(statement.get(), 2, record.targetPath);
+  BindText(statement.get(), 3, record.observedAt);
+  BindText(statement.get(), 4, record.channel);
+  BindText(statement.get(), 5, record.browserFamily);
+  BindText(statement.get(), 6, record.sourceApplication);
+  BindText(statement.get(), 7, record.parentApplication);
+  BindText(statement.get(), 8, record.sourceDomain);
+  BindText(statement.get(), 9, record.sourceUrl);
+  BindText(statement.get(), 10, record.navigationType);
+  BindText(statement.get(), 11, record.reputationAtObservation);
+  BindText(statement.get(), 12, record.contextJson);
+  StepDone(db.get(), statement.get());
+}
+
+bool RuntimeDatabase::TryGetDownloadContextRecord(const std::filesystem::path& targetPath,
+                                                  DownloadContextRecord& record) const {
+  const auto db = OpenConnection(databasePath_);
+  auto statement = Prepare(db.get(),
+                           "SELECT target_path, observed_at, channel, browser_family, source_application,"
+                           " parent_application, source_domain, source_url, navigation_type,"
+                           " reputation_at_observation, context_json"
+                           " FROM download_context WHERE path_key=?;");
+  BindText(statement.get(), 1, NormalizePathKey(targetPath));
+
+  const auto step = sqlite3_step(statement.get());
+  if (step == SQLITE_DONE) {
+    return false;
+  }
+  if (step != SQLITE_ROW) {
+    ThrowSqliteError(db.get(), "loading download context failed");
+  }
+
+  record.targetPath = ColumnText(statement.get(), 0);
+  record.observedAt = ColumnText(statement.get(), 1);
+  record.channel = ColumnText(statement.get(), 2);
+  record.browserFamily = ColumnText(statement.get(), 3);
+  record.sourceApplication = ColumnText(statement.get(), 4);
+  record.parentApplication = ColumnText(statement.get(), 5);
+  record.sourceDomain = ColumnText(statement.get(), 6);
+  record.sourceUrl = ColumnText(statement.get(), 7);
+  record.navigationType = ColumnText(statement.get(), 8);
+  record.reputationAtObservation = ColumnText(statement.get(), 9);
+  record.contextJson = ColumnText(statement.get(), 10);
+  return true;
 }
 
 void RuntimeDatabase::UpsertUpdateJournal(const UpdateJournalRecord& record) const {

@@ -20,6 +20,7 @@
 #include "../../../sensor/wfp/include/NetworkIsolationManager.h"
 #include "AgentConfig.h"
 #include "AmsiScanEngine.h"
+#include "ContextAwareness.h"
 #include "CryptoUtils.h"
 #include "EndpointClient.h"
 #include "HardeningManager.h"
@@ -3626,6 +3627,42 @@ SelfTestReport RunSelfTest(const AgentConfig& config, const std::filesystem::pat
                          L"ANTIVIRUS_PHASE1_CLEANWARE_CORPUS_PATH", L"cleanware");
   runOptionalCorpusCheck(L"phase1_uk_business_software_corpus", L"Phase 1 UK business software corpus",
                          L"ANTIVIRUS_PHASE1_UK_BUSINESS_CORPUS_PATH", L"UK business software");
+
+  const auto simulatedBrowserOrigin =
+      BuildContentOriginContext(std::filesystem::path(L"C:\\Users\\Public\\Downloads\\Chrome_Update.exe"),
+                                L"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", {},
+                                L"https://support-update-example.test/redirect?continue=https://support-update-example.test",
+                                CurrentUtcTimestamp());
+  const auto browserSignals =
+      CollectContentOriginSignals(simulatedBrowserOrigin,
+                                  std::filesystem::path(L"C:\\Users\\Public\\Downloads\\Chrome_Update.exe"));
+  AddCheck(report, L"browser_context_awareness", L"Browser-aware protection context",
+           simulatedBrowserOrigin.browserOriginated && simulatedBrowserOrigin.downloadOriginated &&
+                   simulatedBrowserOrigin.fakeUpdatePattern && !browserSignals.empty()
+               ? SelfTestStatus::Pass
+               : SelfTestStatus::Fail,
+           simulatedBrowserOrigin.browserOriginated
+               ? L"Browser context classified family " + simulatedBrowserOrigin.browserFamily +
+                     L" with navigation " + simulatedBrowserOrigin.navigationType + L"."
+               : L"Browser-origin download classification did not activate as expected.",
+           L"Verify browser lineage, download tagging, and fake-update heuristics.");
+
+  const auto simulatedEmailOrigin =
+      BuildContentOriginContext(std::filesystem::path(L"C:\\Users\\Public\\Downloads\\Invoice_Reset_Password.zip"),
+                                L"C:\\Program Files\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE", {}, L"",
+                                CurrentUtcTimestamp());
+  const auto emailSignals =
+      CollectContentOriginSignals(simulatedEmailOrigin,
+                                  std::filesystem::path(L"C:\\Users\\Public\\Downloads\\Invoice_Reset_Password.zip"));
+  AddCheck(report, L"email_context_awareness", L"Email-aware protection context",
+           simulatedEmailOrigin.attachmentOriginated && simulatedEmailOrigin.suspiciousLureName &&
+                   simulatedEmailOrigin.passwordProtectedArchivePattern && !emailSignals.empty()
+               ? SelfTestStatus::Pass
+               : SelfTestStatus::Fail,
+           simulatedEmailOrigin.attachmentOriginated
+               ? L"Email attachment context classification and lure scoring activated."
+               : L"Email-origin attachment classification did not activate as expected.",
+           L"Validate mail-client lineage and archive-lure scoring inputs.");
 
   const auto hardeningManager = HardeningManager(config, installRoot);
   const auto hardeningStatus = hardeningManager.QueryStatus();

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "EvidenceRecorder.h"
+#include "ContextAwareness.h"
 #include "CryptoUtils.h"
 #include "DestinationEventRecorder.h"
 #include "DestinationRuntimeStore.h"
@@ -392,7 +393,45 @@ std::wstring BuildClassifiedLocalAdminMembersJson(const std::vector<ClassifiedLo
   return result;
 }
 
-/* ... existing unchanged content omitted here intentionally in this generated replacement ... */
+void EnforceTelemetryQueueBudget(std::vector<TelemetryRecord>* pendingTelemetry) {
+  if (pendingTelemetry == nullptr) {
+    return;
+  }
+
+  constexpr std::size_t kMaxQueuedTelemetry = 5000;
+  if (pendingTelemetry->size() <= kMaxQueuedTelemetry) {
+    return;
+  }
+
+  pendingTelemetry->erase(pendingTelemetry->begin(),
+                          pendingTelemetry->begin() + (pendingTelemetry->size() - kMaxQueuedTelemetry));
+}
+
+std::optional<EventEnvelope> BuildBehaviorEventFromNetworkTelemetry(const TelemetryRecord& record,
+                                                                    const std::wstring& deviceId) {
+  const auto targetPath = ExtractPayloadString(record.payloadJson, "path").value_or(L"");
+  const auto processImagePath = ExtractPayloadString(record.payloadJson, "processImagePath").value_or(L"");
+  const auto remoteAddress = ExtractPayloadString(record.payloadJson, "remoteAddress").value_or(L"");
+  if (remoteAddress.empty() && processImagePath.empty() && targetPath.empty()) {
+    return std::nullopt;
+  }
+
+  return EventEnvelope{
+      .kind = EventKind::NetworkConnect,
+      .deviceId = deviceId,
+      .correlationId = GenerateGuidString(),
+      .targetPath = remoteAddress,
+      .sha256 = {},
+      .process = ProcessContext{
+          .imagePath = processImagePath,
+          .commandLine = ExtractPayloadString(record.payloadJson, "commandLine").value_or(L""),
+          .parentImagePath = ExtractPayloadString(record.payloadJson, "parentProcessImagePath").value_or(L""),
+          .userSid = ExtractPayloadString(record.payloadJson, "userSid").value_or(L""),
+          .signer = {}},
+      .occurredAt = std::chrono::system_clock::now()};
+}
+
+}  // namespace
 
 void AgentService::DrainNetworkTelemetry() {
   if (!networkIsolationManager_) {
@@ -430,7 +469,11 @@ void AgentService::DrainNetworkTelemetry() {
       processImagePath = ExtractPayloadString(record.payloadJson, "appId").value_or(L"");
     }
 
-    const auto processImageLower = ToLowerCopy(processImagePath);
+    const auto parentImagePath = ExtractPayloadString(record.payloadJson, "parentProcessImagePath").value_or(L"");
+    const auto browserOrigin =
+        BuildContentOriginContext(std::filesystem::path(remoteAddress), processImagePath, parentImagePath,
+                                  ExtractPayloadString(record.payloadJson, "commandLine").value_or(L""),
+                                  record.occurredAt);
 
     DestinationContext context{};
     context.indicatorType = ThreatIndicatorType::Ip;
@@ -442,19 +485,24 @@ void AgentService::DrainNetworkTelemetry() {
     }
     context.source = record.source.empty() ? L"network-wfp" : record.source;
     context.sourceApplication = processImagePath;
-    context.parentApplication = ExtractPayloadString(record.payloadJson, "parentProcessImagePath").value_or(L"");
+    context.parentApplication = parentImagePath;
     context.userName = ExtractPayloadString(record.payloadJson, "userSid").value_or(L"");
-    context.browserFamily = processImageLower.find(L"chrome.exe") != std::wstring::npos
-                                ? L"chrome"
-                                : (processImageLower.find(L"msedge.exe") != std::wstring::npos
-                                       ? L"edge"
-                                       : (processImageLower.find(L"firefox.exe") != std::wstring::npos ? L"firefox" : L""));
+    context.browserFamily = browserOrigin.browserFamily;
     context.deliveryVector = record.eventType;
+    context.navigationType = browserOrigin.navigationType;
+    context.sourceDomain = browserOrigin.sourceDomain;
+    context.sourceUrl = browserOrigin.sourceUrl;
     context.observedAt = record.occurredAt;
-    context.browserInitiated = !context.browserFamily.empty();
-    context.emailOriginated = processImageLower.find(L"outlook.exe") != std::wstring::npos ||
-                              processImageLower.find(L"thunderbird.exe") != std::wstring::npos;
-    context.attachmentOriginated = false;
+    context.browserInitiated = browserOrigin.browserOriginated;
+    context.emailOriginated = browserOrigin.emailOriginated;
+    context.attachmentOriginated = browserOrigin.attachmentOriginated;
+    context.redirectNavigation = browserOrigin.navigationType == L"redirect_navigation";
+    context.downloadInitiated = browserOrigin.downloadOriginated;
+    context.browserLaunchedFile = browserOrigin.browserLaunchedFile;
+    context.browserExtensionHost = browserOrigin.browserExtensionHost;
+    context.abusivePermissionPrompt = browserOrigin.abusivePermissionPrompt;
+    context.suspiciousBrowserChildProcess = browserOrigin.suspiciousChildProcess;
+    context.fakeUpdatePattern = browserOrigin.fakeUpdatePattern;
     context.offlineMode = lastControlPlaneSyncFailed_;
 
     const auto verdict = verdictEngine.Evaluate(context, destinationPolicy);

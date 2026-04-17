@@ -1,6 +1,7 @@
 #include "DestinationEventRecorder.h"
 
 #include <chrono>
+#include <cwctype>
 #include <sstream>
 
 #include "DestinationProtection.h"
@@ -78,6 +79,27 @@ std::wstring BuildReasonSummary(const std::vector<DestinationReasonCode>& reason
       case DestinationReasonCode::AttachmentDeliveredLink:
         phrases.push_back(L"attachment-delivered link");
         break;
+      case DestinationReasonCode::RedirectDrivenNavigation:
+        phrases.push_back(L"redirect-driven navigation");
+        break;
+      case DestinationReasonCode::BrowserDownloadInitiation:
+        phrases.push_back(L"download started from a browser");
+        break;
+      case DestinationReasonCode::BrowserLaunchedFile:
+        phrases.push_back(L"browser-launched file");
+        break;
+      case DestinationReasonCode::BrowserExtensionHost:
+        phrases.push_back(L"browser extension host");
+        break;
+      case DestinationReasonCode::AbusiveNotificationPrompt:
+        phrases.push_back(L"abusive notification or permission prompt");
+        break;
+      case DestinationReasonCode::SuspiciousBrowserChildProcess:
+        phrases.push_back(L"suspicious browser child process");
+        break;
+      case DestinationReasonCode::FakeUpdatePattern:
+        phrases.push_back(L"fake update or fake download pattern");
+        break;
       default:
         break;
     }
@@ -104,12 +126,15 @@ std::wstring BuildPlainLanguageDetail(const DestinationContext& context,
                                            : verdict.host;
   const auto app = context.sourceApplication.empty() ? L"an app on this device"
                                                      : std::filesystem::path(context.sourceApplication).filename().wstring();
+  const auto browserLabel = context.browserFamily.empty() ? app
+                                                          : std::wstring(1, static_cast<wchar_t>(std::towupper(context.browserFamily[0]))) +
+                                                                context.browserFamily.substr(1);
   const auto reasonSummary = BuildReasonSummary(verdict.reasonCodes);
 
   if (verdict.action == DestinationAction::Block) {
-    detail << L"Fenrir blocked " << app << L" from opening " << target << L".";
+    detail << L"Fenrir blocked " << browserLabel << L" from opening " << target << L".";
   } else if (verdict.action == DestinationAction::Warn) {
-    detail << L"Fenrir warned about " << target << L" before " << app << L" continued.";
+    detail << L"Fenrir warned about " << target << L" before " << browserLabel << L" continued.";
   } else if (verdict.action == DestinationAction::DegradedAllow) {
     detail << L"Fenrir allowed " << target << L" in degraded mode while protection data was limited.";
   } else {
@@ -173,6 +198,13 @@ ScanHistoryRecord BuildDestinationScanHistoryRecord(const DestinationContext& co
                              (verdict.action == DestinationAction::Warn ? L"warned" : L"observed");
   record.evidenceRecordId = evidence.evidenceId;
   record.quarantineRecordId.clear();
+  record.alertTitle = verdict.alertTitle.empty() ? BuildDestinationSummary(verdict) : verdict.alertTitle;
+  record.contextType = context.emailOriginated ? L"email" : (context.browserInitiated ? L"browser" : L"destination");
+  record.sourceApplication = context.sourceApplication;
+  record.originReference = !context.sourceDomain.empty() ? context.sourceDomain
+                                                         : (!context.sourceUrl.empty() ? context.sourceUrl
+                                                                                       : context.navigationType);
+  record.contextJson = evidence.metadataJson;
   return record;
 }
 
@@ -213,6 +245,12 @@ std::wstring BuildDestinationTelemetryPayload(const DestinationContext& context,
          L",\"sourceApplication\":\"" + Utf8ToWide(EscapeJsonString(context.sourceApplication)) +
          L"\",\"browserInitiated\":" + (context.browserInitiated ? std::wstring(L"true") : std::wstring(L"false")) +
          L",\"emailOriginated\":" + (context.emailOriginated ? std::wstring(L"true") : std::wstring(L"false")) +
+         L",\"contextType\":\"" + Utf8ToWide(EscapeJsonString(context.emailOriginated ? L"email"
+                                                                                      : (context.browserInitiated ? L"browser"
+                                                                                                                  : L"destination"))) +
+         L"\",\"navigationType\":\"" + Utf8ToWide(EscapeJsonString(context.navigationType)) +
+         L"\",\"sourceDomain\":\"" + Utf8ToWide(EscapeJsonString(context.sourceDomain)) +
+         L"\""
          L",\"reasonCodes\":\"" + Utf8ToWide(EscapeJsonString(JoinDestinationReasonCodes(verdict.reasonCodes))) +
          L"\",\"plainDetail\":\"" + Utf8ToWide(EscapeJsonString(BuildPlainLanguageDetail(context, verdict))) +
          L"\",\"evidenceRecordId\":\"" + Utf8ToWide(EscapeJsonString(evidence.evidenceId)) + L"\"}";
