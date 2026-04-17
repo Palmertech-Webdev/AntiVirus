@@ -104,27 +104,12 @@ bool IsDestinationLikeIndicator(const ThreatIndicatorType indicatorType) {
          indicatorType == ThreatIndicatorType::Ip;
 }
 
-std::vector<std::wstring> BuildRemoteAddressesForEnforcement(const DestinationContext& context,
-                                                             const ReputationLookupResult& result) {
-  std::set<std::wstring> addresses;
+std::vector<std::wstring> BuildRemoteAddressesForEnforcement(const DestinationContext& context) {
+  std::vector<std::wstring> addresses;
   if (context.indicatorType == ThreatIndicatorType::Ip && !context.normalizedIndicator.empty()) {
-    addresses.insert(context.normalizedIndicator);
+    addresses.push_back(context.normalizedIndicator);
   }
-  if (context.indicatorType == ThreatIndicatorType::Domain && !context.host.empty()) {
-    const auto resolved = ResolveHostAddresses(context.host);
-    addresses.insert(resolved.begin(), resolved.end());
-  }
-  if (context.indicatorType == ThreatIndicatorType::Url && !context.canonicalUrl.empty()) {
-    const auto host = ExtractHostFromUrl(context.canonicalUrl);
-    if (host.has_value()) {
-      const auto resolved = ResolveHostAddresses(*host);
-      addresses.insert(resolved.begin(), resolved.end());
-    }
-  }
-  if (addresses.empty() && !result.normalizedIndicator.empty() && result.indicatorType == ThreatIndicatorType::Ip) {
-    addresses.insert(result.normalizedIndicator);
-  }
-  return std::vector<std::wstring>(addresses.begin(), addresses.end());
+  return addresses;
 }
 
 }  // namespace
@@ -170,12 +155,14 @@ ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator
   if (verdict.action == DestinationAction::Block) {
     DestinationEnforcementRequest request{};
     request.displayDestination = verdict.host.empty() ? verdict.indicator : verdict.host;
-    request.remoteAddresses = BuildRemoteAddressesForEnforcement(context, result);
+    request.remoteAddresses = BuildRemoteAddressesForEnforcement(context);
     request.sourceApplication = context.sourceApplication;
     request.summary = verdict.summary.empty() ? BuildDestinationSummary(verdict) : verdict.summary;
     request.reason = verdict.details.empty() ? DestinationThreatCategoryToString(verdict.category) : verdict.details;
-    std::wstring enforcementError;
-    InvokeDestinationEnforcementHandler(request, &enforcementError);
+    if (!request.remoteAddresses.empty()) {
+      std::wstring enforcementError;
+      InvokeDestinationEnforcementHandler(request, &enforcementError);
+    }
   }
 
   return result;
