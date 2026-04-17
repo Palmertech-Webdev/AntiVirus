@@ -221,7 +221,7 @@ if (Test-Path -LiteralPath $fltmcPath) {
   Add-Check -Name "live_interception_path" -Status $status -Details "fltmc.exe was not found; live minifilter load validation could not run."
 }
 
-$scannerCliPath = Resolve-AbsolutePath -InputPath "./agent/windows/out/dev/tools/fenrir-scannercli.exe"
+$scannerCliPath = Resolve-AbsolutePath -InputPath "./windows/out/dev/tools/fenrir-scannercli.exe"
 if (Test-Path -LiteralPath $scannerCliPath) {
   try {
     $probeRoot = Join-Path $workingRootAbsolute "broker-probe"

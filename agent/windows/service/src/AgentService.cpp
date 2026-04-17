@@ -1711,11 +1711,11 @@ void AgentService::EnforceBlockedSoftware() {
       }
 
       RemediationEngine remediationEngine(config_);
-      const auto result = remediationEngine.TerminateProcessByPid(process.processId, true);
+      const auto result = remediationEngine.TerminateProcessByPid(process.pid, true);
       QueueTelemetryEvent(L"software.block.enforced", L"policy-enforcement",
                           L"The endpoint terminated a running process due to a blocked software rule.",
                           std::wstring(L"{\"softwareId\":\"") + Utf8ToWide(EscapeJsonString(rule.softwareId)) +
-                              L"\",\"processId\":" + std::to_wstring(process.processId) + L",\"terminatedCount\":" +
+                              L"\",\"processId\":" + std::to_wstring(process.pid) + L",\"terminatedCount\":" +
                               std::to_wstring(result.processesTerminated) + L"}");
     }
   }
