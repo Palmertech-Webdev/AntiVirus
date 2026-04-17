@@ -1,5 +1,5 @@
 {
-  "generatedAtUtc": "2026-04-15T18:38:51.7369882Z",
+  "generatedAtUtc": "2026-04-17T15:30:36.9513171Z",
   "projectPath": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\driver\\minifilter\\AntivirusMinifilter.vcxproj",
   "buildRoot": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\driver-build",
   "outputRoot": "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\driver\\minifilter\\package",
@@ -7,18 +7,18 @@
   "configuration": "Release",
   "platform": "x64",
   "catalogTool": "makecat",
-  "signed": true,
+  "signed": false,
   "signatureStatus": {
-    "sys": "Valid",
-    "cat": "Valid",
-    "sysSigner": "CN=Antivirus Test Driver Signing",
-    "catSigner": "CN=Antivirus Test Driver Signing"
+    "sys": "NotSigned",
+    "cat": "NotSigned",
+    "sysSigner": "",
+    "catSigner": ""
   },
   "artifacts": [
     {
       "path": "AntivirusMinifilter.cat",
-      "sizeBytes": 7823,
-      "sha256": "2fab4e9b41ffe3f060fb9a92fef87433d668efba052ac1d4935a2c90641d2344"
+      "sizeBytes": 504,
+      "sha256": "5b58c03b733c8618a1a2a2bd9a22a6c651144dd0bad6d26c91f1a8b960e8ad25"
     },
     {
       "path": "AntivirusMinifilter.cdf",
@@ -32,8 +32,8 @@
     },
     {
       "path": "AntivirusMinifilter.sys",
-      "sizeBytes": 23328,
-      "sha256": "9210478d52c500acd657d92f0526bb4d4274bb6b211321fdcee954f37b2aa0c2"
+      "sizeBytes": 18432,
+      "sha256": "ac70ef63b8a1442a7ad33fe3a31bd57d4ddb210de2cb7104dae24ffb4ba33eb2"
     },
     {
       "path": "README.md",

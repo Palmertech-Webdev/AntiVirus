@@ -57,6 +57,9 @@ AntivirusBuildRequest(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECT
 static VOID
 AntivirusPopulateProcessImage(_Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request);
 
+static ULONG
+AntivirusGetParentProcessId(VOID);
+
 static BOOLEAN
 AntivirusShouldScanCreate(_In_ PFLT_CALLBACK_DATA Data, _Out_ ANTIVIRUS_REALTIME_FILE_OPERATION* Operation);
 
@@ -395,7 +398,7 @@ AntivirusInspectFileOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATE
   request.operation = Operation;
   request.processId = HandleToULong(PsGetCurrentProcessId());
   request.threadId = HandleToULong(PsGetCurrentThreadId());
-  request.parentProcessId = HandleToULong(PsGetProcessInheritedFromUniqueProcessId(PsGetCurrentProcess()));
+  request.parentProcessId = AntivirusGetParentProcessId();
   if (request.requestFlags == 0) {
     request.requestFlags = AntivirusBuildRequestFlags(Data, FltObjects, Operation, &request);
   }
@@ -505,6 +508,23 @@ AntivirusPopulateProcessImage(_Out_ ANTIVIRUS_REALTIME_SCAN_REQUEST* Request) {
   RtlStringCchCopyNW(Request->processImage, ANTIVIRUS_REALTIME_IMAGE_CAPACITY, processImage->Buffer,
                      processImage->Length / sizeof(WCHAR));
   ExFreePool(processImage);
+}
+
+static ULONG
+AntivirusGetParentProcessId(VOID) {
+  typedef HANDLE (*PANTIVIRUS_GET_PARENT_PROCESS_ID)(_In_ PEPROCESS Process);
+
+  UNICODE_STRING routineName;
+  PANTIVIRUS_GET_PARENT_PROCESS_ID getParentProcessId = NULL;
+  HANDLE parentProcessId = NULL;
+
+  RtlInitUnicodeString(&routineName, L"PsGetProcessInheritedFromUniqueProcessId");
+  getParentProcessId = (PANTIVIRUS_GET_PARENT_PROCESS_ID)(ULONG_PTR)MmGetSystemRoutineAddress(&routineName);
+  if (getParentProcessId != NULL) {
+    parentProcessId = getParentProcessId(PsGetCurrentProcess());
+  }
+
+  return HandleToULong(parentProcessId);
 }
 
 static BOOLEAN
