@@ -3,12 +3,15 @@
 #include "DestinationProtection.h"
 #include "DestinationRuntimeStore.h"
 #include "DestinationVerdictEngine.h"
+#include "PhishingHeuristics.h"
 
 #include <winsock2.h>
 #include <Windows.h>
 #include <winhttp.h>
 #include <ws2tcpip.h>
 
+#include <algorithm>
+#include <optional>
 #include <set>
 
 #define LookupDestinationReputation LookupDestinationReputation_Legacy
@@ -55,9 +58,6 @@ std::vector<DestinationReasonCode> BuildPhase1DestinationReasonCodes(const Reput
     reasons.push_back(DestinationReasonCode::CloudLookupUnavailable);
   }
 
-  if (reasons.empty()) {
-    reasons.push_back(DestinationReasonCode::None);
-  }
   return reasons;
 }
 
@@ -76,6 +76,18 @@ std::uint32_t BuildDestinationRiskConfidence(const ReputationLookupResult& resul
   }
 
   return std::clamp<std::uint32_t>(100u - trust, 1u, 100u);
+}
+
+void AddUniqueReasons(std::vector<DestinationReasonCode>* target,
+                      const std::vector<DestinationReasonCode>& values) {
+  for (const auto value : values) {
+    if (value == DestinationReasonCode::None) {
+      continue;
+    }
+    if (std::find(target->begin(), target->end(), value) == target->end()) {
+      target->push_back(value);
+    }
+  }
 }
 
 DestinationVerdict BuildPhase1DestinationVerdict(const DestinationContext& context,
@@ -181,6 +193,43 @@ std::vector<std::wstring> BuildRemoteAddressesForEnforcement(const DestinationCo
   return ResolveHostAddresses(host);
 }
 
+void MergeHeuristicAssessment(DestinationVerdict* verdict,
+                              const PhishingHeuristicAssessment& assessment) {
+  if (assessment.confidence == 0 || assessment.category == DestinationThreatCategory::Unknown) {
+    return;
+  }
+
+  AddUniqueReasons(&verdict->reasonCodes, assessment.reasonCodes);
+  verdict->confidence = std::max(verdict->confidence, assessment.confidence);
+  verdict->suspicious = verdict->suspicious || assessment.suspicious;
+
+  if (verdict->provider.empty() || verdict->provider == L"local-cache") {
+    verdict->provider = L"local-heuristics";
+  } else if (verdict->provider.find(L"heuristics") == std::wstring::npos) {
+    verdict->provider += L"+heuristics";
+  }
+
+  if (assessment.category == DestinationThreatCategory::Phishing ||
+      assessment.category == DestinationThreatCategory::Scam) {
+    if (verdict->category == DestinationThreatCategory::Unknown ||
+        verdict->category == DestinationThreatCategory::Clean ||
+        verdict->category == DestinationThreatCategory::Suspicious) {
+      verdict->category = assessment.category;
+    }
+  } else if (assessment.category == DestinationThreatCategory::Suspicious &&
+             (verdict->category == DestinationThreatCategory::Unknown ||
+              verdict->category == DestinationThreatCategory::Clean)) {
+    verdict->category = DestinationThreatCategory::Suspicious;
+  }
+
+  if (!assessment.details.empty()) {
+    if (!verdict->details.empty()) {
+      verdict->details += L" ";
+    }
+    verdict->details += assessment.details;
+  }
+}
+
 }  // namespace
 
 ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator,
@@ -206,10 +255,21 @@ ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator
   context.fromCache = result.fromCache;
   context.offlineMode = !result.lookupSucceeded;
 
-  const auto verdict = BuildPhase1DestinationVerdict(context, destinationPolicy, result);
+  auto verdict = BuildPhase1DestinationVerdict(context, destinationPolicy, result);
+  if (destinationPolicy.antiPhishingEnabled &&
+      (context.indicatorType == ThreatIndicatorType::Domain || context.indicatorType == ThreatIndicatorType::Url)) {
+    const auto heuristicAssessment = ScorePhishingHeuristics(context);
+    MergeHeuristicAssessment(&verdict, heuristicAssessment);
+    verdict.action = DetermineDestinationAction(destinationPolicy, verdict.category, verdict.confidence,
+                                                verdict.knownBad, verdict.suspicious, false);
+    verdict.userOverrideAllowed = verdict.action == DestinationAction::Warn ||
+                                  verdict.action == DestinationAction::DegradedAllow;
+    verdict.summary = BuildDestinationSummary(verdict);
+  }
+
   DestinationVerdictEngine evidenceBuilder(resolvedDatabasePath);
   const auto evidence = evidenceBuilder.BuildEvidenceRecord(context, destinationPolicy, verdict,
-                                                            L"policy-default", L"phase2-destination-blocking");
+                                                            L"policy-default", L"phase1-chunk3-phishing");
 
   DestinationRuntimeStore destinationStore(resolvedDatabasePath);
   destinationStore.UpsertIntelligenceRecord(BuildDestinationIntelligenceRecord(
