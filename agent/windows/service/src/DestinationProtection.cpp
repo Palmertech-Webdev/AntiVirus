@@ -131,6 +131,16 @@ std::wstring DestinationReasonCodeToString(const DestinationReasonCode value) {
       return L"suspicious_redirect_chain";
     case DestinationReasonCode::UrlShortenerRisk:
       return L"url_shortener_risk";
+    case DestinationReasonCode::EncodedParameters:
+      return L"encoded_parameters";
+    case DestinationReasonCode::MismatchedBrandDomain:
+      return L"mismatched_brand_domain";
+    case DestinationReasonCode::ExcessiveSubdomainDepth:
+      return L"excessive_subdomain_depth";
+    case DestinationReasonCode::ExcessiveQueryTokens:
+      return L"excessive_query_tokens";
+    case DestinationReasonCode::CredentialHarvestingKeyword:
+      return L"credential_harvesting_keyword";
     case DestinationReasonCode::EmailDeliveredLink:
       return L"email_delivered_link";
     case DestinationReasonCode::BrowserDeliveredNavigation:
@@ -183,6 +193,21 @@ DestinationReasonCode DestinationReasonCodeFromString(std::wstring value) {
   }
   if (value == L"url_shortener_risk") {
     return DestinationReasonCode::UrlShortenerRisk;
+  }
+  if (value == L"encoded_parameters") {
+    return DestinationReasonCode::EncodedParameters;
+  }
+  if (value == L"mismatched_brand_domain") {
+    return DestinationReasonCode::MismatchedBrandDomain;
+  }
+  if (value == L"excessive_subdomain_depth") {
+    return DestinationReasonCode::ExcessiveSubdomainDepth;
+  }
+  if (value == L"excessive_query_tokens") {
+    return DestinationReasonCode::ExcessiveQueryTokens;
+  }
+  if (value == L"credential_harvesting_keyword") {
+    return DestinationReasonCode::CredentialHarvestingKeyword;
   }
   if (value == L"email_delivered_link") {
     return DestinationReasonCode::EmailDeliveredLink;
