@@ -1,6 +1,7 @@
 #include "DestinationEventRecorder.h"
 
 #include <chrono>
+#include <sstream>
 
 #include "DestinationProtection.h"
 #include "StringUtils.h"
@@ -17,6 +18,117 @@ std::wstring CalculateExpiryTimestamp(const std::wstring& firstSeenAt, const std
   // A fuller implementation can parse/offset the timestamp later.
   (void)cacheTtlMinutes;
   return firstSeenAt;
+}
+
+std::wstring BuildReasonSummary(const std::vector<DestinationReasonCode>& reasonCodes) {
+  std::vector<std::wstring> phrases;
+  for (const auto reason : reasonCodes) {
+    switch (reason) {
+      case DestinationReasonCode::KnownMaliciousDestination:
+        phrases.push_back(L"known malicious destination");
+        break;
+      case DestinationReasonCode::KnownPhishingDestination:
+        phrases.push_back(L"known phishing destination");
+        break;
+      case DestinationReasonCode::KnownScamDestination:
+        phrases.push_back(L"known scam destination");
+        break;
+      case DestinationReasonCode::SuspiciousNewlyRegisteredDomain:
+        phrases.push_back(L"new campaign-style domain");
+        break;
+      case DestinationReasonCode::SuspiciousTld:
+        phrases.push_back(L"high-risk domain ending");
+        break;
+      case DestinationReasonCode::TyposquattingMatch:
+        phrases.push_back(L"lookalike spelling of a trusted brand");
+        break;
+      case DestinationReasonCode::HomographMatch:
+        phrases.push_back(L"lookalike characters in the domain");
+        break;
+      case DestinationReasonCode::BrandImpersonation:
+        phrases.push_back(L"brand impersonation");
+        break;
+      case DestinationReasonCode::SuspiciousRedirectChain:
+        phrases.push_back(L"redirect-style URL behaviour");
+        break;
+      case DestinationReasonCode::UrlShortenerRisk:
+        phrases.push_back(L"URL shortener often used in phishing");
+        break;
+      case DestinationReasonCode::EncodedParameters:
+        phrases.push_back(L"heavily encoded URL parameters");
+        break;
+      case DestinationReasonCode::MismatchedBrandDomain:
+        phrases.push_back(L"brand and domain mismatch");
+        break;
+      case DestinationReasonCode::ExcessiveSubdomainDepth:
+        phrases.push_back(L"unusually deep subdomain chain");
+        break;
+      case DestinationReasonCode::ExcessiveQueryTokens:
+        phrases.push_back(L"too many tracking or control parameters");
+        break;
+      case DestinationReasonCode::CredentialHarvestingKeyword:
+        phrases.push_back(L"login, payment, or verification wording");
+        break;
+      case DestinationReasonCode::EmailDeliveredLink:
+        phrases.push_back(L"email-delivered link");
+        break;
+      case DestinationReasonCode::BrowserDeliveredNavigation:
+        phrases.push_back(L"browser navigation");
+        break;
+      case DestinationReasonCode::AttachmentDeliveredLink:
+        phrases.push_back(L"attachment-delivered link");
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (phrases.empty()) {
+    return {};
+  }
+
+  std::wstringstream summary;
+  for (std::size_t index = 0; index < phrases.size(); ++index) {
+    if (index != 0) {
+      summary << (index + 1 == phrases.size() ? L" and " : L", ");
+    }
+    summary << phrases[index];
+  }
+  return summary.str();
+}
+
+std::wstring BuildPlainLanguageDetail(const DestinationContext& context,
+                                      const DestinationVerdict& verdict) {
+  std::wstringstream detail;
+  const auto target = verdict.host.empty() ? (verdict.indicator.empty() ? L"this destination" : verdict.indicator)
+                                           : verdict.host;
+  const auto app = context.sourceApplication.empty() ? L"an app on this device"
+                                                     : std::filesystem::path(context.sourceApplication).filename().wstring();
+  const auto reasonSummary = BuildReasonSummary(verdict.reasonCodes);
+
+  if (verdict.action == DestinationAction::Block) {
+    detail << L"Fenrir blocked " << app << L" from opening " << target << L".";
+  } else if (verdict.action == DestinationAction::Warn) {
+    detail << L"Fenrir warned about " << target << L" before " << app << L" continued.";
+  } else if (verdict.action == DestinationAction::DegradedAllow) {
+    detail << L"Fenrir allowed " << target << L" in degraded mode while protection data was limited.";
+  } else {
+    detail << L"Fenrir recorded a destination check for " << target << L".";
+  }
+
+  if (!reasonSummary.empty()) {
+    detail << L" Reason: " << reasonSummary << L".";
+  }
+
+  if (verdict.confidence != 0) {
+    detail << L" Confidence: " << verdict.confidence << L".";
+  }
+
+  if (!verdict.details.empty()) {
+    detail << L" " << verdict.details;
+  }
+
+  return detail.str();
 }
 
 }  // namespace
@@ -52,7 +164,7 @@ ScanHistoryRecord BuildDestinationScanHistoryRecord(const DestinationContext& co
   record.subjectPath = std::filesystem::path(verdict.host.empty() ? verdict.indicator : verdict.host);
   record.sha256.clear();
   record.contentType = L"destination";
-  record.reputation = DestinationThreatCategoryToString(verdict.category);
+  record.reputation = BuildPlainLanguageDetail(context, verdict);
   record.disposition = DestinationActionToString(verdict.action);
   record.confidence = verdict.confidence;
   record.tacticId = L"TA0001";
@@ -101,7 +213,9 @@ std::wstring BuildDestinationTelemetryPayload(const DestinationContext& context,
          L",\"sourceApplication\":\"" + Utf8ToWide(EscapeJsonString(context.sourceApplication)) +
          L"\",\"browserInitiated\":" + (context.browserInitiated ? std::wstring(L"true") : std::wstring(L"false")) +
          L",\"emailOriginated\":" + (context.emailOriginated ? std::wstring(L"true") : std::wstring(L"false")) +
-         L",\"evidenceRecordId\":\"" + Utf8ToWide(EscapeJsonString(evidence.evidenceId)) + L"\"}";
+         L",\"reasonCodes\":\"" + Utf8ToWide(EscapeJsonString(JoinDestinationReasonCodes(verdict.reasonCodes))) +
+         L"\",\"plainDetail\":\"" + Utf8ToWide(EscapeJsonString(BuildPlainLanguageDetail(context, verdict))) +
+         L"\",\"evidenceRecordId\":\"" + Utf8ToWide(EscapeJsonString(evidence.evidenceId)) + L"\"}";
 }
 
 std::wstring BuildDestinationEventType(const DestinationVerdict& verdict) {
