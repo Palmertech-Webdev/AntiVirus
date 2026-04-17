@@ -6,6 +6,7 @@
 
 #include <mutex>
 #include <string>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -39,6 +40,17 @@ class NetworkIsolationManager {
   std::vector<TelemetryRecord> CollectConnectionSnapshotTelemetry(std::size_t maxRecords) const;
 
  private:
+  struct ActiveDestinationBlock {
+    std::wstring key;
+    std::wstring remoteAddress;
+    std::wstring sourceApplication;
+    std::wstring reason;
+    std::wstring displayDestination;
+    std::wstring expiresAt;
+    std::vector<UINT64> filterIds;
+    std::chrono::steady_clock::time_point addedAt{};
+  };
+
   static void CALLBACK NetEventCallback(void* context, const FWPM_NET_EVENT1* event);
   static bool DestinationEnforcementThunk(void* context,
                                           const DestinationEnforcementRequest& request,
@@ -50,7 +62,12 @@ class NetworkIsolationManager {
   void RemoveIsolationFilters();
   void AddIsolationFilters();
   void RemoveDestinationBlockFilters();
+  void RemoveDestinationBlockFiltersLocked();
+  void RemoveDestinationBlockLocked(const std::wstring& key);
   void AddDestinationBlockFilters(const DestinationEnforcementRequest& request);
+  void AddDestinationBlockFiltersLocked(const DestinationEnforcementRequest& request);
+  void PurgeExpiredDestinationBlocksLocked();
+  void ReplayPersistedDestinationBlocksLocked();
   void HandleNetEvent(const FWPM_NET_EVENT1& event);
   void QueueTelemetry(const TelemetryRecord& record);
   void QueueStateEvent(const std::wstring& eventType, const std::wstring& summary,
@@ -67,9 +84,8 @@ class NetworkIsolationManager {
   bool isolationActive_{false};
   std::vector<UINT64> activeFilterIds_{};
   std::unordered_set<UINT64> activeFilterIdIndex_{};
-  std::vector<UINT64> activeDestinationFilterIds_{};
-  std::unordered_set<UINT64> activeDestinationFilterIdIndex_{};
-  std::unordered_map<std::wstring, std::wstring> destinationBlockReasonByRemoteAddress_{};
+  std::unordered_map<std::wstring, ActiveDestinationBlock> activeDestinationBlocks_{};
+  std::unordered_map<UINT64, std::wstring> activeDestinationBlockKeyByFilterId_{};
 };
 
 }  // namespace antivirus::agent

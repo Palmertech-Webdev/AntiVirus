@@ -270,10 +270,12 @@ ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator
   DestinationVerdictEngine evidenceBuilder(resolvedDatabasePath);
   const auto evidence = evidenceBuilder.BuildEvidenceRecord(context, destinationPolicy, verdict,
                                                             L"policy-default", L"phase1-chunk3-phishing");
+  const auto intelRecord = BuildDestinationIntelligenceRecord(context, verdict, evidence,
+                                                              destinationPolicy.destinationCacheTtlMinutes);
 
   DestinationRuntimeStore destinationStore(resolvedDatabasePath);
-  destinationStore.UpsertIntelligenceRecord(BuildDestinationIntelligenceRecord(
-      context, verdict, evidence, destinationPolicy.destinationCacheTtlMinutes));
+  destinationStore.UpsertIntelligenceRecord(intelRecord);
+  destinationStore.PurgeExpiredIntelligenceRecords();
 
   if (verdict.action == DestinationAction::Warn || verdict.action == DestinationAction::Block ||
       verdict.action == DestinationAction::DegradedAllow) {
@@ -283,14 +285,37 @@ ReputationLookupResult LookupDestinationReputation(const std::wstring& indicator
 
   if (verdict.action == DestinationAction::Block) {
     DestinationEnforcementRequest request{};
+    request.requestId = intelRecord.normalizedIndicator;
     request.displayDestination = verdict.host.empty() ? verdict.indicator : verdict.host;
     request.remoteAddresses = BuildRemoteAddressesForEnforcement(context);
     request.sourceApplication = context.sourceApplication;
     request.summary = verdict.summary.empty() ? BuildDestinationSummary(verdict) : verdict.summary;
     request.reason = verdict.details.empty() ? DestinationThreatCategoryToString(verdict.category) : verdict.details;
+    request.expiresAt = intelRecord.expiresAt;
     if (!request.remoteAddresses.empty()) {
       std::wstring enforcementError;
-      InvokeDestinationEnforcementHandler(request, &enforcementError);
+      if (!InvokeDestinationEnforcementHandler(request, &enforcementError)) {
+        RuntimeDatabase(resolvedDatabasePath).RecordScanHistory(ScanHistoryRecord{
+            .recordedAt = CurrentUtcTimestamp(),
+            .source = L"destination-enforcement",
+            .subjectPath = std::filesystem::path(request.displayDestination),
+            .sha256 = L"",
+            .contentType = L"destination-enforcement-failure",
+            .reputation = enforcementError.empty() ? L"Destination block enforcement failed."
+                                                   : L"Destination block enforcement failed: " + enforcementError,
+            .disposition = L"degraded",
+            .confidence = verdict.confidence,
+            .tacticId = verdict.category == DestinationThreatCategory::Phishing ? L"TA0001" : L"TA0011",
+            .techniqueId = verdict.category == DestinationThreatCategory::Phishing ? L"T1566" : L"T1105",
+            .remediationStatus = L"enforcement-failed",
+            .evidenceRecordId = evidence.evidenceId,
+            .quarantineRecordId = L"",
+            .alertTitle = L"Website block enforcement degraded",
+            .contextType = context.browserInitiated ? L"browser" : (context.emailOriginated ? L"email" : L"destination"),
+            .sourceApplication = context.sourceApplication,
+            .originReference = !context.sourceDomain.empty() ? context.sourceDomain : request.displayDestination,
+            .contextJson = evidence.metadataJson});
+      }
     }
   }
 

@@ -258,9 +258,19 @@ class DestinationRuntimeStore {
     return records;
   }
 
+  void PurgeExpiredIntelligenceRecords(const std::wstring& referenceTimestamp = CurrentUtcTimestamp()) const {
+    const auto db = OpenConnection();
+    auto statement = Prepare(db.get(),
+                             "DELETE FROM destination_intelligence_cache"
+                             " WHERE expires_at IS NOT NULL AND expires_at<>'' AND expires_at < ?;");
+    BindText(statement.get(), 1, referenceTimestamp);
+    StepDone(db.get(), statement.get());
+  }
+
  private:
   using ConnectionHandle = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
   using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
+  static constexpr int kDestinationRuntimeStoreSchemaVersion = 2;
 
   std::filesystem::path databasePath_;
 
@@ -279,6 +289,19 @@ class DestinationRuntimeStore {
     }
   }
 
+  static int GetUserVersion(sqlite3* db) {
+    auto statement = Prepare(db, "PRAGMA user_version;");
+    const auto step = sqlite3_step(statement.get());
+    if (step != SQLITE_ROW) {
+      ThrowSqliteError(db, "reading destination runtime store user_version failed");
+    }
+    return sqlite3_column_int(statement.get(), 0);
+  }
+
+  static void SetUserVersion(sqlite3* db, const int version) {
+    Exec(db, ("PRAGMA user_version=" + std::to_string(version) + ";").c_str());
+  }
+
   ConnectionHandle OpenConnection() const {
     if (databasePath_.has_parent_path()) {
       std::filesystem::create_directories(databasePath_.parent_path());
@@ -295,7 +318,25 @@ class DestinationRuntimeStore {
     Exec(connection.get(), "PRAGMA synchronous=FULL;");
     Exec(connection.get(), "PRAGMA foreign_keys=ON;");
     EnsureSchema(connection.get());
+    RunMigrations(connection.get());
     return connection;
+  }
+
+  static void RunMigrations(sqlite3* db) {
+    const auto currentVersion = GetUserVersion(db);
+    if (currentVersion >= kDestinationRuntimeStoreSchemaVersion) {
+      return;
+    }
+
+    if (currentVersion < 1) {
+      EnsureSchema(db);
+    }
+
+    if (currentVersion < 2) {
+      EnsureSchema(db);
+    }
+
+    SetUserVersion(db, kDestinationRuntimeStoreSchemaVersion);
   }
 
   static StatementHandle Prepare(sqlite3* db, const char* sql) {

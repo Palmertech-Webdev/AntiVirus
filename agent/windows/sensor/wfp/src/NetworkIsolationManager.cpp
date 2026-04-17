@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "../../../service/include/StringUtils.h"
+#include "../../../service/include/DestinationRuntimeStore.h"
 
 namespace antivirus::agent {
 namespace {
@@ -373,12 +374,40 @@ std::wstring ConnectionPayloadJson(const SnapshotConnection& connection) {
          Utf8ToWide(EscapeJsonString(connection.processImagePath)) + L"\"}";
 }
 
+std::optional<std::wstring> ExtractJsonStringField(const std::wstring& json, const std::wstring& key) {
+  const auto token = std::wstring(L"\"") + key + L"\":\"";
+  const auto start = json.find(token);
+  if (start == std::wstring::npos) {
+    return std::nullopt;
+  }
+  const auto valueStart = start + token.size();
+  const auto end = json.find(L"\"", valueStart);
+  if (end == std::wstring::npos) {
+    return std::nullopt;
+  }
+  return json.substr(valueStart, end - valueStart);
+}
+
+bool IsTimestampExpired(const std::wstring& expiryTimestamp, const std::wstring& referenceTimestamp) {
+  if (expiryTimestamp.empty()) {
+    return false;
+  }
+  return expiryTimestamp < referenceTimestamp;
+}
+
+std::wstring BuildDestinationBlockKey(const std::wstring& remoteAddress, const std::wstring& sourceApplication) {
+  return NormalizeAppIdPath(remoteAddress) + L"|" + NormalizeAppIdPath(sourceApplication);
+}
+
+constexpr std::size_t kMaxActiveDestinationBlocks = 512;
+
 }  // namespace
 
 NetworkIsolationManager::NetworkIsolationManager(AgentConfig config) : config_(std::move(config)) {}
 NetworkIsolationManager::~NetworkIsolationManager() { Stop(); }
 
 void NetworkIsolationManager::Start() {
+  const std::scoped_lock lock(stateMutex_);
   if (engineReady_) {
     return;
   }
@@ -405,6 +434,8 @@ void NetworkIsolationManager::Start() {
     SubscribeNetEvents();
     engineReady_ = true;
     RegisterDestinationEnforcementHandler(&NetworkIsolationManager::DestinationEnforcementThunk, this);
+    PurgeExpiredDestinationBlocksLocked();
+    ReplayPersistedDestinationBlocksLocked();
     QueueStateEvent(L"network.wfp.started", L"The WFP isolation manager opened the filtering engine and subscribed to net events.",
                     L"{\"mode\":\"user-mode\"}");
   } catch (const std::exception& error) {
@@ -416,8 +447,9 @@ void NetworkIsolationManager::Start() {
 }
 
 void NetworkIsolationManager::Stop() {
+  const std::scoped_lock lock(stateMutex_);
   RegisterDestinationEnforcementHandler(nullptr, nullptr);
-  RemoveDestinationBlockFilters();
+  RemoveDestinationBlockFiltersLocked();
   RemoveIsolationFilters();
   UnsubscribeNetEvents();
   if (engineHandle_ != nullptr) {
@@ -467,6 +499,7 @@ bool NetworkIsolationManager::DestinationEnforcementThunk(void* context,
 
 bool NetworkIsolationManager::ApplyDestinationBlock(const DestinationEnforcementRequest& request,
                                                     std::wstring* errorMessage) {
+  const std::scoped_lock lock(stateMutex_);
   if (!engineReady_) {
     if (errorMessage != nullptr) {
       *errorMessage = L"The WFP engine is not available on this host context.";
@@ -487,7 +520,8 @@ bool NetworkIsolationManager::ApplyDestinationBlock(const DestinationEnforcement
     return false;
   }
   try {
-    AddDestinationBlockFilters(request);
+    PurgeExpiredDestinationBlocksLocked();
+    AddDestinationBlockFiltersLocked(request);
     const auto commitStatus = FwpmTransactionCommit0(engineHandle_);
     if (commitStatus != ERROR_SUCCESS) {
       throw std::runtime_error("Unable to commit destination block filters");
@@ -546,6 +580,7 @@ void NetworkIsolationManager::UnsubscribeNetEvents() {
 }
 
 bool NetworkIsolationManager::ApplyIsolation(const bool isolate, std::wstring* errorMessage) {
+  const std::scoped_lock lock(stateMutex_);
   if (!engineReady_) {
     if (errorMessage != nullptr) {
       *errorMessage = L"The WFP engine is not available on this host context.";
@@ -595,12 +630,18 @@ void NetworkIsolationManager::RemoveIsolationFilters() {
 }
 
 void NetworkIsolationManager::RemoveDestinationBlockFilters() {
-  for (const auto filterId : activeDestinationFilterIds_) {
-    FwpmFilterDeleteById0(engineHandle_, filterId);
+  const std::scoped_lock lock(stateMutex_);
+  RemoveDestinationBlockFiltersLocked();
+}
+
+void NetworkIsolationManager::RemoveDestinationBlockFiltersLocked() {
+  for (const auto& [key, block] : activeDestinationBlocks_) {
+    for (const auto filterId : block.filterIds) {
+      FwpmFilterDeleteById0(engineHandle_, filterId);
+    }
   }
-  activeDestinationFilterIds_.clear();
-  activeDestinationFilterIdIndex_.clear();
-  destinationBlockReasonByRemoteAddress_.clear();
+  activeDestinationBlocks_.clear();
+  activeDestinationBlockKeyByFilterId_.clear();
 }
 
 void NetworkIsolationManager::AddIsolationFilters() {
@@ -681,9 +722,102 @@ void NetworkIsolationManager::AddIsolationFilters() {
 }
 
 void NetworkIsolationManager::AddDestinationBlockFilters(const DestinationEnforcementRequest& request) {
-  for (int layerIndex = 0; layerIndex < 2; ++layerIndex) {
-    for (const auto& remoteAddress : request.remoteAddresses) {
+  const std::scoped_lock lock(stateMutex_);
+  AddDestinationBlockFiltersLocked(request);
+}
+
+void NetworkIsolationManager::RemoveDestinationBlockLocked(const std::wstring& key) {
+  const auto existing = activeDestinationBlocks_.find(key);
+  if (existing == activeDestinationBlocks_.end()) {
+    return;
+  }
+  for (const auto filterId : existing->second.filterIds) {
+    FwpmFilterDeleteById0(engineHandle_, filterId);
+    activeDestinationBlockKeyByFilterId_.erase(filterId);
+  }
+  activeDestinationBlocks_.erase(existing);
+}
+
+void NetworkIsolationManager::PurgeExpiredDestinationBlocksLocked() {
+  const auto referenceTimestamp = CurrentUtcTimestamp();
+  std::vector<std::wstring> expiredKeys;
+  for (const auto& [key, block] : activeDestinationBlocks_) {
+    if (IsTimestampExpired(block.expiresAt, referenceTimestamp)) {
+      expiredKeys.push_back(key);
+    }
+  }
+  for (const auto& key : expiredKeys) {
+    RemoveDestinationBlockLocked(key);
+  }
+  if (engineReady_) {
+    DestinationRuntimeStore(config_.runtimeDatabasePath).PurgeExpiredIntelligenceRecords(referenceTimestamp);
+  }
+}
+
+void NetworkIsolationManager::ReplayPersistedDestinationBlocksLocked() {
+  DestinationRuntimeStore store(config_.runtimeDatabasePath);
+  const auto records = store.ListActiveBlockingRecords(256);
+  std::size_t replayed = 0;
+  for (const auto& record : records) {
+    DestinationEnforcementRequest request{};
+    request.requestId = record.normalizedIndicator;
+    request.displayDestination = record.host.empty() ? record.normalizedIndicator : record.host;
+    if (record.indicatorType == ThreatIndicatorType::Ip) {
+      request.remoteAddresses.push_back(record.normalizedIndicator);
+    } else if (!record.host.empty()) {
+      request.remoteAddresses = ResolveHostAddresses(record.host);
+    }
+    request.sourceApplication =
+        ExtractJsonStringField(record.metadataJson, L"sourceApplication").value_or(L"");
+    request.summary = L"Fenrir replayed an active destination block after service restart.";
+    request.reason = record.metadataJson;
+    request.expiresAt = record.expiresAt;
+    if (request.remoteAddresses.empty()) {
+      continue;
+    }
+    AddDestinationBlockFiltersLocked(request);
+    ++replayed;
+  }
+  if (replayed != 0) {
+    QueueStateEvent(L"network.destination.block.replayed",
+                    L"Fenrir replayed persisted destination blocks after service start.",
+                    std::wstring(L"{\"replayedCount\":") + std::to_wstring(replayed) + L"}");
+  }
+}
+
+void NetworkIsolationManager::AddDestinationBlockFiltersLocked(const DestinationEnforcementRequest& request) {
+  if (activeDestinationBlocks_.size() >= kMaxActiveDestinationBlocks) {
+    auto oldest = activeDestinationBlocks_.begin();
+    for (auto it = activeDestinationBlocks_.begin(); it != activeDestinationBlocks_.end(); ++it) {
+      if (it->second.addedAt < oldest->second.addedAt) {
+        oldest = it;
+      }
+    }
+    RemoveDestinationBlockLocked(oldest->first);
+  }
+
+  for (const auto& remoteAddress : request.remoteAddresses) {
+    const auto key = BuildDestinationBlockKey(remoteAddress, request.sourceApplication);
+    RemoveDestinationBlockLocked(key);
+    auto& block = activeDestinationBlocks_[key];
+    block.key = key;
+    block.remoteAddress = remoteAddress;
+    block.sourceApplication = request.sourceApplication;
+    block.reason = request.reason;
+    block.displayDestination = request.displayDestination;
+    block.expiresAt = request.expiresAt;
+    block.filterIds.clear();
+    block.addedAt = std::chrono::steady_clock::now();
+
+    for (int layerIndex = 0; layerIndex < 2; ++layerIndex) {
       auto remoteCondition = BuildRemoteAddressCondition(remoteAddress, LayerUsesIpv6(layerIndex));
+      std::array<FilterConditionHolder, 2> conditions{};
+      conditions[0] = std::move(remoteCondition);
+      std::size_t conditionCount = 1;
+      if (!request.sourceApplication.empty()) {
+        conditions[1] = BuildAppIdCondition(request.sourceApplication);
+        conditionCount = 2;
+      }
       FWPM_FILTER0 filter{};
       const auto name = FilterNameFor(L"AntiVirus block destination", layerIndex);
       filter.displayData.name = const_cast<wchar_t*>(name.c_str());
@@ -692,16 +826,18 @@ void NetworkIsolationManager::AddDestinationBlockFilters(const DestinationEnforc
       filter.weight.type = FWP_UINT8;
       filter.weight.uint8 = 12;
       filter.action.type = FWP_ACTION_BLOCK;
-      filter.numFilterConditions = 1;
-      filter.filterCondition = &remoteCondition.condition;
+      filter.numFilterConditions = static_cast<UINT32>(conditionCount);
+      filter.filterCondition = &conditions[0].condition;
       UINT64 filterId = 0;
       const auto status = FwpmFilterAdd0(engineHandle_, &filter, nullptr, &filterId);
       if (status != ERROR_SUCCESS) {
         continue;
       }
-      activeDestinationFilterIds_.push_back(filterId);
-      activeDestinationFilterIdIndex_.insert(filterId);
-      destinationBlockReasonByRemoteAddress_[remoteAddress] = request.reason;
+      block.filterIds.push_back(filterId);
+      activeDestinationBlockKeyByFilterId_[filterId] = key;
+    }
+    if (block.filterIds.empty()) {
+      activeDestinationBlocks_.erase(key);
     }
   }
   QueueStateEvent(L"network.destination.block.applied",
@@ -719,11 +855,12 @@ void CALLBACK NetworkIsolationManager::NetEventCallback(void* context, const FWP
 }
 
 void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
+  const std::scoped_lock lock(stateMutex_);
   if (event.type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP || event.classifyDrop == nullptr) {
     return;
   }
   const auto filterId = event.classifyDrop->filterId;
-  if (!activeFilterIdIndex_.contains(filterId) && !activeDestinationFilterIdIndex_.contains(filterId)) {
+  if (!activeFilterIdIndex_.contains(filterId) && !activeDestinationBlockKeyByFilterId_.contains(filterId)) {
     return;
   }
   const auto appId = SafeBlobToWideString(&event.header.appId);
@@ -735,12 +872,19 @@ void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
                                  ? AddressToString(event.header.ipVersion, event.header.remoteAddrV4, nullptr)
                                  : AddressToString(event.header.ipVersion, 0, &event.header.remoteAddrV6);
   const auto direction = event.classifyDrop->msFwpDirection == FWP_DIRECTION_INBOUND ? std::wstring(L"inbound") : std::wstring(L"outbound");
-  const auto destinationBlock = activeDestinationFilterIdIndex_.contains(filterId);
+  const auto destinationBlock = activeDestinationBlockKeyByFilterId_.contains(filterId);
   std::wstring reason;
+  std::wstring displayDestination;
+  std::wstring sourceApplication;
   if (destinationBlock) {
-    const auto it = destinationBlockReasonByRemoteAddress_.find(remoteAddress);
-    if (it != destinationBlockReasonByRemoteAddress_.end()) {
-      reason = it->second;
+    const auto keyIt = activeDestinationBlockKeyByFilterId_.find(filterId);
+    if (keyIt != activeDestinationBlockKeyByFilterId_.end()) {
+      const auto blockIt = activeDestinationBlocks_.find(keyIt->second);
+      if (blockIt != activeDestinationBlocks_.end()) {
+        reason = blockIt->second.reason;
+        displayDestination = blockIt->second.displayDestination;
+        sourceApplication = blockIt->second.sourceApplication;
+      }
     }
   }
   std::wstringstream summary;
@@ -774,6 +918,10 @@ void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
   payload += destinationBlock ? L"true" : L"false";
   payload += L",\"reason\":\"";
   payload += Utf8ToWide(EscapeJsonString(reason));
+  payload += L"\",\"displayDestination\":\"";
+  payload += Utf8ToWide(EscapeJsonString(displayDestination));
+  payload += L"\",\"sourceApplication\":\"";
+  payload += Utf8ToWide(EscapeJsonString(sourceApplication));
   payload += L"\"}";
   QueueTelemetry(TelemetryRecord{.eventId = GenerateGuidString(),
                                  .eventType = destinationBlock ? L"network.destination.blocked" : L"network.connection.blocked",

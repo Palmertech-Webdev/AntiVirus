@@ -15,10 +15,34 @@ std::wstring CalculateExpiryTimestamp(const std::wstring& firstSeenAt, const std
     return CurrentUtcTimestamp();
   }
 
-  // Keep this simple and deterministic for the current phase: runtime users can overwrite on refresh.
-  // A fuller implementation can parse/offset the timestamp later.
-  (void)cacheTtlMinutes;
-  return firstSeenAt;
+  SYSTEMTIME systemTime{};
+  if (swscanf_s(firstSeenAt.c_str(), L"%4hu-%2hu-%2huT%2hu:%2hu:%2hu.%3huZ", &systemTime.wYear,
+                &systemTime.wMonth, &systemTime.wDay, &systemTime.wHour, &systemTime.wMinute,
+                &systemTime.wSecond, &systemTime.wMilliseconds) != 7) {
+    return firstSeenAt;
+  }
+
+  FILETIME fileTime{};
+  if (SystemTimeToFileTime(&systemTime, &fileTime) == FALSE) {
+    return firstSeenAt;
+  }
+
+  ULARGE_INTEGER ticks{};
+  ticks.LowPart = fileTime.dwLowDateTime;
+  ticks.HighPart = fileTime.dwHighDateTime;
+  ticks.QuadPart += static_cast<ULONGLONG>(cacheTtlMinutes) * 60ULL * 10000000ULL;
+  fileTime.dwLowDateTime = ticks.LowPart;
+  fileTime.dwHighDateTime = ticks.HighPart;
+
+  SYSTEMTIME expiry{};
+  if (FileTimeToSystemTime(&fileTime, &expiry) == FALSE) {
+    return firstSeenAt;
+  }
+
+  wchar_t buffer[32] = {};
+  swprintf(buffer, 32, L"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ", expiry.wYear, expiry.wMonth,
+           expiry.wDay, expiry.wHour, expiry.wMinute, expiry.wSecond, expiry.wMilliseconds);
+  return std::wstring(buffer);
 }
 
 std::wstring BuildReasonSummary(const std::vector<DestinationReasonCode>& reasonCodes) {
