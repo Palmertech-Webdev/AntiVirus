@@ -395,8 +395,11 @@ bool IsTimestampExpired(const std::wstring& expiryTimestamp, const std::wstring&
   return expiryTimestamp < referenceTimestamp;
 }
 
-std::wstring BuildDestinationBlockKey(const std::wstring& remoteAddress, const std::wstring& sourceApplication) {
-  return NormalizeAppIdPath(remoteAddress) + L"|" + NormalizeAppIdPath(sourceApplication);
+std::wstring BuildDestinationBlockKey(const std::wstring& remoteAddress,
+                                      const std::wstring& sourceApplication,
+                                      const std::wstring& destinationIdentity) {
+  return NormalizeAppIdPath(remoteAddress) + L"|" + NormalizeAppIdPath(sourceApplication) + L"|" +
+         NormalizeAppIdPath(destinationIdentity);
 }
 
 constexpr std::size_t kMaxActiveDestinationBlocks = 512;
@@ -796,8 +799,12 @@ void NetworkIsolationManager::AddDestinationBlockFiltersLocked(const Destination
     RemoveDestinationBlockLocked(oldest->first);
   }
 
+  const auto destinationIdentity = !request.requestId.empty()
+                                       ? request.requestId
+                                       : (!request.displayDestination.empty() ? request.displayDestination : L"destination");
+
   for (const auto& remoteAddress : request.remoteAddresses) {
-    const auto key = BuildDestinationBlockKey(remoteAddress, request.sourceApplication);
+    const auto key = BuildDestinationBlockKey(remoteAddress, request.sourceApplication, destinationIdentity);
     RemoveDestinationBlockLocked(key);
     auto& block = activeDestinationBlocks_[key];
     block.key = key;
@@ -843,6 +850,7 @@ void NetworkIsolationManager::AddDestinationBlockFiltersLocked(const Destination
   QueueStateEvent(L"network.destination.block.applied",
                   request.summary.empty() ? L"Fenrir blocked a risky destination." : request.summary,
                   std::wstring(L"{\"displayDestination\":\"") + Utf8ToWide(EscapeJsonString(request.displayDestination)) +
+                      L"\",\"requestId\":\"" + Utf8ToWide(EscapeJsonString(request.requestId)) +
                       L"\",\"sourceApplication\":\"" + Utf8ToWide(EscapeJsonString(request.sourceApplication)) +
                       L"\",\"remoteAddressCount\":" + std::to_wstring(request.remoteAddresses.size()) + L"}");
 }
@@ -889,8 +897,9 @@ void NetworkIsolationManager::HandleNetEvent(const FWPM_NET_EVENT1& event) {
   }
   std::wstringstream summary;
   if (destinationBlock) {
-    summary << L"Fenrir blocked access to " << remoteAddress << L" for "
-            << (appId.empty() ? L"(unknown application)" : BaseNameFromPath(appId)) << L".";
+    summary << L"Fenrir blocked access to "
+            << (displayDestination.empty() ? remoteAddress : displayDestination)
+            << L" for " << (appId.empty() ? L"(unknown application)" : BaseNameFromPath(appId)) << L".";
   } else {
     summary << L"WFP isolation blocked " << direction << L" traffic for "
             << (appId.empty() ? L"(unknown application)" : BaseNameFromPath(appId)) << L" to " << remoteAddress << L":"
