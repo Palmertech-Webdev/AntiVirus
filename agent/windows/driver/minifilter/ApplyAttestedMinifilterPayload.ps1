@@ -3,7 +3,8 @@ param(
     [string]$AttestedSourceRoot,
     [string]$DriverInfPath = (Join-Path $PSScriptRoot 'AntivirusMinifilter.inf'),
     [string]$PackageRoot = (Join-Path $PSScriptRoot 'package'),
-    [string]$StageDriverRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'out\dev\driver')
+    [string]$StageDriverRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'out\dev\driver'),
+    [switch]$AllowNonMicrosoftCatalogSigner
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,6 +64,11 @@ $catSignature = Get-AuthenticodeSignature -LiteralPath $attestedCatPath
 if ($sysSignature.Status -ne 'Valid' -or $catSignature.Status -ne 'Valid') {
     throw "Attested signature validation failed (sys=$($sysSignature.Status), cat=$($catSignature.Status))."
 }
+$catSignerSubject = if ($catSignature.SignerCertificate) { [string]$catSignature.SignerCertificate.Subject } else { '' }
+$catalogLooksMicrosoftAttested = $catSignerSubject -match 'Windows Hardware Compatibility Publisher'
+if (-not $AllowNonMicrosoftCatalogSigner -and -not $catalogLooksMicrosoftAttested) {
+    throw "Catalog signer is not a Microsoft attestation signer. Subject='$catSignerSubject'. Re-download the Partner Center signed package or rerun with -AllowNonMicrosoftCatalogSigner for non-production testing."
+}
 
 Ensure-Directory -Path $packageRootFull
 Ensure-Directory -Path $stageDriverRootFull
@@ -85,7 +91,12 @@ if (Test-Path -LiteralPath $readmePath) {
 }
 
 foreach ($target in $targets) {
-    Copy-Item -LiteralPath $target.Source -Destination $target.Target -Force
+    $sourceFull = [System.IO.Path]::GetFullPath([string]$target.Source)
+    $targetFull = [System.IO.Path]::GetFullPath([string]$target.Target)
+    if ([string]::Equals($sourceFull, $targetFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        continue
+    }
+    Copy-Item -LiteralPath $sourceFull -Destination $targetFull -Force
 }
 
 $report = [pscustomobject]@{
@@ -98,6 +109,7 @@ $report = [pscustomobject]@{
         cat = [string]$catSignature.Status
         sysSigner = if ($sysSignature.SignerCertificate) { [string]$sysSignature.SignerCertificate.Subject } else { '' }
         catSigner = if ($catSignature.SignerCertificate) { [string]$catSignature.SignerCertificate.Subject } else { '' }
+        catMicrosoftAttestedSigner = $catalogLooksMicrosoftAttested
     }
     artifacts = @(
         [pscustomobject]@{

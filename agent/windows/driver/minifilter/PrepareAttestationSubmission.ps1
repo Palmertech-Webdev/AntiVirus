@@ -94,10 +94,10 @@ $nextSteps = @(
     "Generated (UTC): $($manifest.generatedAtUtc)",
     "",
     "1. Upload the CAB in Microsoft Partner Center (Hardware -> Driver signing -> Attestation signing).",
+    "   HLK Studio is not required for this attestation flow.",
     "2. Download the Microsoft-signed package from the portal.",
-    "3. Replace AntivirusMinifilter.sys and AntivirusMinifilter.cat in:",
-    "   - agent/windows/driver/minifilter/package",
-    "   - agent/windows/out/dev/driver",
+    "3. Apply returned artifacts with:",
+    "   .\ApplyAttestedMinifilterPayload.ps1 -AttestedSourceRoot `"<downloaded-folder>`"",
     "4. Rebuild FenrirSetup.exe and rerun repair/install to restore full minifilter enforcement."
 )
 [System.IO.File]::WriteAllLines((Join-Path $outputRootFull 'ATTESTATION-NEXT-STEPS.txt'), $nextSteps, $utf8NoBom)

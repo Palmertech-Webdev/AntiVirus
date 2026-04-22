@@ -70,6 +70,8 @@ constexpr DWORD kPnpUtilUntrustedRootExitCode = static_cast<DWORD>(CERT_E_UNTRUS
 constexpr DWORD kPnpUtilNoMoreItemsExitCode = ERROR_NO_MORE_ITEMS;
 constexpr DWORD kWin32InvalidImageHashError = 577;
 constexpr DWORD kWin32DriverBlockedError = 1275;
+constexpr DWORD kWin32VirusInfectedError = ERROR_VIRUS_INFECTED;
+constexpr DWORD kWin32VirusDeletedError = ERROR_VIRUS_DELETED;
 
 constexpr UINT kInstallerLogMessage = WM_APP + 1;
 constexpr UINT kInstallerStatusMessage = WM_APP + 2;
@@ -201,6 +203,21 @@ std::wstring FormatWin32ErrorMessage(const DWORD errorCode) {
   std::wstring message(messageBuffer, messageLength);
   LocalFree(messageBuffer);
   return TrimCopy(message);
+}
+
+std::wstring BuildProcessLaunchFailureMessage(const std::filesystem::path& executable,
+                                              const DWORD processError) {
+  std::wstring message = L"Could not start " + executable.wstring() + L" (error " +
+                         std::to_wstring(processError) + L"). " +
+                         FormatWin32ErrorMessage(processError);
+
+  if (processError == kWin32VirusInfectedError || processError == kWin32VirusDeletedError) {
+    message +=
+        L" Windows Security or another antivirus product blocked this file as malware or potentially unwanted "
+        L"software. For local testing, allow or exclude this Fenrir test build, then rerun setup.";
+  }
+
+  return message;
 }
 
 std::filesystem::path CreateTemporaryCaptureFilePath() {
@@ -913,8 +930,7 @@ bool RunProcessHidden(const std::filesystem::path& executable, const std::wstrin
   if (!launched) {
     if (errorMessage != nullptr) {
       const auto processError = GetLastError();
-      *errorMessage = L"Could not start " + executable.wstring() + L" (error " + std::to_wstring(processError) +
-                      L"). " + FormatWin32ErrorMessage(processError);
+      *errorMessage = BuildProcessLaunchFailureMessage(executable, processError);
     }
     if (!capturedOutputPath.empty()) {
       DeleteFileW(capturedOutputPath.c_str());

@@ -1,0 +1,37 @@
+{
+    "generatedAtUtc":  "2026-04-22T13:17:12.4958035Z",
+    "driverPackageRoot":  "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\driver\\minifilter\\package",
+    "stageDriverRoot":  "C:\\Users\\matt_admin\\Documents\\GitHub\\AntiVirus\\agent\\windows\\out\\dev\\driver",
+    "certificate":  {
+                        "subject":  "CN=Antivirus Test Driver Signing",
+                        "thumbprint":  "B0EDDE98BC6261B117404AE7D3F3C2FDC12D4288",
+                        "notAfter":  "2031-04-17T21:16:19.0000000+01:00"
+                    },
+    "signatureStatus":  {
+                            "sys":  "Valid",
+                            "cat":  "Valid",
+                            "sysSigner":  "CN=Antivirus Test Driver Signing",
+                            "catSigner":  "CN=Antivirus Test Driver Signing"
+                        },
+    "bootConfig":  {
+                       "configured":  true,
+                       "rebootRequired":  true,
+                       "secureBoot":  "Unknown",
+                       "message":  "TESTSIGNING boot option enabled."
+                   },
+    "driverInstall":  {
+                          "attempted":  true,
+                          "succeeded":  true,
+                          "exitCode":  259,
+                          "message":  "Microsoft PnP Utility\r\n\r\nAdding driver package:  AntivirusMinifilter.inf\r\nDriver package added successfully. (Already exists in the system)\r\nPublished Name:         oem14.inf\r\n\r\nTotal driver packages:  1\r\nAdded driver packages:  0"
+                      },
+    "serviceRepair":  {
+                          "attempted":  false,
+                          "changed":  false,
+                          "success":  true,
+                          "message":  "Service \u0027AntivirusMinifilter\u0027 start type is DEMAND_START.",
+                          "before":  "DEMAND_START",
+                          "after":  "DEMAND_START"
+                      },
+    "serviceState":  "Stopped"
+}
