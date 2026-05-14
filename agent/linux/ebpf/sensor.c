@@ -2,11 +2,17 @@
 
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
-#include <linux/sched.h>
-#include <linux/fs.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+
+// Minimal required structs for eBPF to compile without deep kernel headers
+struct sock { struct { __u32 skc_daddr; __u16 skc_dport; } __sk_common; };
+struct qstr { __u32 hash; __u32 len; const unsigned char *name; };
+struct dentry { unsigned int d_flags; struct qstr d_name; };
+struct file { struct { struct dentry *dentry; } f_path; };
+
+#define TASK_COMM_LEN 16
 
 #define MAX_PATH_LEN 256
 #define MAX_ARGS 16
@@ -63,12 +69,6 @@ int kprobe_sys_execve(struct pt_regs *ctx) {
     const char *filename_ptr = (const char *)PT_REGS_PARM1(ctx);
     bpf_probe_read_user_str(&event.filename, sizeof(event.filename), filename_ptr);
     
-    // Example Enforcement: Prevent execution of a known bad binary name
-    // (This is rudimentary, real engine will use YARA/Sigma from user space, but this shows capability)
-    // if (event.filename[0] == '/' && event.filename[1] == 'b' && event.filename[2] == 'a' && event.filename[3] == 'd') {
-    //    bpf_send_signal(9); // SIGKILL
-    // }
-
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
@@ -113,7 +113,6 @@ int kprobe_vfs_write(struct pt_regs *ctx) {
     bpf_probe_read_kernel(&dentry, sizeof(dentry), &file->f_path.dentry);
     bpf_probe_read_kernel(&d_name, sizeof(d_name), &dentry->d_name);
     
-    // Just read the file name part for simplicity in this example
     bpf_probe_read_kernel_str(&event.filename, sizeof(event.filename), d_name.name);
 
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));

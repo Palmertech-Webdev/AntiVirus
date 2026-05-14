@@ -3,6 +3,7 @@ package inventory
 import (
 	"log"
 	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -84,9 +85,8 @@ func (fi *FileInventory) Close() {
 	unix.Close(fi.fd)
 }
 
-func pointer(b []byte) interface{} {
-	// Unsafe cast helper inline
-	return nil // real implementation uses unsafe.Pointer
+func pointer(b []byte) unsafe.Pointer {
+	return unsafe.Pointer(&b[0])
 }
 
 func nullTerminated(b []byte) string {

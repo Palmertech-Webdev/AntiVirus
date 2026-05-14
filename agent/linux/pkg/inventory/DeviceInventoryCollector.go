@@ -103,13 +103,13 @@ func readDistro() string {
 	return "unknown"
 }
 
-func charsToString(ca []int8) string {
+func charsToString(ca []byte) string {
 	b := make([]byte, 0, len(ca))
 	for _, c := range ca {
 		if c == 0 {
 			break
 		}
-		b = append(b, byte(c))
+		b = append(b, c)
 	}
 	return string(b)
 }

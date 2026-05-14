@@ -58,7 +58,7 @@ class FileInventory {
         )
 
         if let stream = stream {
-            FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
             FSEventStreamStart(stream)
             print("[FileInventory] FSEvents watching: \(paths.joined(separator: ", "))")
         }

@@ -12,7 +12,7 @@ class EndpointSecurityManager {
 
     func start() -> Bool {
         let res = es_new_client(&client) { [weak self] (_, message) in
-            self?.handleMessage(message: message.pointee)
+            self?.handleMessage(message: message)
         }
 
         guard res == ES_NEW_CLIENT_RESULT_SUCCESS, let client = client else {
@@ -44,12 +44,12 @@ class EndpointSecurityManager {
 
     // MARK: - Private
 
-    private func handleMessage(message: es_message_t) {
-        guard message.action_type == ES_ACTION_TYPE_AUTH else { return }
+    private func handleMessage(message: UnsafePointer<es_message_t>) {
+        guard message.pointee.action_type == ES_ACTION_TYPE_AUTH else { return }
 
         var verdict: es_auth_result_t = ES_AUTH_RESULT_ALLOW
 
-        switch message.event_type {
+        switch message.pointee.event_type {
         case ES_EVENT_TYPE_AUTH_EXEC:
             verdict = handleExec(message: message)
         case ES_EVENT_TYPE_AUTH_OPEN:
@@ -61,18 +61,18 @@ class EndpointSecurityManager {
         es_respond_auth_result(client!, message, verdict, false)
     }
 
-    private func handleExec(message: es_message_t) -> es_auth_result_t {
-        let path = String(cString: message.event.exec.target.pointee.executable.pointee.path.data)
-        let pid = message.event.exec.target.pointee.audit_token.pid
+    private func handleExec(message: UnsafePointer<es_message_t>) -> es_auth_result_t {
+        let path = String(cString: message.pointee.event.exec.target.pointee.executable.pointee.path.data)
+        let pid = audit_token_to_pid(message.pointee.event.exec.target.pointee.audit_token)
 
         let decision = broker.handleExec(executablePath: path, pid: pid)
         return decision == .allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
     }
 
-    private func handleOpen(message: es_message_t) -> es_auth_result_t {
-        let filePath = String(cString: message.event.open.file.pointee.path.data)
-        let pid = message.process.pointee.audit_token.pid
-        let isWrite = (message.event.open.fflag & FWRITE) != 0
+    private func handleOpen(message: UnsafePointer<es_message_t>) -> es_auth_result_t {
+        let filePath = String(cString: message.pointee.event.open.file.pointee.path.data)
+        let pid = audit_token_to_pid(message.pointee.process.pointee.audit_token)
+        let isWrite = (message.pointee.event.open.fflag & FWRITE) != 0
 
         let decision = broker.handleFileOpen(filePath: filePath, pid: pid, isWrite: isWrite)
 

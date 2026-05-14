@@ -94,7 +94,7 @@ class RealtimeProtectionBroker {
                 print("[Broker] BLOCKING PID \(pid): \(reason)")
                 emitTelemetry(eventType: "FileWrite", payload: [
                     "eventType": "FileWrite",
-                    "processName": processInventory.get(pid: pid)?.executablePath ?? "unknown",
+                    "processName": ((processInventory.get(pid: pid)?.executablePath ?? "unknown") as NSString).lastPathComponent,
                     "pid": pid,
                     "filePath": filePath,
                     "blocked": true,
@@ -105,7 +105,7 @@ class RealtimeProtectionBroker {
 
             emitTelemetry(eventType: "FileWrite", payload: [
                 "eventType": "FileWrite",
-                "processName": (processInventory.get(pid: pid)?.executablePath ?? "unknown" as NSString).lastPathComponent,
+                "processName": ((processInventory.get(pid: pid)?.executablePath ?? "unknown") as NSString).lastPathComponent,
                 "pid": pid,
                 "filePath": filePath
             ])
