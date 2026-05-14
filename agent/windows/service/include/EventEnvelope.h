@@ -31,6 +31,8 @@ struct EventEnvelope {
   std::wstring sha256;
   ProcessContext process;
   std::chrono::system_clock::time_point occurredAt;
+  
+  std::string ToJson() const;
 };
 
 }  // namespace antivirus::agent
