@@ -1,14 +1,55 @@
 import Foundation
+import EndpointSecurity
 
+// MARK: - Bootstrap
 print("Starting Fenrir macOS Endpoint Security Agent...")
 
-let manager = EndpointSecurityManager()
-if !manager.start() {
-    print("Failed to start EndpointSecurityManager. Exiting.")
+let config = AgentConfig.load()
+print("Device: \(config.deviceId) | Backend: \(config.backendURL)")
+
+// Initialise subsystems
+let scanEngine = ScanEngine()
+scanEngine.initialize()
+
+let processInventory = ProcessInventory()
+
+let controlPlaneClient = ControlPlaneClient(config: config)
+
+let telemetryQueue = TelemetryQueueStore(maxSize: 50, client: controlPlaneClient)
+
+let broker = RealtimeProtectionBroker(
+    config: config,
+    scanEngine: scanEngine,
+    processInventory: processInventory,
+    telemetryQueue: telemetryQueue
+)
+
+let esManager = EndpointSecurityManager(broker: broker)
+guard esManager.start() else {
+    print("Failed to start EndpointSecurityManager. Ensure the ES entitlement is granted.")
     exit(1)
 }
 
-print("Agent is running. Press Ctrl+C to exit.")
+// Graceful shutdown on SIGTERM / SIGINT
+let signalSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+signalSource.setEventHandler {
+    print("SIGTERM received. Flushing telemetry and shutting down...")
+    broker.flushAll()
+    esManager.stop()
+    exit(0)
+}
+signal(SIGTERM, SIG_IGN)
+signalSource.resume()
 
-// Start the main run loop to keep the daemon alive and listening for events
+let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+sigintSource.setEventHandler {
+    print("SIGINT received. Shutting down...")
+    broker.flushAll()
+    esManager.stop()
+    exit(0)
+}
+signal(SIGINT, SIG_IGN)
+sigintSource.resume()
+
+print("Agent is running.")
 RunLoop.main.run()
