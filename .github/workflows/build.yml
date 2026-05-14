@@ -9,7 +9,7 @@ on:
 jobs:
   build-windows:
     name: Windows Agent (MSVC + CMake)
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
     - uses: actions/checkout@v3
 
@@ -28,7 +28,7 @@ jobs:
       run: |
         echo "Placeholder: Use WiX Toolset to package binaries into an MSI"
         
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: Fenrir-Windows
         path: build/Release/FenrirSetup.exe # Or .msi
@@ -62,7 +62,7 @@ jobs:
         echo "Placeholder: Wrap binary and systemd service using fpm"
         # fpm -s dir -t deb -n fenrir-linux-agent -v 1.0.0 agent/linux/fenrir-linux-agent=/opt/fenrir/bin/ agent/linux/systemd/fenrir.service=/lib/systemd/system/
 
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: Fenrir-Linux
         path: agent/linux/fenrir-linux-agent
@@ -86,7 +86,7 @@ jobs:
       run: |
         echo "Placeholder: pkgbuild --root .build/release --identifier com.fenrir.agent FenrirAgent.pkg"
 
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: Fenrir-macOS
         path: agent/macos/.build/release/fenrir-agent
