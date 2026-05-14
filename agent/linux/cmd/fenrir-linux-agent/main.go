@@ -21,7 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang bpf ../../ebpf/sensor.c -- -I/usr/include/bpf
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang bpf ../../ebpf/sensor.c -- -I/usr/include/bpf -D__TARGET_ARCH_x86
 
 const (
 	EventProcessStart   = 4
