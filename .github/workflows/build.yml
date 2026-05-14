@@ -11,7 +11,7 @@ jobs:
     name: Windows Agent (MSVC + CMake)
     runs-on: windows-2025
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Configure CMake
       run: cmake -B build -S agent/windows/service -DANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD=OFF
@@ -37,10 +37,10 @@ jobs:
     name: Linux Agent (Go + eBPF)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version: '1.21'
 
@@ -71,7 +71,7 @@ jobs:
     name: macOS Agent (Swift + EndpointSecurity)
     runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Build Swift Package
       working-directory: agent/macos
