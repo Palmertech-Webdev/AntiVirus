@@ -1,0 +1,20 @@
+[Unit]
+Description=Fenrir AntiVirus eBPF Agent
+After=network.target
+
+[Service]
+Type=simple
+# eBPF sensors must run as root to load programs and maps into the kernel
+User=root
+Group=root
+
+# The path to the compiled Go binary
+ExecStart=/opt/fenrir/bin/fenrir-linux-agent
+
+Restart=always
+RestartSec=5
+# Remove memory lock limits for eBPF maps
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

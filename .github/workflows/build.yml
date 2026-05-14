@@ -1,0 +1,92 @@
+name: Fenrir Multi-OS Build Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-windows:
+    name: Windows Agent (MSVC + CMake)
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure CMake
+      run: cmake -B build -S agent/windows/service -DANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD=OFF
+
+    - name: Build C++ Agent
+      run: cmake --build build --config Release
+
+    - name: Sign Windows Binaries (Placeholder)
+      run: |
+        echo "Requires secrets.WINDOWS_SIGNING_CERT"
+        # & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /fd SHA256 /a /t http://timestamp.digicert.com build\Release\fenrir-agent-service.exe
+
+    - name: Build MSI Installer
+      run: |
+        echo "Placeholder: Use WiX Toolset to package binaries into an MSI"
+        
+    - uses: actions/upload-artifact@v3
+      with:
+        name: Fenrir-Windows
+        path: build/Release/FenrirSetup.exe # Or .msi
+
+  build-linux:
+    name: Linux Agent (Go + eBPF)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Install LLVM/Clang and eBPF tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang llvm libbpf-dev linux-headers-generic
+
+    - name: Generate eBPF Bytecode
+      working-directory: agent/linux
+      run: make generate
+
+    - name: Build Go Static Binary
+      working-directory: agent/linux
+      run: make build
+
+    - name: Package DEB
+      run: |
+        echo "Placeholder: Wrap binary and systemd service using fpm"
+        # fpm -s dir -t deb -n fenrir-linux-agent -v 1.0.0 agent/linux/fenrir-linux-agent=/opt/fenrir/bin/ agent/linux/systemd/fenrir.service=/lib/systemd/system/
+
+    - uses: actions/upload-artifact@v3
+      with:
+        name: Fenrir-Linux
+        path: agent/linux/fenrir-linux-agent
+
+  build-macos:
+    name: macOS Agent (Swift + EndpointSecurity)
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Build Swift Package
+      working-directory: agent/macos
+      run: swift build -c release
+
+    - name: Sign macOS Binary (Placeholder)
+      run: |
+        echo "Requires secrets.APPLE_CERTIFICATE for Endpoint Security Entitlement"
+        # codesign --force --options runtime --sign "${{ secrets.APPLE_CERT_ID }}" --entitlements entitlements.plist .build/release/fenrir-agent
+
+    - name: Create PKG Installer
+      run: |
+        echo "Placeholder: pkgbuild --root .build/release --identifier com.fenrir.agent FenrirAgent.pkg"
+
+    - uses: actions/upload-artifact@v3
+      with:
+        name: Fenrir-macOS
+        path: agent/macos/.build/release/fenrir-agent
