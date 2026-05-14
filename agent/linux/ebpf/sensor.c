@@ -1,9 +1,5 @@
 // +build ignore
 
-typedef unsigned int __u32;
-typedef unsigned short __u16;
-typedef unsigned long long __u64;
-
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
