@@ -105,7 +105,8 @@ add_library(antivirus-agent-core STATIC
   src/ServiceSnapshotCollector.cpp
   src/TelemetryQueueStore.cpp
   src/UpdaterService.cpp
-  src/WscCoexistenceManager.cpp
+  src/YaraScanner.cpp
+  src/EventEnvelope.cpp
 )
 
 target_include_directories(antivirus-agent-core PUBLIC include ../shared/include ../sensor/etw/include ../sensor/wfp/include)

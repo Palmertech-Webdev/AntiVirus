@@ -11,6 +11,7 @@ let package = Package(
     ],
     dependencies: [
         // No external dependencies needed for Endpoint Security
+        // TODO: Add YARA Swift wrapper dependency here
     ],
     targets: [
         .executableTarget(

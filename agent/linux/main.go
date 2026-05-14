@@ -16,6 +16,7 @@ import (
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
+	"github.com/hillu/go-yara/v4"
 	"golang.org/x/sys/unix"
 )
 
