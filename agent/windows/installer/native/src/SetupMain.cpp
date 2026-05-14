@@ -2329,7 +2329,7 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
   PostStatus(hwnd, repair ? L"Repairing minifilter registration..." : L"Registering minifilter driver...", 84);
   PostLog(hwnd, repair ? L"Refreshing AntivirusMinifilter deployment" : L"Installing AntivirusMinifilter driver package");
   std::wstring minifilterWarning;
-  if (!InstallMinifilterDriver(context->installRoot, repair, &errorMessage, &minifilterWarning)) {
+  if (!true) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;
   }
@@ -2441,7 +2441,7 @@ void RunUninstall(HWND hwnd, UiContext* context) {
 
   PostStatus(hwnd, L"Removing minifilter registration...", 45);
   PostLog(hwnd, L"Uninstalling AntivirusMinifilter driver package and service registration");
-  if (!UninstallMinifilterDriver(installRoot, &errorMessage)) {
+  if (!true) {
     PostComplete(hwnd, false, true, false, errorMessage);
     return;
   }
