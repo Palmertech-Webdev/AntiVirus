@@ -1,8 +1,12 @@
 #include "EvidenceRecorder.h"
 
+#include <algorithm>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
-#include <stdexcept>
+#include <set>
+#include <system_error>
+#include <vector>
 
 #include "RuntimeDatabase.h"
 #include "StringUtils.h"
@@ -19,28 +23,69 @@ std::filesystem::path ResolveDatabasePath(const std::filesystem::path& rootPath,
   return rootPath.parent_path() / L"agent-runtime.db";
 }
 
-}  // namespace
+std::wstring NormalizePathKey(const std::filesystem::path& value) {
+  if (value.empty()) {
+    return {};
+  }
 
-EvidenceRecorder::EvidenceRecorder(std::filesystem::path rootPath, std::filesystem::path databasePath)
-    : rootPath_(std::move(rootPath)), databasePath_(ResolveDatabasePath(rootPath_, databasePath)) {}
+  std::error_code error;
+  auto normalized = std::filesystem::absolute(value, error);
+  if (error) {
+    normalized = value;
+  }
+  auto key = normalized.lexically_normal().wstring();
+  std::transform(key.begin(), key.end(), key.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  std::replace(key.begin(), key.end(), L'/', L'\\');
+  return key;
+}
 
-EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& finding, const PolicySnapshot& policy,
-                                                         const std::wstring& source) const {
-  std::filesystem::create_directories(rootPath_);
+std::vector<std::filesystem::path> ResolveEvidenceRoots(const std::filesystem::path& preferredRoot) {
+  std::vector<std::filesystem::path> roots;
+  std::set<std::wstring> seen;
 
-  EvidenceRecordResult result{
-      .recordId = GenerateGuidString(),
-      .recordPath = rootPath_ / (GenerateGuidString() + L".json")};
+  const auto addRoot = [&](const std::filesystem::path& root) {
+    if (root.empty()) {
+      return;
+    }
 
-  result.recordPath = rootPath_ / (result.recordId + L".json");
+    const auto key = NormalizePathKey(root);
+    if (key.empty() || !seen.insert(key).second) {
+      return;
+    }
 
-  std::ofstream output(result.recordPath, std::ios::trunc);
+    std::error_code error;
+    auto normalized = std::filesystem::absolute(root, error);
+    if (error) {
+      normalized = root;
+    }
+    roots.push_back(normalized.lexically_normal());
+  };
+
+  addRoot(preferredRoot);
+
+  const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
+  if (!programData.empty()) {
+    addRoot(std::filesystem::path(programData) / L"FenrirAgent" / L"runtime" / L"evidence");
+  }
+
+  const auto localAppData = ReadEnvironmentVariable(L"LOCALAPPDATA");
+  if (!localAppData.empty()) {
+    addRoot(std::filesystem::path(localAppData) / L"FenrirAgent" / L"runtime" / L"evidence");
+  }
+
+  return roots;
+}
+
+bool TryWriteEvidenceRecord(const std::filesystem::path& recordPath, const ScanFinding& finding, const PolicySnapshot& policy,
+                            const std::wstring& source, const std::wstring& recordId) {
+  std::ofstream output(recordPath, std::ios::trunc);
   if (!output.is_open()) {
-    throw std::runtime_error("Unable to write a local evidence record");
+    return false;
   }
 
   output << "{\n";
-  output << "  \"evidenceId\": \"" << EscapeJsonString(result.recordId) << "\",\n";
+  output << "  \"evidenceId\": \"" << EscapeJsonString(recordId) << "\",\n";
   output << "  \"recordedAt\": \"" << EscapeJsonString(CurrentUtcTimestamp()) << "\",\n";
   output << "  \"source\": \"" << EscapeJsonString(source) << "\",\n";
   output << "  \"policyRevision\": \"" << EscapeJsonString(policy.revision) << "\",\n";
@@ -52,12 +97,10 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
   output << "  \"signer\": \"" << EscapeJsonString(finding.signer) << "\",\n";
   output << "  \"heuristicScore\": " << finding.heuristicScore << ",\n";
   output << "  \"archiveEntryCount\": " << finding.archiveEntryCount << ",\n";
-  output << "  \"disposition\": \"" << EscapeJsonString(VerdictDispositionToString(finding.verdict.disposition))
-         << "\",\n";
+  output << "  \"disposition\": \"" << EscapeJsonString(VerdictDispositionToString(finding.verdict.disposition)) << "\",\n";
   output << "  \"tacticId\": \"" << EscapeJsonString(finding.verdict.tacticId) << "\",\n";
   output << "  \"techniqueId\": \"" << EscapeJsonString(finding.verdict.techniqueId) << "\",\n";
-  output << "  \"remediationStatus\": \"" << EscapeJsonString(RemediationStatusToString(finding.remediationStatus))
-         << "\",\n";
+  output << "  \"remediationStatus\": \"" << EscapeJsonString(RemediationStatusToString(finding.remediationStatus)) << "\",\n";
   output << "  \"quarantineRecordId\": \"" << EscapeJsonString(finding.quarantineRecordId) << "\",\n";
   output << "  \"quarantinedPath\": \"" << EscapeJsonString(finding.quarantinedPath.wstring()) << "\",\n";
   output << "  \"remediationError\": \"" << EscapeJsonString(finding.remediationError) << "\",\n";
@@ -82,25 +125,59 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
          << "\", \"summary\": \"" << EscapeJsonString(RemediationStatusToString(finding.remediationStatus)) << "\"}\n";
   output << "  ]\n";
   output << "}\n";
+  output.flush();
+  return output.good();
+}
 
-  RuntimeDatabase(databasePath_).UpsertEvidenceRecord(EvidenceIndexRecord{
-      .recordId = result.recordId,
-      .recordedAt = CurrentUtcTimestamp(),
-      .source = source,
-      .recordPath = result.recordPath,
-      .subjectPath = finding.path,
-      .sha256 = finding.sha256,
-      .disposition = VerdictDispositionToString(finding.verdict.disposition),
-      .tacticId = finding.verdict.tacticId,
-      .techniqueId = finding.verdict.techniqueId,
-      .appName = L"",
-      .contentName = L"",
-      .alertTitle = finding.alertTitle,
-      .contextType = finding.originContext.channel,
-      .sourceApplication = finding.originContext.sourceApplication,
-      .originReference = !finding.originContext.sourceDomain.empty() ? finding.originContext.sourceDomain
-                                                                     : finding.originContext.navigationType,
-      .contextJson = SerializeContentOriginContext(finding.originContext)});
+}  // namespace
+
+EvidenceRecorder::EvidenceRecorder(std::filesystem::path rootPath, std::filesystem::path databasePath)
+    : rootPath_(std::move(rootPath)), databasePath_(ResolveDatabasePath(rootPath_, databasePath)) {}
+
+EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& finding, const PolicySnapshot& policy,
+                                                         const std::wstring& source) const {
+  EvidenceRecordResult result{
+      .recordId = GenerateGuidString(),
+      .recordPath = {}};
+
+  for (const auto& root : ResolveEvidenceRoots(rootPath_)) {
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    if (error) {
+      continue;
+    }
+
+    const auto candidatePath = root / (result.recordId + L".json");
+    if (TryWriteEvidenceRecord(candidatePath, finding, policy, source, result.recordId)) {
+      result.recordPath = candidatePath;
+      break;
+    }
+  }
+
+  RuntimeDatabase database(databasePath_);
+  if (!result.recordPath.empty()) {
+    database.UpsertEvidenceRecord(EvidenceIndexRecord{
+        .recordId = result.recordId,
+        .recordedAt = CurrentUtcTimestamp(),
+        .source = source,
+        .recordPath = result.recordPath,
+        .subjectPath = finding.path,
+        .sha256 = finding.sha256,
+        .disposition = VerdictDispositionToString(finding.verdict.disposition),
+        .tacticId = finding.verdict.tacticId,
+        .techniqueId = finding.verdict.techniqueId,
+        .appName = L"",
+        .contentName = L"",
+        .alertTitle = finding.alertTitle,
+        .contextType = finding.originContext.channel,
+        .sourceApplication = finding.originContext.sourceApplication,
+        .originReference = !finding.originContext.sourceDomain.empty() ? finding.originContext.sourceDomain
+                                                                       : finding.originContext.navigationType,
+        .contextJson = SerializeContentOriginContext(finding.originContext)});
+  }
+
+  const auto evidenceRecordId = result.recordPath.empty() ? std::wstring{} : result.recordId;
+
   RuntimeDatabase(databasePath_).RecordScanHistory(ScanHistoryRecord{
       .recordedAt = CurrentUtcTimestamp(),
       .source = source,
@@ -113,7 +190,7 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
       .tacticId = finding.verdict.tacticId,
       .techniqueId = finding.verdict.techniqueId,
       .remediationStatus = RemediationStatusToString(finding.remediationStatus),
-      .evidenceRecordId = result.recordId,
+      .evidenceRecordId = evidenceRecordId,
       .quarantineRecordId = finding.quarantineRecordId,
       .alertTitle = finding.alertTitle,
       .contextType = finding.originContext.channel,
@@ -121,6 +198,10 @@ EvidenceRecordResult EvidenceRecorder::RecordScanFinding(const ScanFinding& find
       .originReference = !finding.originContext.sourceDomain.empty() ? finding.originContext.sourceDomain
                                                                      : finding.originContext.navigationType,
       .contextJson = SerializeContentOriginContext(finding.originContext)});
+
+  if (result.recordPath.empty()) {
+    result.recordId.clear();
+  }
 
   return result;
 }

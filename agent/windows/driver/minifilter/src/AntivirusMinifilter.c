@@ -29,6 +29,10 @@ FLT_PREOP_CALLBACK_STATUS
 AntivirusPreWrite(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
                   _Flt_CompletionContext_Outptr_ PVOID* CompletionContext);
 
+FLT_POSTOP_CALLBACK_STATUS
+AntivirusPostWrite(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                   _In_opt_ PVOID CompletionContext, _In_ FLT_POST_OPERATION_FLAGS Flags);
+
 FLT_PREOP_CALLBACK_STATUS
 AntivirusPreSetInformation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
                            _Flt_CompletionContext_Outptr_ PVOID* CompletionContext);
@@ -120,7 +124,7 @@ AntivirusPathIsUserControlled(_In_z_ const WCHAR* Path);
 
 const FLT_OPERATION_REGISTRATION gCallbacks[] = {
     {IRP_MJ_CREATE, 0, AntivirusPreCreate, NULL},
-    {IRP_MJ_WRITE, 0, AntivirusPreWrite, NULL},
+    {IRP_MJ_WRITE, 0, AntivirusPreWrite, AntivirusPostWrite},
   {IRP_MJ_SET_INFORMATION, 0, AntivirusPreSetInformation, NULL},
   {IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION, 0, AntivirusPreAcquireForSectionSynchronization, NULL},
     {IRP_MJ_OPERATION_END}};
@@ -269,6 +273,29 @@ AntivirusPreWrite(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS Fl
   }
 
   return FLT_PREOP_SUCCESS_NO_CALLBACK;
+}
+
+FLT_POSTOP_CALLBACK_STATUS
+AntivirusPostWrite(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                   _In_opt_ PVOID CompletionContext, _In_ FLT_POST_OPERATION_FLAGS Flags) {
+  UNREFERENCED_PARAMETER(CompletionContext);
+
+  if (Data == NULL || Data->Iopb == NULL || !NT_SUCCESS(Data->IoStatus.Status)) {
+    return FLT_POSTOP_FINISHED_PROCESSING;
+  }
+
+  if (FlagOn(Flags, FLTFL_POST_OPERATION_DRAINING) || FlagOn(Data->Iopb->IrpFlags, IRP_PAGING_IO)) {
+    return FLT_POSTOP_FINISHED_PROCESSING;
+  }
+
+  if (KeGetCurrentIrql() > APC_LEVEL) {
+    return FLT_POSTOP_FINISHED_PROCESSING;
+  }
+
+  // A pre-write scan often sees the old file contents. Post-write lets the
+  // broker inspect completed browser downloads and quarantine malicious bytes.
+  (void)AntivirusInspectFileOperation(Data, FltObjects, ANTIVIRUS_REALTIME_FILE_OPERATION_WRITE);
+  return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
 FLT_PREOP_CALLBACK_STATUS

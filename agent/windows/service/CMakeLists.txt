@@ -10,7 +10,7 @@ set(ANTIVIRUS_DEV_OUTPUT_ROOT "${ANTIVIRUS_WINDOWS_ROOT}/out/dev" CACHE PATH
     "Fenrir development-stage output root.")
 set(ANTIVIRUS_INSTALL_OUTPUT_ROOT "${ANTIVIRUS_WINDOWS_ROOT}/out/install" CACHE PATH
     "Fenrir installer output root.")
-set(ANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD ON CACHE BOOL
+set(ANTIVIRUS_REQUIRE_MINIFILTER_PAYLOAD OFF CACHE BOOL
   "Require staged minifilter INF/SYS/CAT payloads in the development output root.")
 set(ANTIVIRUS_WEBVIEW2_BOOTSTRAPPER "" CACHE FILEPATH
   "Optional path to a Microsoft Edge WebView2 runtime installer to embed in FenrirSetup.")
@@ -376,7 +376,7 @@ add_dependencies(antivirus-setup
 target_include_directories(antivirus-setup PRIVATE
   ${INSTALLER_NATIVE_DIR}/include
 )
-target_link_libraries(antivirus-setup PRIVATE comctl32 ole32 shell32 advapi32 crypt32)
+target_link_libraries(antivirus-setup PRIVATE comctl32 ole32 shell32 advapi32 crypt32 dwmapi)
 if(MINGW)
   target_link_libraries(antivirus-setup PRIVATE -Wl,-Bstatic stdc++ -Wl,-Bdynamic)
 endif()

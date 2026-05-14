@@ -34,3 +34,26 @@ This driver can be built in this repository when WDK/MSVC tooling is available.
 5. Rebuild the installer and validate with [ValidateMinifilterPackage.ps1](/C:/Users/matt_admin/Documents/GitHub/AntiVirus/agent/windows/tools/scannercli/ValidateMinifilterPackage.ps1).
 
 Until Microsoft-attested artifacts are staged, Windows can reject driver load with `error 577` on Secure Boot systems, and setup will continue in reduced-protection mode.
+
+## Local Testing Path (No EV, No Partner Center)
+
+For local development and QA machines, you can run the minifilter in Windows test mode with a self-signed certificate.
+
+Run this from an elevated PowerShell session:
+
+`.\EnableLocalMinifilterTestMode.ps1`
+
+What it does:
+
+- Creates or reuses a local `CN=Antivirus Test Driver Signing` certificate in `LocalMachine\My`
+- Trusts that cert in `LocalMachine\Root` and `LocalMachine\TrustedPublisher`
+- Re-signs `AntivirusMinifilter.sys` and `AntivirusMinifilter.cat`
+- Stages artifacts into `agent/windows/out/dev/driver`
+- Enables `TESTSIGNING` boot mode
+- Installs the driver package via `pnputil`
+- Writes a report to `package/local-test-mode-report.json`
+
+Notes:
+
+- This is for test environments only, not production deployment.
+- If Secure Boot blocks `TESTSIGNING`, disable Secure Boot in firmware, rerun the script, and reboot.

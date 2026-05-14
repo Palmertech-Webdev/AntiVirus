@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cwctype>
+#include <exception>
 #include <filesystem>
 #include <set>
 #include <system_error>
@@ -122,8 +123,25 @@ void RecordEvidence(const AgentConfig& config, const PolicySnapshot& policy, std
                     const std::wstring& source) {
   EvidenceRecorder evidenceRecorder(config.evidenceRootPath, config.runtimeDatabasePath);
   for (auto& finding : findings) {
-    const auto result = evidenceRecorder.RecordScanFinding(finding, policy, source);
-    finding.evidenceRecordId = result.recordId;
+    try {
+      const auto result = evidenceRecorder.RecordScanFinding(finding, policy, source);
+      finding.evidenceRecordId = result.recordId;
+      if (finding.evidenceRecordId.empty()) {
+        finding.verdict.reasons.push_back(
+            {L"EVIDENCE_RECORD_SKIPPED",
+             L"Fenrir could not persist a local evidence file and continued with finding telemetry only."});
+      }
+    } catch (const std::exception& error) {
+      finding.evidenceRecordId.clear();
+      finding.verdict.reasons.push_back(
+          {L"EVIDENCE_RECORD_SKIPPED",
+           L"Fenrir could not persist a local evidence file and continued scanning: " + Utf8ToWide(error.what())});
+    } catch (...) {
+      finding.evidenceRecordId.clear();
+      finding.verdict.reasons.push_back(
+          {L"EVIDENCE_RECORD_SKIPPED",
+           L"Fenrir could not persist a local evidence file and continued scanning."});
+    }
   }
 }
 
@@ -169,6 +187,14 @@ std::wstring BuildScanSessionLabel(const std::wstring& source) {
 
   if (_wcsicmp(source.c_str(), L"endpoint-ui.custom-scan") == 0) {
     return L"[Folder scan]";
+  }
+
+  if (_wcsicmp(source.c_str(), L"agent-service.auto.quick-scan") == 0) {
+    return L"[Scheduled quick scan]";
+  }
+
+  if (_wcsicmp(source.c_str(), L"agent-service.auto.full-drive-scan") == 0) {
+    return L"[Scheduled full scan]";
   }
 
   return L"[On-demand scan]";

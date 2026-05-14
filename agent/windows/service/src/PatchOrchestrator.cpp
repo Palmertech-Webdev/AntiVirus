@@ -47,6 +47,7 @@ struct SoftwareUpdateCandidate {
 };
 
 constexpr std::size_t kMaxSoftwareUpdatesPerCycle = 24;
+constexpr DWORD kWingetExitUpdateNotApplicable = 0x8A15002B;
 
 bool IsRunningOnBatteryPower() {
   SYSTEM_POWER_STATUS status{};
@@ -890,8 +891,8 @@ std::wstring ClassifyWindowsUpdate(const std::wstring& title, const std::wstring
 
 std::wstring ComputeUpdateStatusFromOutput(const ProcessExecutionResult& result) {
   const auto lower = ToLowerCopy(result.output);
-  if (result.exitCode != 0) {
-    return L"failed";
+  if (result.exitCode == kWingetExitUpdateNotApplicable) {
+    return L"current";
   }
   if (lower.find(L"no available upgrade found") != std::wstring::npos) {
     return L"current";
@@ -902,7 +903,55 @@ std::wstring ComputeUpdateStatusFromOutput(const ProcessExecutionResult& result)
   if (lower.find(L"available") != std::wstring::npos || lower.find(L"upgrade") != std::wstring::npos) {
     return L"available";
   }
+  if (result.exitCode != 0) {
+    if (lower.find(L"source agreements") != std::wstring::npos ||
+        lower.find(L"accept-source-agreements") != std::wstring::npos) {
+      return L"provider_agreement_required";
+    }
+    if (lower.find(L"source") != std::wstring::npos &&
+        (lower.find(L"failed") != std::wstring::npos || lower.find(L"unavailable") != std::wstring::npos)) {
+      return L"provider_source_unavailable";
+    }
+    if (lower.find(L"requires user interaction") != std::wstring::npos ||
+        lower.find(L"interactivity") != std::wstring::npos) {
+      return L"manual";
+    }
+    return L"provider_failed";
+  }
   return L"unknown";
+}
+
+bool IsInformationalWingetStatus(const std::wstring& status) {
+  return _wcsicmp(status.c_str(), L"current") == 0 || _wcsicmp(status.c_str(), L"available") == 0 ||
+         _wcsicmp(status.c_str(), L"unsupported") == 0 || _wcsicmp(status.c_str(), L"manual") == 0;
+}
+
+std::wstring FirstNonEmptyOutputLine(std::wstring output) {
+  std::replace(output.begin(), output.end(), L'\r', L'\n');
+  std::wstringstream stream(output);
+  std::wstring line;
+  while (std::getline(stream, line)) {
+    while (!line.empty() && std::iswspace(line.front())) {
+      line.erase(line.begin());
+    }
+    while (!line.empty() && std::iswspace(line.back())) {
+      line.pop_back();
+    }
+    if (!line.empty()) {
+      if (line.size() > 240) {
+        line.resize(240);
+        line += L"...";
+      }
+      return line;
+    }
+  }
+  return {};
+}
+
+std::wstring BuildProviderOutputJson(const ProcessExecutionResult& result) {
+  return std::wstring(L"{\"exitCode\":") + std::to_wstring(result.exitCode) + L",\"summary\":\"" +
+         EscapeWideForJson(FirstNonEmptyOutputLine(result.output)) + L"\",\"output\":\"" +
+         Utf8ToWide(EscapeJsonString(result.output)) + L"\"}";
 }
 
 PatchPolicyRecord LoadOrCreatePolicy(RuntimeDatabase& database) {
@@ -1130,12 +1179,18 @@ PatchExecutionResult ExecuteWingetOperation(const std::wstring& wingetId, const 
                            : std::wstring(L"cmd.exe /c winget upgrade --id \"") + wingetId +
                                  L"\" --accept-package-agreements --accept-source-agreements --silent --disable-interactivity";
   const auto result = ExecuteHiddenProcessCapture(command);
+  const auto status = searchOnly ? ComputeUpdateStatusFromOutput(result)
+                                 : (result.exitCode == 0 ? std::wstring(L"completed")
+                                                         : ComputeUpdateStatusFromOutput(result));
+  const auto success = searchOnly ? IsInformationalWingetStatus(status)
+                                  : (result.exitCode == 0 || result.exitCode == kWingetExitUpdateNotApplicable);
   return PatchExecutionResult{
-      .success = result.exitCode == 0,
+      .success = success,
       .action = searchOnly ? L"search" : L"install",
       .provider = L"winget",
-      .status = searchOnly ? ComputeUpdateStatusFromOutput(result) : (result.exitCode == 0 ? L"completed" : L"failed"),
-      .detailJson = std::wstring(L"{\"output\":\"") + Utf8ToWide(EscapeJsonString(result.output)) + L"\"}"};
+      .status = status,
+      .errorCode = success ? std::wstring{} : std::wstring(L"WINGET_EXIT_") + std::to_wstring(result.exitCode),
+      .detailJson = BuildProviderOutputJson(result)};
 }
 
 PatchExecutionResult ExecuteNativeOperation(const std::wstring& providerId) {
@@ -1384,6 +1439,8 @@ std::wstring BuildPatchAttemptTrailJson(const std::vector<PatchExecutionResult>&
     json += EscapeWideForJson(attempt.status);
     json += L"\",\"errorCode\":\"";
     json += EscapeWideForJson(attempt.errorCode);
+    json += L"\",\"detailJson\":\"";
+    json += EscapeWideForJson(attempt.detailJson);
     json += L"\",\"success\":";
     json += attempt.success ? L"true" : L"false";
     json += L"}";

@@ -460,10 +460,17 @@ bool IsCurrentTokenElevated() {
 
   TOKEN_ELEVATION elevation{};
   DWORD bytesReturned = 0;
-  const auto elevated = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &bytesReturned) != FALSE &&
-                        elevation.TokenIsElevated != 0;
+  auto elevated = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &bytesReturned) != FALSE &&
+                  elevation.TokenIsElevated != 0;
   CloseHandle(token);
-  return elevated;
+  if (elevated) {
+    return true;
+  }
+
+  // During named-pipe impersonation, the effective caller can be an elevated admin
+  // even when TokenElevation is not reported like a primary process token.
+  const auto adminMembership = IsCurrentTokenInAdministratorsGroup();
+  return adminMembership.has_value() && *adminMembership;
 }
 
 std::wstring QueryCurrentUserSid() {
@@ -632,6 +639,20 @@ LocalActionAuthorization AuthorizeCurrentUser(const LocalAction action) {
           .reason = L"Issuing approval sessions requires an elevated administrator context."};
 
     case LocalAction::PatchInstall:
+      if (isRestrictedHouseholdUser) {
+        return LocalActionAuthorization{
+            .role = role,
+            .allowed = false,
+            .requestOnly = true,
+            .reason = L"This household profile requires owner approval before installing software or Windows updates."};
+      }
+
+      return LocalActionAuthorization{
+          .role = role,
+          .allowed = true,
+          .requestOnly = false,
+          .reason = L"Fenrir can run software and Windows update maintenance through the protected service."};
+
     case LocalAction::QuarantineMutate:
       if (isAdmin && elevated) {
         return LocalActionAuthorization{

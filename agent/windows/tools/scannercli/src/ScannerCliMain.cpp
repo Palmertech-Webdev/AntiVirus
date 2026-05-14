@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -270,8 +271,26 @@ void RecordEvidence(const antivirus::agent::AgentConfig& config, const antivirus
                     std::vector<antivirus::agent::ScanFinding>& findings) {
   antivirus::agent::EvidenceRecorder evidenceRecorder(config.evidenceRootPath, config.runtimeDatabasePath);
   for (auto& finding : findings) {
-    const auto result = evidenceRecorder.RecordScanFinding(finding, policy, L"scannercli");
-    finding.evidenceRecordId = result.recordId;
+    try {
+      const auto result = evidenceRecorder.RecordScanFinding(finding, policy, L"scannercli");
+      finding.evidenceRecordId = result.recordId;
+      if (finding.evidenceRecordId.empty()) {
+        finding.verdict.reasons.push_back(
+            {L"EVIDENCE_RECORD_SKIPPED",
+             L"Fenrir could not persist a local evidence file and continued with finding telemetry only."});
+      }
+    } catch (const std::exception& error) {
+      finding.evidenceRecordId.clear();
+      finding.verdict.reasons.push_back(
+          {L"EVIDENCE_RECORD_SKIPPED",
+           L"Fenrir could not persist a local evidence file and continued scanning: " +
+               antivirus::agent::Utf8ToWide(error.what())});
+    } catch (...) {
+      finding.evidenceRecordId.clear();
+      finding.verdict.reasons.push_back(
+          {L"EVIDENCE_RECORD_SKIPPED",
+           L"Fenrir could not persist a local evidence file and continued scanning."});
+    }
   }
 }
 

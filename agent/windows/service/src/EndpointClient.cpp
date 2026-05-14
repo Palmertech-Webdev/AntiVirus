@@ -46,6 +46,21 @@ struct ServiceHandleCloser {
 
 using ServiceHandle = std::unique_ptr<std::remove_pointer_t<SC_HANDLE>, ServiceHandleCloser>;
 
+bool IsLocalBrokerRetryableError(const DWORD error) {
+  return error == ERROR_FILE_NOT_FOUND || error == ERROR_PIPE_BUSY;
+}
+
+std::wstring BuildLocalBrokerUnavailableMessage(const LocalServiceState serviceState) {
+  switch (serviceState) {
+    case LocalServiceState::StartPending:
+      return L"Fenrir local control is still starting. Try again in a moment.";
+    case LocalServiceState::Running:
+      return L"Fenrir local control is still initializing. Try again in a moment.";
+    default:
+      return L"Fenrir local control is unavailable. Start the protection service and try again.";
+  }
+}
+
 bool IsThreatDisposition(const std::wstring& disposition) {
   return _wcsicmp(disposition.c_str(), L"allow") != 0;
 }
@@ -592,42 +607,65 @@ LocalBrokerCommandResult SendLocalBrokerCommand(const AgentConfig&, const std::w
                                                 const std::wstring& sessionAuth) {
   constexpr DWORD kReadTimeoutMilliseconds = 10'000;
   constexpr DWORD kBufferBytes = 64 * 1024;
+  constexpr int kConnectionRetryCount = 20;
+  constexpr DWORD kConnectionRetryDelayMilliseconds = 250;
 
   const auto requestJson = BuildBrokerRequestJson(type, recordId, payloadJson, targetPath, sessionAuth);
   const auto requestUtf8 = WideToUtf8(requestJson);
   std::vector<char> responseBuffer(kBufferBytes, '\0');
   DWORD bytesRead = 0;
 
-  const auto success = CallNamedPipeW(kFenrirLocalControlPipeName, const_cast<char*>(requestUtf8.data()),
-                                      static_cast<DWORD>(requestUtf8.size()),
-                                      responseBuffer.data(), kBufferBytes, &bytesRead, kReadTimeoutMilliseconds);
-  if (success == FALSE) {
-    const auto error = GetLastError();
-    const auto message = error == ERROR_FILE_NOT_FOUND || error == ERROR_PIPE_BUSY
-                             ? L"Fenrir local control is unavailable. Start the protection service and try again."
-                             : L"Fenrir local control request failed: " + FormatWindowsErrorMessage(error);
-    return LocalBrokerCommandResult{.success = false, .statusCode = static_cast<int>(error), .errorMessage = message};
-  }
-
-  const auto responseJson = Utf8ToWide(std::string(responseBuffer.data(), responseBuffer.data() + bytesRead));
-  auto result = LocalBrokerCommandResult{
-      .success = ExtractJsonBool(responseJson, "success").value_or(false),
-      .statusCode = ExtractJsonInt(responseJson, "statusCode").value_or(0),
-      .requestOnly = ExtractJsonBool(responseJson, "requestOnly").value_or(false),
-      .requiresReauth = ExtractJsonBool(responseJson, "requiresReauth").value_or(false),
-      .approvalRequestId = ExtractJsonString(responseJson, "approvalRequestId").value_or(L""),
-      .responseJson = ExtractJsonString(responseJson, "resultJson").value_or(L""),
-      .errorMessage = ExtractJsonString(responseJson, "errorMessage").value_or(L"")};
-
-  if (!result.success && result.errorMessage.empty()) {
-    if (result.requiresReauth) {
-      result.errorMessage = L"Fenrir requires a fresh approval session for this sensitive action.";
-    } else if (result.requestOnly) {
-      result.errorMessage = L"Fenrir policy requires elevated owner approval for this local action.";
+  DWORD lastError = ERROR_SUCCESS;
+  auto lastObservedServiceState = QueryAgentServiceState();
+  for (int attempt = 0; attempt < kConnectionRetryCount; ++attempt) {
+    lastObservedServiceState = QueryAgentServiceState();
+    if (lastObservedServiceState == LocalServiceState::Stopped || lastObservedServiceState == LocalServiceState::Paused) {
+      StartAgentService();
+      lastObservedServiceState = QueryAgentServiceState();
     }
+
+    bytesRead = 0;
+    const auto success = CallNamedPipeW(kFenrirLocalControlPipeName, const_cast<char*>(requestUtf8.data()),
+                                        static_cast<DWORD>(requestUtf8.size()),
+                                        responseBuffer.data(), kBufferBytes, &bytesRead, kReadTimeoutMilliseconds);
+    if (success != FALSE) {
+      const auto responseJson = Utf8ToWide(std::string(responseBuffer.data(), responseBuffer.data() + bytesRead));
+      auto result = LocalBrokerCommandResult{
+          .success = ExtractJsonBool(responseJson, "success").value_or(false),
+          .statusCode = ExtractJsonInt(responseJson, "statusCode").value_or(0),
+          .requestOnly = ExtractJsonBool(responseJson, "requestOnly").value_or(false),
+          .requiresReauth = ExtractJsonBool(responseJson, "requiresReauth").value_or(false),
+          .approvalRequestId = ExtractJsonString(responseJson, "approvalRequestId").value_or(L""),
+          .responseJson = ExtractJsonString(responseJson, "resultJson").value_or(L""),
+          .errorMessage = ExtractJsonString(responseJson, "errorMessage").value_or(L"")};
+
+      if (!result.success && result.errorMessage.empty()) {
+        if (result.requiresReauth) {
+          result.errorMessage = L"Fenrir requires a fresh approval session for this sensitive action.";
+        } else if (result.requestOnly) {
+          result.errorMessage = L"Fenrir policy requires elevated owner approval for this local action.";
+        }
+      }
+
+      return result;
+    }
+
+    lastError = GetLastError();
+    if (!IsLocalBrokerRetryableError(lastError) || lastObservedServiceState == LocalServiceState::NotInstalled ||
+        attempt + 1 >= kConnectionRetryCount) {
+      break;
+    }
+
+    Sleep(kConnectionRetryDelayMilliseconds);
   }
 
-  return result;
+  const auto message = IsLocalBrokerRetryableError(lastError)
+                           ? BuildLocalBrokerUnavailableMessage(lastObservedServiceState)
+                           : L"Fenrir local control request failed: " + FormatWindowsErrorMessage(lastError);
+  return LocalBrokerCommandResult{
+      .success = false,
+      .statusCode = static_cast<int>(lastError),
+      .errorMessage = message};
 }
 
 LocalBrokerCommandResult ExecuteQueuedLocalApproval(const AgentConfig& config, const std::wstring& approvalRequestId) {
@@ -696,24 +734,12 @@ LocalBrokerCommandResult ListPendingLocalApprovals(const AgentConfig& config, co
 
 PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& config, const std::wstring& softwareId) {
   const auto payloadJson = std::wstring(L"{\"softwareId\":\"") + EscapeJsonValue(softwareId) + L"\"}";
-  std::wstring approvalError;
-  const auto approvalToken = AcquireLocalSessionApproval(config, &approvalError);
-  if (!approvalToken.has_value()) {
-    return PatchExecutionResult{
-        .success = false,
-        .targetId = softwareId,
-        .status = L"approval_required",
-        .errorCode = L"approval-session",
-        .detailJson = std::wstring(L"{\"error\":\"") +
-                      EscapeJsonValue(approvalError.empty() ? L"Fenrir local approval session is required." : approvalError) +
-                      L"\"}"};
-  }
-
-  const auto brokerResult = SendLocalBrokerCommand(config, L"patch.software.install", L"", payloadJson, L"", *approvalToken);
+  const auto brokerResult = SendLocalBrokerCommand(config, L"patch.software.install", L"", payloadJson);
   if (!brokerResult.success) {
     return PatchExecutionResult{
         .success = false,
         .targetId = softwareId,
+        .provider = L"service-broker",
         .status = L"broker_failed",
         .errorCode = std::to_wstring(brokerResult.statusCode),
         .detailJson = std::wstring(L"{\"error\":\"") +
@@ -723,9 +749,10 @@ PatchExecutionResult ExecuteSoftwarePatchThroughService(const AgentConfig& confi
   }
 
   return PatchExecutionResult{
-      .success = ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"installed" ||
-                 ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"updated" ||
-                 ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"available",
+      .success = ExtractJsonBool(brokerResult.responseJson, "success").value_or(
+          ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"installed" ||
+          ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"updated" ||
+          ExtractJsonString(brokerResult.responseJson, "status").value_or(L"") == L"available"),
       .rebootRequired = ExtractJsonBool(brokerResult.responseJson, "rebootRequired").value_or(false),
       .action = ExtractJsonString(brokerResult.responseJson, "action").value_or(L"patch.software.install"),
       .targetId = ExtractJsonString(brokerResult.responseJson, "targetId").value_or(softwareId),

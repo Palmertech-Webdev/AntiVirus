@@ -53,6 +53,11 @@ class AgentService {
 
   std::vector<std::filesystem::path> BuildMonitoredRoots() const;
   void RunSyncLoop(AgentRunMode mode);
+  void RunAutomatedRiskAssessments(int cycle);
+  void RunScheduledQuickScan(int cycle);
+  void RunScheduledFullDriveScan(int cycle);
+  void RunLiveThreatSweep(int cycle);
+  void RunVulnerabilityAssessment(int cycle);
   bool WaitForNextCycle(AgentRunMode mode, int nextCycle);
   bool ShouldStop() const;
   void ProcessPamRequests();
@@ -61,6 +66,7 @@ class AgentService {
   std::filesystem::path GetPamAuditJournalPath() const;
 
   void SyncWithControlPlane(int cycle);
+  void SyncUpdateOnly(int cycle);
   void EnsureEnrollment();
   void ResetEnrollmentState();
   bool RecoverDeviceIdentity(const std::exception& error, const std::wstring& operationName);

@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -32,6 +33,7 @@
 #include "FileInventory.h"
 #include "FileSnapshotCollector.h"
 #include "HardeningManager.h"
+#include "LocalScanRunner.h"
 #include "LocalSecurity.h"
 #include "ProcessInventory.h"
 #include "ProcessSnapshotCollector.h"
@@ -129,6 +131,7 @@ struct LoadedLocalAdminBaseline {
 std::wstring GetSystemBinaryPath(const wchar_t* relativePath);
 bool QueuePamRequestPayload(const std::filesystem::path& requestPath, const PamRequestPayload& request,
                             std::wstring* errorMessage);
+std::optional<std::chrono::system_clock::time_point> ParseUtcTimestamp(const std::wstring& value);
 
 std::string EscapeRegex(const std::string& value) {
   std::string escaped;
@@ -297,6 +300,15 @@ std::wstring ToLowerCopy(std::wstring value) {
   return value;
 }
 
+std::wstring TrimWide(std::wstring value) {
+  const auto first = value.find_first_not_of(L" \t\r\n");
+  if (first == std::wstring::npos) {
+    return {};
+  }
+  const auto last = value.find_last_not_of(L" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
 bool PathStartsWith(std::wstring path, std::wstring prefix) {
   if (path.empty() || prefix.empty()) {
     return false;
@@ -309,6 +321,15 @@ bool PathStartsWith(std::wstring path, std::wstring prefix) {
   }
 
   return path == prefix.substr(0, prefix.size() - 1) || path.starts_with(prefix);
+}
+
+bool IsAppliedUpdateStatus(const std::wstring& status) {
+  const auto normalized = ToLowerCopy(status);
+  return normalized == L"completed" || normalized == L"pending_restart";
+}
+
+std::wstring BuildUpdateIdentityKey(const std::wstring& packageId, const std::wstring& targetVersion) {
+  return ToLowerCopy(packageId) + L"|" + ToLowerCopy(targetVersion);
 }
 
 std::filesystem::path ResolveRuntimeRoot(const AgentConfig& config) {
@@ -431,6 +452,507 @@ std::optional<EventEnvelope> BuildBehaviorEventFromNetworkTelemetry(const Teleme
       .occurredAt = std::chrono::system_clock::now()};
 }
 
+constexpr wchar_t kScheduledQuickScanSource[] = L"agent-service.auto.quick-scan";
+constexpr wchar_t kScheduledFullDriveScanSource[] = L"agent-service.auto.full-drive-scan";
+constexpr wchar_t kLiveThreatSweepSource[] = L"agent-service.auto.live-threat-sweep";
+constexpr wchar_t kVulnerabilityAssessmentSource[] = L"agent-service.auto.vulnerability-assessment";
+constexpr wchar_t kSignatureIntelSyncSource[] = L"agent-service.auto.signature-intelligence";
+constexpr int kSignatureIntelSyncIntervalMinutes = 1440;
+
+std::map<std::wstring, std::wstring> LoadSimpleStateFile(const std::filesystem::path& path) {
+  std::map<std::wstring, std::wstring> state;
+  std::wifstream input(path);
+  if (!input.is_open()) {
+    return state;
+  }
+
+  std::wstring line;
+  while (std::getline(input, line)) {
+    const auto trimmed = TrimWide(line);
+    if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
+      continue;
+    }
+
+    const auto separator = trimmed.find(L'=');
+    if (separator == std::wstring::npos) {
+      continue;
+    }
+
+    const auto key = TrimWide(trimmed.substr(0, separator));
+    const auto value = TrimWide(trimmed.substr(separator + 1));
+    if (!key.empty()) {
+      state[key] = value;
+    }
+  }
+
+  return state;
+}
+
+void SaveSimpleStateFile(const std::filesystem::path& path, const std::map<std::wstring, std::wstring>& state) {
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+
+  std::wofstream output(path, std::ios::trunc);
+  if (!output.is_open()) {
+    return;
+  }
+
+  for (const auto& [key, value] : state) {
+    output << key << L"=" << value << L"\n";
+  }
+  output.flush();
+}
+
+bool HasInteractiveUserSession() {
+  PWTS_SESSION_INFOW sessions = nullptr;
+  DWORD sessionCount = 0;
+  if (WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &sessionCount) == FALSE) {
+    return true;
+  }
+
+  bool hasActiveSession = false;
+  for (DWORD index = 0; index < sessionCount; ++index) {
+    if (sessions[index].State == WTSActive) {
+      hasActiveSession = true;
+      break;
+    }
+  }
+
+  if (sessions != nullptr) {
+    WTSFreeMemory(sessions);
+  }
+  return hasActiveSession;
+}
+
+std::wstring CurrentLocalDate() {
+  SYSTEMTIME localTime{};
+  GetLocalTime(&localTime);
+  wchar_t buffer[16]{};
+  swprintf(buffer, std::size(buffer), L"%04u-%02u-%02u", localTime.wYear, localTime.wMonth, localTime.wDay);
+  return buffer;
+}
+
+bool ShouldRunSignatureIntelSync(const std::filesystem::path& statePath, const int intervalMinutes) {
+  if (intervalMinutes <= 0) {
+    return false;
+  }
+  if (!HasInteractiveUserSession()) {
+    return false;
+  }
+
+  const auto state = LoadSimpleStateFile(statePath);
+  const auto currentSyncDate = CurrentLocalDate();
+  const auto lastSyncDate = [&state]() -> std::optional<std::wstring> {
+    const auto explicitDate = state.find(L"lastSyncDate");
+    if (explicitDate != state.end() && explicitDate->second.size() >= 10) {
+      return explicitDate->second.substr(0, 10);
+    }
+
+    const auto lastSyncAt = state.find(L"lastSyncAt");
+    if (lastSyncAt != state.end() && lastSyncAt->second.size() >= 10) {
+      return lastSyncAt->second.substr(0, 10);
+    }
+
+    return std::nullopt;
+  }();
+  if (!lastSyncDate.has_value()) {
+    return true;
+  }
+  if (*lastSyncDate != currentSyncDate) {
+    return true;
+  }
+
+  const auto lastSync = [&state]() -> std::optional<std::wstring> {
+    const auto iterator = state.find(L"lastSyncAt");
+    if (iterator == state.end() || iterator->second.empty()) {
+      return std::nullopt;
+    }
+    return iterator->second;
+  }();
+  if (!lastSync.has_value()) {
+    return true;
+  }
+
+  const auto lastSyncTime = ParseUtcTimestamp(*lastSync);
+  if (!lastSyncTime.has_value()) {
+    return true;
+  }
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(std::chrono::system_clock::now() - *lastSyncTime);
+  return elapsed >= std::chrono::minutes(intervalMinutes);
+}
+
+std::size_t AppendMissingThreatIntelRecords(const std::filesystem::path& databasePath,
+                                            const std::vector<ThreatIntelRecord>& records) {
+  if (records.empty()) {
+    return 0;
+  }
+
+  RuntimeDatabase database(databasePath);
+  std::size_t added = 0;
+  for (const auto& record : records) {
+    if (record.indicatorType == ThreatIndicatorType::Unknown || record.indicatorKey.empty()) {
+      continue;
+    }
+
+    ThreatIntelRecord existing{};
+    if (database.TryGetThreatIntelRecord(record.indicatorType, record.indicatorKey, existing)) {
+      continue;
+    }
+
+    database.UpsertThreatIntelRecord(record);
+    ++added;
+  }
+
+  return added;
+}
+
+std::wstring SanitizeSignatureField(std::wstring value) {
+  std::replace(value.begin(), value.end(), L'|', L'/');
+  std::replace(value.begin(), value.end(), L'\r', L' ');
+  std::replace(value.begin(), value.end(), L'\n', L' ');
+  return TrimWide(value);
+}
+
+std::wstring BuildSignatureRuleLine(const SignatureRuleDelta& rule) {
+  if (rule.patterns.empty()) {
+    return {};
+  }
+
+  std::wstring joinedPatterns;
+  for (const auto& pattern : rule.patterns) {
+    const auto cleanedPattern = SanitizeSignatureField(pattern);
+    if (cleanedPattern.empty()) {
+      continue;
+    }
+    if (!joinedPatterns.empty()) {
+      joinedPatterns += L";";
+    }
+    joinedPatterns += ToLowerCopy(cleanedPattern);
+  }
+  if (joinedPatterns.empty()) {
+    return {};
+  }
+
+  const auto scope = SanitizeSignatureField(rule.scope.empty() ? std::wstring(L"text") : ToLowerCopy(rule.scope));
+  const auto code = SanitizeSignatureField(rule.code.empty() ? std::wstring(L"CLOUD_SIGNATURE") : rule.code);
+  const auto message = SanitizeSignatureField(rule.message.empty() ? std::wstring(L"Cloud-fed signature match.") : rule.message);
+  const auto tacticId = SanitizeSignatureField(rule.tacticId.empty() ? std::wstring(L"TA0002") : rule.tacticId);
+  const auto techniqueId = SanitizeSignatureField(rule.techniqueId.empty() ? std::wstring(L"T1204.002") : rule.techniqueId);
+  const auto score = std::clamp(rule.score, 1, 99);
+
+  return scope + L"|" + code + L"|" + message + L"|" + tacticId + L"|" + techniqueId + L"|" +
+         std::to_wstring(score) + L"|" + joinedPatterns;
+}
+
+std::set<std::wstring> LoadExistingNormalizedLines(const std::filesystem::path& path) {
+  std::set<std::wstring> values;
+  std::wifstream input(path);
+  if (!input.is_open()) {
+    return values;
+  }
+
+  std::wstring line;
+  while (std::getline(input, line)) {
+    const auto trimmed = TrimWide(line);
+    if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
+      continue;
+    }
+    values.insert(ToLowerCopy(trimmed));
+  }
+  return values;
+}
+
+std::size_t AppendUniqueSignatureLines(const std::filesystem::path& path, const std::vector<std::wstring>& lines) {
+  auto existing = LoadExistingNormalizedLines(path);
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  const auto createHeader = !std::filesystem::exists(path, error) || error;
+
+  std::wofstream output(path, std::ios::app);
+  if (!output.is_open()) {
+    return 0;
+  }
+
+  if (createHeader) {
+    output << L"# scope|code|message|tacticId|techniqueId|score|pattern1;pattern2;pattern3\n";
+  }
+
+  std::size_t added = 0;
+  for (const auto& rawLine : lines) {
+    const auto line = TrimWide(rawLine);
+    if (line.empty()) {
+      continue;
+    }
+    const auto key = ToLowerCopy(line);
+    if (!existing.insert(key).second) {
+      continue;
+    }
+    output << line << L"\n";
+    ++added;
+  }
+
+  output.flush();
+  return added;
+}
+
+std::wstring NormalizeRuleName(std::wstring value) {
+  value = ToLowerCopy(TrimWide(std::move(value)));
+  for (auto& ch : value) {
+    if ((ch >= L'a' && ch <= L'z') || (ch >= L'0' && ch <= L'9') || ch == L'_') {
+      continue;
+    }
+    ch = L'_';
+  }
+  return value;
+}
+
+std::wstring ExtractYaraRuleName(const std::wstring& ruleText) {
+  static const std::wregex pattern(LR"(rule\s+([A-Za-z0-9_]+))", std::regex_constants::icase);
+  std::wsmatch match;
+  if (!std::regex_search(ruleText, match, pattern) || match.size() < 2) {
+    return {};
+  }
+  return match[1].str();
+}
+
+std::vector<std::wstring> ExtractYaraLiteralPatterns(const std::wstring& ruleText) {
+  std::vector<std::wstring> patterns;
+  std::set<std::wstring> seen;
+
+  bool insideString = false;
+  bool escaping = false;
+  std::wstring current;
+
+  for (const auto ch : ruleText) {
+    if (!insideString) {
+      if (ch == L'"') {
+        insideString = true;
+        escaping = false;
+        current.clear();
+      }
+      continue;
+    }
+
+    if (escaping) {
+      current.push_back(ch);
+      escaping = false;
+      continue;
+    }
+
+    if (ch == L'\\') {
+      escaping = true;
+      continue;
+    }
+
+    if (ch == L'"') {
+      insideString = false;
+      const auto literal = TrimWide(current);
+      const auto hasAlphaNumeric =
+          std::any_of(literal.begin(), literal.end(), [](const wchar_t token) { return std::iswalnum(token) != 0; });
+      if (literal.size() >= 4 && literal.size() <= 128 && hasAlphaNumeric) {
+        const auto normalized = ToLowerCopy(literal);
+        if (seen.insert(normalized).second) {
+          patterns.push_back(normalized);
+        }
+      }
+      current.clear();
+      continue;
+    }
+
+    current.push_back(ch);
+  }
+
+  return patterns;
+}
+
+std::vector<SignatureRuleDelta> BuildSignatureRulesFromYara(const std::vector<std::wstring>& yaraRules) {
+  std::vector<SignatureRuleDelta> rules;
+  for (std::size_t index = 0; index < yaraRules.size(); ++index) {
+    const auto patterns = ExtractYaraLiteralPatterns(yaraRules[index]);
+    if (patterns.empty()) {
+      continue;
+    }
+
+    auto normalizedName = NormalizeRuleName(ExtractYaraRuleName(yaraRules[index]));
+    if (normalizedName.empty()) {
+      normalizedName = L"dynamic_" + std::to_wstring(index + 1);
+    }
+
+    rules.push_back(SignatureRuleDelta{
+        .scope = L"text",
+        .code = L"YARA_" + normalizedName,
+        .message = L"YARA-derived cloud signature matched suspicious string literals.",
+        .tacticId = L"TA0005",
+        .techniqueId = L"T1027",
+        .score = 28,
+        .patterns = patterns});
+  }
+
+  return rules;
+}
+
+std::size_t AppendUniqueYaraRules(const std::filesystem::path& path, const std::vector<std::wstring>& rules) {
+  std::set<std::wstring> existingRuleNames;
+  std::set<std::wstring> existingRuleBodies;
+
+  std::wifstream input(path);
+  if (input.is_open()) {
+    std::wstringstream buffer;
+    buffer << input.rdbuf();
+    const auto content = buffer.str();
+    std::wistringstream lineStream(content);
+    std::wstring line;
+    while (std::getline(lineStream, line)) {
+      const auto name = NormalizeRuleName(ExtractYaraRuleName(line));
+      if (!name.empty()) {
+        existingRuleNames.insert(name);
+      }
+    }
+    if (!content.empty()) {
+      existingRuleBodies.insert(ToLowerCopy(TrimWide(content)));
+    }
+  }
+
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  std::wofstream output(path, std::ios::app);
+  if (!output.is_open()) {
+    return 0;
+  }
+
+  std::size_t added = 0;
+  for (const auto& rawRule : rules) {
+    const auto rule = TrimWide(rawRule);
+    if (rule.empty()) {
+      continue;
+    }
+
+    const auto bodyKey = ToLowerCopy(rule);
+    if (existingRuleBodies.find(bodyKey) != existingRuleBodies.end()) {
+      continue;
+    }
+
+    const auto name = NormalizeRuleName(ExtractYaraRuleName(rule));
+    if (!name.empty() && existingRuleNames.find(name) != existingRuleNames.end()) {
+      continue;
+    }
+
+    if (!name.empty()) {
+      existingRuleNames.insert(name);
+    }
+    existingRuleBodies.insert(bodyKey);
+
+    output << L"\n" << rule << L"\n";
+    ++added;
+  }
+
+  output.flush();
+  return added;
+}
+
+std::optional<std::chrono::system_clock::time_point> ParseUtcTimestamp(const std::wstring& value) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  if (swscanf(value.c_str(), L"%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) < 6) {
+    return std::nullopt;
+  }
+
+  std::tm utc{};
+  utc.tm_year = year - 1900;
+  utc.tm_mon = month - 1;
+  utc.tm_mday = day;
+  utc.tm_hour = hour;
+  utc.tm_min = minute;
+  utc.tm_sec = second;
+  utc.tm_isdst = 0;
+  const auto epochSeconds = _mkgmtime(&utc);
+  if (epochSeconds < 0) {
+    return std::nullopt;
+  }
+
+  return std::chrono::system_clock::from_time_t(epochSeconds);
+}
+
+std::optional<std::wstring> FindLatestScanSessionTimestamp(const RuntimeDatabase& database,
+                                                           const std::wstring& source,
+                                                           const std::size_t limit = 500) {
+  const auto history = database.ListScanHistory(limit);
+  for (const auto& record : history) {
+    if (_wcsicmp(record.contentType.c_str(), L"scan-session") == 0 && _wcsicmp(record.source.c_str(), source.c_str()) == 0 &&
+        !record.recordedAt.empty()) {
+      return record.recordedAt;
+    }
+  }
+
+  return std::nullopt;
+}
+
+bool ShouldRunScheduledTask(const RuntimeDatabase& database, const std::wstring& source, const int intervalMinutes) {
+  if (intervalMinutes <= 0) {
+    return false;
+  }
+
+  const auto lastRecordedAt = FindLatestScanSessionTimestamp(database, source);
+  if (!lastRecordedAt.has_value()) {
+    return true;
+  }
+
+  const auto lastRecordedTime = ParseUtcTimestamp(*lastRecordedAt);
+  if (!lastRecordedTime.has_value()) {
+    return true;
+  }
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(std::chrono::system_clock::now() - *lastRecordedTime);
+  return elapsed >= std::chrono::minutes(intervalMinutes);
+}
+
+bool IsPendingWindowsVulnerability(const WindowsUpdateRecord& record) {
+  const auto lowerStatus = ToLowerCopy(record.status);
+  if (lowerStatus != L"available") {
+    return false;
+  }
+
+  if (record.hidden || record.installed) {
+    return false;
+  }
+
+  if (record.mandatory) {
+    return true;
+  }
+
+  const auto lowerClassification = ToLowerCopy(record.classification);
+  if (lowerClassification.find(L"security") != std::wstring::npos || lowerClassification.find(L"critical") != std::wstring::npos) {
+    return true;
+  }
+
+  const auto lowerSeverity = ToLowerCopy(record.severity);
+  return lowerSeverity.find(L"critical") != std::wstring::npos || lowerSeverity.find(L"important") != std::wstring::npos ||
+         lowerSeverity.find(L"high") != std::wstring::npos;
+}
+
+bool IsPendingSoftwareVulnerability(const SoftwarePatchRecord& record) {
+  if (!record.supported) {
+    return false;
+  }
+
+  const auto lowerState = ToLowerCopy(record.updateState);
+  if (lowerState != L"available") {
+    return false;
+  }
+
+  return record.highRisk || !record.manualOnly;
+}
+
 }  // namespace
 
 AgentService::AgentService() = default;
@@ -481,6 +1003,10 @@ int AgentService::Run(const AgentRunMode mode) {
     realtimeProtectionBroker_->Start();
     processEtwSensor_->Start();
     networkIsolationManager_->Start();
+    localControlChannel_ = std::make_unique<LocalControlChannel>(
+        [this](const RemoteCommand& command) { return ExecuteCommand(command); },
+        [this]() { return ShouldStop(); });
+    localControlChannel_->Start();
 
     QueueEndpointStatusTelemetry();
     if (state_.isolated) {
@@ -506,6 +1032,10 @@ int AgentService::Run(const AgentRunMode mode) {
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
 
+    if (localControlChannel_) {
+      localControlChannel_->Stop();
+      localControlChannel_.reset();
+    }
     if (networkIsolationManager_) {
       networkIsolationManager_->Stop();
     }
@@ -573,20 +1103,11 @@ void AgentService::RunSyncLoop(const AgentRunMode mode) {
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
-    SyncWithControlPlane(cycle);
+    SyncUpdateOnly(cycle);
+    RunAutomatedRiskAssessments(cycle);
     DrainProcessTelemetry();
     DrainRealtimeProtectionTelemetry();
     DrainNetworkTelemetry();
-    PollAndExecuteCommands(cycle);
-    DrainProcessTelemetry();
-    DrainRealtimeProtectionTelemetry();
-    DrainNetworkTelemetry();
-    FlushTelemetryQueue();
-    PublishHeartbeat(cycle);
-    DrainProcessTelemetry();
-    DrainRealtimeProtectionTelemetry();
-    DrainNetworkTelemetry();
-    FlushTelemetryQueue();
     PersistState();
 
     if (mode == AgentRunMode::Console && cycle >= configuredIterations) {
@@ -597,6 +1118,213 @@ void AgentService::RunSyncLoop(const AgentRunMode mode) {
     if (!WaitForNextCycle(mode, cycle)) {
       break;
     }
+  }
+}
+
+void AgentService::RunAutomatedRiskAssessments(const int cycle) {
+  RunScheduledQuickScan(cycle);
+  RunLiveThreatSweep(cycle);
+  RunVulnerabilityAssessment(cycle);
+  RunScheduledFullDriveScan(cycle);
+}
+
+void AgentService::RunScheduledQuickScan(const int cycle) {
+  try {
+    RuntimeDatabase database(config_.runtimeDatabasePath);
+    if (!ShouldRunScheduledTask(database, kScheduledQuickScanSource, config_.scheduledQuickScanIntervalMinutes)) {
+      return;
+    }
+
+    QueueTelemetryEvent(L"scan.quick-scheduled.started", L"agent-service",
+                        L"The endpoint is starting a scheduled quick scan.",
+                        BuildCyclePayload(cycle, L"\"scope\":\"quick\""));
+
+    LocalScanExecutionOptions options{};
+    options.source = kScheduledQuickScanSource;
+    options.queueTelemetry = true;
+    options.applyRemediation = true;
+    const auto result = ExecuteLocalScan(config_, state_, BuildQuickScanTargets(), options);
+
+    QueueTelemetryEvent(L"scan.quick-scheduled.completed", L"agent-service",
+                        L"The endpoint completed a scheduled quick scan.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"scope\":\"quick\",\"targetsScanned\":") +
+                                                     std::to_wstring(result.targetCount) + L",\"findings\":"
+                                                     + std::to_wstring(result.findings.size()) +
+                                                     L",\"remediationFailed\":"
+                                                     + (result.remediationFailed ? std::wstring(L"true")
+                                                                                 : std::wstring(L"false"))));
+  } catch (const std::exception& error) {
+    QueueTelemetryEvent(L"scan.quick-scheduled.failed", L"agent-service",
+                        L"The endpoint failed to complete a scheduled quick scan.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"scope\":\"quick\",\"error\":\"") +
+                                                     Utf8ToWide(EscapeJsonString(Utf8ToWide(error.what()))) + L"\""));
+  }
+}
+
+void AgentService::RunScheduledFullDriveScan(const int cycle) {
+  try {
+    RuntimeDatabase database(config_.runtimeDatabasePath);
+    if (!ShouldRunScheduledTask(database, kScheduledFullDriveScanSource,
+                                config_.scheduledFullDriveScanIntervalMinutes)) {
+      return;
+    }
+
+    QueueTelemetryEvent(L"scan.scheduled.started", L"agent-service",
+                        L"The endpoint is starting a scheduled full C: drive scan.",
+                        BuildCyclePayload(cycle, L"\"scope\":\"C:\\\\\""));
+
+    LocalScanExecutionOptions options{};
+    options.source = kScheduledFullDriveScanSource;
+    options.queueTelemetry = true;
+    options.applyRemediation = true;
+    const auto result = ExecuteLocalScan(config_, state_, {std::filesystem::path(LR"(C:\)")}, options);
+
+    QueueTelemetryEvent(L"scan.scheduled.completed", L"agent-service",
+                        L"The endpoint completed a scheduled full C: drive scan.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"scope\":\"C:\\\\\",\"targetsScanned\":") +
+                                                     std::to_wstring(result.targetCount) + L",\"findings\":"
+                                                     + std::to_wstring(result.findings.size()) +
+                                                     L",\"remediationFailed\":"
+                                                     + (result.remediationFailed ? std::wstring(L"true")
+                                                                                 : std::wstring(L"false"))));
+  } catch (const std::exception& error) {
+    QueueTelemetryEvent(L"scan.scheduled.failed", L"agent-service",
+                        L"The endpoint failed to complete a scheduled full C: drive scan.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"scope\":\"C:\\\\\",\"error\":\"") +
+                                                     Utf8ToWide(EscapeJsonString(Utf8ToWide(error.what()))) + L"\""));
+  }
+}
+
+void AgentService::RunLiveThreatSweep(const int cycle) {
+  try {
+    RuntimeDatabase database(config_.runtimeDatabasePath);
+    if (!ShouldRunScheduledTask(database, kLiveThreatSweepSource, config_.liveThreatSweepIntervalMinutes)) {
+      return;
+    }
+
+    const auto processInventory = CollectProcessInventory();
+    std::vector<std::filesystem::path> liveTargets;
+    std::set<std::wstring> seenTargets;
+    for (const auto& process : processInventory) {
+      if (process.imagePath.empty()) {
+        continue;
+      }
+
+      std::filesystem::path candidate(process.imagePath);
+      std::error_code error;
+      candidate = std::filesystem::absolute(candidate, error);
+      if (error || candidate.empty() || !std::filesystem::exists(candidate, error) || error) {
+        continue;
+      }
+
+      const auto dedupeKey = ToLowerCopy(candidate.lexically_normal().wstring());
+      if (seenTargets.insert(dedupeKey).second) {
+        liveTargets.push_back(candidate);
+      }
+    }
+
+    QueueTelemetryEvent(L"scan.live-threat-sweep.started", L"agent-service",
+                        L"The endpoint is starting a live threat sweep for active process images.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"runningProcesses\":") +
+                                                     std::to_wstring(processInventory.size()) + L",\"targets\":"
+                                                     + std::to_wstring(liveTargets.size())));
+
+    LocalScanExecutionOptions options{};
+    options.source = kLiveThreatSweepSource;
+    options.queueTelemetry = true;
+    options.applyRemediation = true;
+    const auto result = ExecuteLocalScan(config_, state_, liveTargets, options);
+
+    QueueTelemetryEvent(L"scan.live-threat-sweep.completed", L"agent-service",
+                        L"The endpoint completed a live threat sweep.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"targetsScanned\":") +
+                                                     std::to_wstring(result.targetCount) + L",\"findings\":"
+                                                     + std::to_wstring(result.findings.size()) +
+                                                     L",\"remediationFailed\":"
+                                                     + (result.remediationFailed ? std::wstring(L"true")
+                                                                                 : std::wstring(L"false"))));
+  } catch (const std::exception& error) {
+    QueueTelemetryEvent(L"scan.live-threat-sweep.failed", L"agent-service",
+                        L"The endpoint failed to complete a live threat sweep.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"error\":\"") +
+                                                     Utf8ToWide(EscapeJsonString(Utf8ToWide(error.what()))) + L"\""));
+  }
+}
+
+void AgentService::RunVulnerabilityAssessment(const int cycle) {
+  try {
+    RuntimeDatabase database(config_.runtimeDatabasePath);
+    if (!ShouldRunScheduledTask(database, kVulnerabilityAssessmentSource,
+                                config_.vulnerabilityAssessmentIntervalMinutes)) {
+      return;
+    }
+
+    PatchOrchestrator orchestrator(config_);
+    const auto refreshSummary = orchestrator.RefreshPatchState();
+    const auto snapshot = orchestrator.LoadSnapshot(200, 200, 50, 200);
+
+    std::size_t pendingWindowsVulnerabilities = 0;
+    std::size_t pendingSoftwareVulnerabilities = 0;
+    for (const auto& update : snapshot.windowsUpdates) {
+      if (IsPendingWindowsVulnerability(update)) {
+        ++pendingWindowsVulnerabilities;
+      }
+    }
+    for (const auto& software : snapshot.software) {
+      if (IsPendingSoftwareVulnerability(software)) {
+        ++pendingSoftwareVulnerabilities;
+      }
+    }
+
+    const auto pendingTotal = pendingWindowsVulnerabilities + pendingSoftwareVulnerabilities;
+    const auto summary =
+        pendingTotal == 0
+            ? std::wstring(L"No pending high-priority vulnerabilities were detected.")
+            : std::to_wstring(pendingTotal) +
+                  (pendingTotal == 1 ? std::wstring(L" pending vulnerability detected.")
+                                     : std::wstring(L" pending vulnerabilities detected."));
+
+    QueueTelemetryEvent(L"vulnerability.assessment.completed", L"patch-orchestrator",
+                        L"The endpoint completed a vulnerability assessment pass.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"pendingTotal\":") +
+                                                     std::to_wstring(pendingTotal) +
+                                                     L",\"pendingWindows\":"
+                                                     + std::to_wstring(pendingWindowsVulnerabilities) +
+                                                     L",\"pendingSoftware\":"
+                                                     + std::to_wstring(pendingSoftwareVulnerabilities) +
+                                                     L",\"windowsCatalog\":"
+                                                     + std::to_wstring(refreshSummary.windowsUpdateCount) +
+                                                     L",\"softwareCatalog\":"
+                                                     + std::to_wstring(refreshSummary.softwareCount) +
+                                                     L",\"summary\":\"" +
+                                                     Utf8ToWide(EscapeJsonString(summary)) + L"\""));
+
+    database.RecordScanHistory(ScanHistoryRecord{
+        .recordedAt = CurrentUtcTimestamp(),
+        .source = kVulnerabilityAssessmentSource,
+        .subjectPath = std::filesystem::path(L"[Vulnerability assessment]"),
+        .sha256 = L"",
+        .contentType = L"scan-session",
+        .reputation = summary,
+        .disposition = pendingTotal == 0 ? L"completed-clean" : L"completed-with-findings",
+        .confidence = pendingTotal == 0 ? 100u : 85u,
+        .tacticId = L"",
+        .techniqueId = L"",
+        .remediationStatus = pendingTotal == 0 ? L"completed" : L"review-required",
+        .evidenceRecordId = L"",
+        .quarantineRecordId = L"",
+        .alertTitle = pendingTotal == 0 ? L"Vulnerability assessment complete"
+                                        : L"Vulnerability findings require patching",
+        .contextType = L"local",
+        .sourceApplication = L"patch-orchestrator",
+        .originReference = L"",
+        .contextJson = std::wstring(L"{\"pendingWindows\":") + std::to_wstring(pendingWindowsVulnerabilities) +
+                       L",\"pendingSoftware\":" + std::to_wstring(pendingSoftwareVulnerabilities) + L"}"});
+  } catch (const std::exception& error) {
+    QueueTelemetryEvent(L"vulnerability.assessment.failed", L"patch-orchestrator",
+                        L"The endpoint failed to complete a vulnerability assessment pass.",
+                        BuildCyclePayload(cycle, std::wstring(L"\"error\":\"") +
+                                                     Utf8ToWide(EscapeJsonString(Utf8ToWide(error.what()))) + L"\""));
   }
 }
 
@@ -665,6 +1393,167 @@ void AgentService::SyncWithControlPlane(const int cycle) {
                  << std::endl;
       return;
     }
+  }
+}
+
+void AgentService::SyncUpdateOnly(const int cycle) {
+  try {
+    RuntimeDatabase database(config_.runtimeDatabasePath);
+    const auto journal = database.ListUpdateJournal(200);
+
+    std::set<std::wstring> appliedUpdateKeys;
+    std::wstring signaturesVersion;
+    for (const auto& record : journal) {
+      if (!record.packageId.empty() && !record.targetVersion.empty() && IsAppliedUpdateStatus(record.status)) {
+        appliedUpdateKeys.insert(BuildUpdateIdentityKey(record.packageId, record.targetVersion));
+      }
+
+      if (signaturesVersion.empty() && IsAppliedUpdateStatus(record.status) &&
+          ToLowerCopy(record.packageType) == L"signatures" && !record.targetVersion.empty()) {
+        signaturesVersion = record.targetVersion;
+      }
+    }
+
+    const auto updateCheck = controlPlaneClient_->CheckForUpdates(state_, signaturesVersion);
+    state_.lastPolicySyncAt = updateCheck.checkedAt;
+    state_.lastHeartbeatAt = updateCheck.checkedAt;
+
+    if (!updateCheck.items.empty()) {
+      QueueTelemetryEvent(L"updates.polled", L"control-plane-client",
+                          L"The endpoint checked for signature and platform update manifests.",
+                          BuildCyclePayload(cycle, std::wstring(L"\"count\":") +
+                                                     std::to_wstring(updateCheck.items.size())));
+    }
+
+    const auto installRoot = ResolveInstallRootForConfig(config_);
+    UpdaterService updater(config_, installRoot);
+
+    for (const auto& offer : updateCheck.items) {
+      if (offer.manifestPath.empty()) {
+        continue;
+      }
+
+      const auto updateKey = BuildUpdateIdentityKey(offer.packageId, offer.targetVersion);
+      if (!offer.packageId.empty() && !offer.targetVersion.empty() &&
+          appliedUpdateKeys.find(updateKey) != appliedUpdateKeys.end()) {
+        QueueTelemetryEvent(L"update.skipped.current", L"update-client",
+                            L"The endpoint skipped an already-applied update target version.",
+                            std::wstring(L"{\"packageId\":\"") + offer.packageId + L"\",\"targetVersion\":\"" +
+                                offer.targetVersion + L"\"}");
+        continue;
+      }
+
+      const auto result = updater.ApplyPackage(offer.manifestPath, UpdateApplyMode::InService);
+      if (!result.success) {
+        QueueTelemetryEvent(L"update.apply.failed", L"update-client",
+                            L"The endpoint failed to apply an available update package.",
+                            std::wstring(L"{\"packageId\":\"") + offer.packageId + L"\",\"targetVersion\":\"" +
+                                offer.targetVersion + L"\",\"error\":\"" +
+                                Utf8ToWide(EscapeJsonString(result.errorMessage)) + L"\"}");
+        continue;
+      }
+
+      if (ToLowerCopy(offer.packageType) == L"platform" && !offer.targetVersion.empty()) {
+        state_.platformVersion = offer.targetVersion;
+      }
+
+      if (!offer.packageId.empty() && !offer.targetVersion.empty()) {
+        appliedUpdateKeys.insert(updateKey);
+      }
+
+      QueueTelemetryEvent(L"update.applied", L"update-client",
+                          L"The endpoint applied an update package from the update feed.",
+                          std::wstring(L"{\"packageId\":\"") + result.packageId + L"\",\"targetVersion\":\"" +
+                              result.targetVersion + L"\",\"transactionId\":\"" + result.transactionId +
+                              L"\",\"restartRequired\":" +
+                              (result.restartRequired ? std::wstring(L"true") : std::wstring(L"false")) + L"}");
+    }
+
+    const auto signatureRuntimeDirectory = config_.updateRootPath / L"signatures";
+    const auto signatureStatePath = signatureRuntimeDirectory / L"delta-sync-state.ini";
+    if (ShouldRunSignatureIntelSync(signatureStatePath, kSignatureIntelSyncIntervalMinutes)) {
+      auto signatureSyncState = LoadSimpleStateFile(signatureStatePath);
+      const auto currentSignatureVersion = signatureSyncState[L"signatureVersion"];
+      const auto currentYaraVersion = signatureSyncState[L"yaraVersion"];
+
+      try {
+        const auto signatureDelta =
+            controlPlaneClient_->FetchSignatureDelta(currentSignatureVersion, currentYaraVersion,
+                                                     config_.signatureFeedToken);
+        auto signatureRules = signatureDelta.signatures;
+        const auto yaraDerivedRules = BuildSignatureRulesFromYara(signatureDelta.yaraRules);
+        signatureRules.insert(signatureRules.end(), yaraDerivedRules.begin(), yaraDerivedRules.end());
+
+        std::vector<std::wstring> signatureLines;
+        signatureLines.reserve(signatureRules.size());
+        for (const auto& rule : signatureRules) {
+          const auto line = BuildSignatureRuleLine(rule);
+          if (!line.empty()) {
+            signatureLines.push_back(line);
+          }
+        }
+
+        const auto signaturesPath = signatureRuntimeDirectory / L"daily-signatures.tsv";
+        const auto yaraPath = signatureRuntimeDirectory / L"daily-yara.yar";
+        const auto addedSignatures = AppendUniqueSignatureLines(signaturesPath, signatureLines);
+        const auto addedYaraRules = AppendUniqueYaraRules(yaraPath, signatureDelta.yaraRules);
+        const auto addedThreatIntel =
+            AppendMissingThreatIntelRecords(config_.runtimeDatabasePath, signatureDelta.threatIntelRecords);
+
+        signatureSyncState[L"lastSyncAt"] = CurrentUtcTimestamp();
+        signatureSyncState[L"lastSyncDate"] = CurrentLocalDate();
+        if (!signatureDelta.signatureVersion.empty()) {
+          signatureSyncState[L"signatureVersion"] = signatureDelta.signatureVersion;
+        }
+        if (!signatureDelta.yaraVersion.empty()) {
+          signatureSyncState[L"yaraVersion"] = signatureDelta.yaraVersion;
+        }
+        signatureSyncState[L"lastStatus"] = L"ok";
+        signatureSyncState[L"lastError"] = L"";
+        SaveSimpleStateFile(signatureStatePath, signatureSyncState);
+
+        QueueTelemetryEvent(
+            L"signatures.delta.applied", L"signature-intel",
+            L"The endpoint merged additive signature and YARA intelligence from the control plane.",
+            BuildCyclePayload(
+                cycle, std::wstring(L"\"source\":\"") + kSignatureIntelSyncSource + L"\",\"addedSignatures\":" +
+                           std::to_wstring(addedSignatures) + L",\"addedYaraRules\":" +
+                           std::to_wstring(addedYaraRules) + L",\"addedThreatIntel\":" +
+                           std::to_wstring(addedThreatIntel) + L",\"signatureVersion\":\"" +
+                           Utf8ToWide(EscapeJsonString(signatureSyncState[L"signatureVersion"])) +
+                           L"\",\"yaraVersion\":\"" +
+                           Utf8ToWide(EscapeJsonString(signatureSyncState[L"yaraVersion"])) + L"\""));
+      } catch (const std::exception& signatureError) {
+        const auto signatureErrorMessage = Utf8ToWide(signatureError.what());
+        signatureSyncState[L"lastSyncAt"] = CurrentUtcTimestamp();
+        signatureSyncState[L"lastSyncDate"] = CurrentLocalDate();
+        signatureSyncState[L"lastStatus"] = L"failed";
+        signatureSyncState[L"lastError"] = signatureErrorMessage;
+        SaveSimpleStateFile(signatureStatePath, signatureSyncState);
+
+        QueueTelemetryEvent(
+            L"signatures.delta.failed", L"signature-intel",
+            L"The endpoint could not merge signature intelligence deltas and kept the local rule baseline.",
+            BuildCyclePayload(cycle, std::wstring(L"\"source\":\"") + kSignatureIntelSyncSource + L"\",\"error\":\"" +
+                                      Utf8ToWide(EscapeJsonString(signatureErrorMessage)) + L"\""));
+      }
+    }
+
+    const auto wfpIsolationActive = networkIsolationManager_ && networkIsolationManager_->IsolationActive();
+    const auto wfpUnavailable =
+        policy_.networkContainmentEnabled && (!networkIsolationManager_ || !networkIsolationManager_->EngineReady());
+    state_.isolated = wfpIsolationActive;
+    state_.healthState = wfpIsolationActive
+                             ? L"isolated"
+                             : ((wfpUnavailable || lastHardeningCheckFailed_) ? L"degraded" : L"healthy");
+
+    lastControlPlaneSyncFailed_ = false;
+  } catch (const std::exception& error) {
+    lastControlPlaneSyncFailed_ = true;
+    QueueTelemetryEvent(L"update.sync.failed", L"control-plane-client",
+                        L"The endpoint failed to retrieve update metadata and kept the local baseline.",
+                        BuildCyclePayload(cycle));
+    std::wcerr << L"Update sync failed, keeping local baselines: " << Utf8ToWide(error.what()) << std::endl;
   }
 }
 
@@ -842,13 +1731,13 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
   if (command.type == L"agent.repair") {
     return ExecuteRepairCommand(command);
   }
-  if (command.type == L"patch.windows.security") {
+  if (command.type == L"patch.windows.security" || command.type == L"patch.windows.install") {
     return ExecutePatchCommand(command, true, false, false);
   }
-  if (command.type == L"patch.software") {
+  if (command.type == L"patch.software" || command.type == L"patch.software.install") {
     return ExecutePatchCommand(command, false, true, false);
   }
-  if (command.type == L"patch.cycle") {
+  if (command.type == L"patch.cycle" || command.type == L"patch.cycle.run") {
     return ExecutePatchCommand(command, true, true, true);
   }
   if (command.type == L"support.bundle") {
@@ -872,7 +1761,7 @@ std::wstring AgentService::ExecuteCommand(const RemoteCommand& command) {
   if (command.type == L"breakglass.disable") {
     return ExecuteBreakGlassCommand(command, false);
   }
-  if (command.type == L"local.approval.request") {
+  if (command.type == L"local.approval.request" || command.type == L"local.approval.execute") {
     return ExecuteLocalApprovalCommand(command);
   }
   if (command.type == L"local.approval.list") {
@@ -1063,7 +1952,11 @@ std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, con
   } else if (installWindows) {
     result = orchestrator.InstallWindowsUpdates(true);
   } else if (installSoftware) {
-    const auto softwareId = command.recordId.empty() ? command.targetPath : command.recordId;
+    const auto softwareId =
+        !command.recordId.empty() ? command.recordId : ExtractPayloadString(command.payloadJson, "softwareId").value_or(command.targetPath);
+    if (softwareId.empty()) {
+      throw std::runtime_error("Software patch command is missing a software identifier");
+    }
     result = orchestrator.UpdateSoftware(softwareId, false);
   } else {
     throw std::runtime_error("Patch command did not specify a supported action");
@@ -1075,12 +1968,15 @@ std::wstring AgentService::ExecutePatchCommand(const RemoteCommand& command, con
                       std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"status\":\"" + result.status +
                           L"\",\"targetId\":\"" + result.targetId + L"\",\"provider\":\"" + result.provider + L"\"}");
 
-  if (!result.success) {
-    throw std::runtime_error(WideToUtf8(result.detailJson.empty() ? L"Patch orchestration failed" : result.detailJson));
-  }
-
-  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"status\":\"" + result.status +
-         L"\",\"targetId\":\"" + result.targetId + L"\"}";
+  return std::wstring(L"{\"commandId\":\"") + command.commandId + L"\",\"action\":\"" +
+         Utf8ToWide(EscapeJsonString(result.action)) + L"\",\"success\":" +
+         (result.success ? std::wstring(L"true") : std::wstring(L"false")) + L",\"status\":\"" +
+         Utf8ToWide(EscapeJsonString(result.status)) + L"\",\"targetId\":\"" +
+         Utf8ToWide(EscapeJsonString(result.targetId)) + L"\",\"provider\":\"" +
+         Utf8ToWide(EscapeJsonString(result.provider)) + L"\",\"errorCode\":\"" +
+         Utf8ToWide(EscapeJsonString(result.errorCode)) + L"\",\"detailJson\":\"" +
+         Utf8ToWide(EscapeJsonString(result.detailJson)) + L"\",\"rebootRequired\":" +
+         (result.rebootRequired ? std::wstring(L"true") : std::wstring(L"false")) + L"}";
 }
 
 std::wstring AgentService::ExecuteSupportBundleCommand(const RemoteCommand& command, const bool sanitized) {
@@ -1314,17 +2210,16 @@ void AgentService::LoadLocalPolicyCache() {
 }
 
 void AgentService::StartTelemetrySpool() const {
-  const auto deviceLabel = state_.deviceId.empty() ? std::wstring(L"(not yet enrolled)") : state_.deviceId;
+  const auto deviceLabel = state_.deviceId.empty() ? std::wstring(L"(unlicensed update-only mode)") : state_.deviceId;
   std::wcout << L"Telemetry spool ready for device " << deviceLabel << L" with " << pendingTelemetry_.size()
              << L" queued event(s)." << std::endl;
 }
 
 void AgentService::StartCommandLoop() const {
-  if (!state_.commandChannelUrl.empty()) {
-    std::wcout << L"Command polling configured at " << state_.commandChannelUrl << std::endl;
-  } else {
-    std::wcout << L"Command polling has not been assigned yet." << std::endl;
-  }
+  std::wcout << L"Update feed source: " << config_.controlPlaneBaseUrl << L"/api/v1/update-check" << std::endl;
+  std::wcout << L"Signature feed source: " << config_.controlPlaneBaseUrl << L"/api/v1/agent/bundle" << std::endl;
+
+  std::wcout << L"External reporting is disabled; agent runs in update-only sync mode." << std::endl;
 
   std::wcout << L"Real-time protection broker targeting port " << config_.realtimeProtectionPortName << std::endl;
   std::wcout << L"ETW process telemetry sensor " << (processEtwSensor_ && processEtwSensor_->IsActive() ? L"active"
@@ -1337,7 +2232,7 @@ void AgentService::StartCommandLoop() const {
 }
 
 void AgentService::PrintStatus() const {
-  const auto deviceLabel = state_.deviceId.empty() ? std::wstring(L"(pending)") : state_.deviceId;
+  const auto deviceLabel = state_.deviceId.empty() ? std::wstring(L"(not used in update-only mode)") : state_.deviceId;
   const auto lastPolicySync = state_.lastPolicySyncAt.empty() ? std::wstring(L"(never)") : state_.lastPolicySyncAt;
   const auto lastHeartbeat = state_.lastHeartbeatAt.empty() ? std::wstring(L"(never)") : state_.lastHeartbeatAt;
 
@@ -1345,8 +2240,8 @@ void AgentService::PrintStatus() const {
   std::wcout << L"Device ID: " << deviceLabel << std::endl;
   std::wcout << L"Policy: " << policy_.policyName << L" (" << policy_.revision << L")" << std::endl;
   std::wcout << L"Health state: " << state_.healthState << std::endl;
-  std::wcout << L"Last policy sync: " << lastPolicySync << std::endl;
-  std::wcout << L"Last heartbeat: " << lastHeartbeat << std::endl;
+  std::wcout << L"Last update sync: " << lastPolicySync << std::endl;
+  std::wcout << L"Last control-plane contact: " << lastHeartbeat << std::endl;
   std::wcout << L"Pending telemetry events: " << pendingTelemetry_.size() << std::endl;
 }
 

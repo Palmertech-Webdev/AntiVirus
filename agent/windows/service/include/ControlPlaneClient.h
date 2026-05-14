@@ -7,6 +7,7 @@
 #include "AgentState.h"
 #include "PolicySnapshot.h"
 #include "TelemetryRecord.h"
+#include "ThreatIntelligence.h"
 
 namespace antivirus::agent {
 
@@ -51,6 +52,38 @@ struct CommandPollResult {
   std::vector<RemoteCommand> items;
 };
 
+struct ControlPlaneUpdateOffer {
+  std::wstring packageId;
+  std::wstring packageType;
+  std::wstring targetVersion;
+  std::wstring manifestPath;
+  bool mandatory{false};
+};
+
+struct UpdateCheckResult {
+  std::wstring checkedAt;
+  std::vector<ControlPlaneUpdateOffer> items;
+};
+
+struct SignatureRuleDelta {
+  std::wstring scope;
+  std::wstring code;
+  std::wstring message;
+  std::wstring tacticId;
+  std::wstring techniqueId;
+  int score{0};
+  std::vector<std::wstring> patterns;
+};
+
+struct SignatureDeltaResult {
+  std::wstring checkedAt;
+  std::wstring signatureVersion;
+  std::wstring yaraVersion;
+  std::vector<SignatureRuleDelta> signatures;
+  std::vector<std::wstring> yaraRules;
+  std::vector<ThreatIntelRecord> threatIntelRecords;
+};
+
 class DeviceIdentityRejectedError final : public std::runtime_error {
  public:
   explicit DeviceIdentityRejectedError(const std::string& message) : std::runtime_error(message) {}
@@ -67,6 +100,11 @@ class ControlPlaneClient {
   CommandPollResult PollPendingCommands(const AgentState& state, int limit = 10) const;
   void CompleteCommand(const AgentState& state, const std::wstring& commandId, const std::wstring& status,
                        const std::wstring& resultJson) const;
+  UpdateCheckResult CheckForUpdates(const AgentState& state, const std::wstring& signaturesVersion = L"",
+                                    const std::wstring& channel = L"") const;
+  SignatureDeltaResult FetchSignatureDelta(const std::wstring& currentSignatureVersion = L"",
+                                           const std::wstring& currentYaraVersion = L"",
+                                           const std::wstring& signatureFeedToken = L"") const;
 
  private:
   std::wstring baseUrl_;

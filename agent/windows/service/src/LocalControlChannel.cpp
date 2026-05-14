@@ -63,9 +63,8 @@ bool IsSafeCommandType(const std::wstring& type) {
 }
 
 bool RequiresSessionApproval(const std::wstring& type) {
-  return type == L"quarantine.restore" || type == L"quarantine.delete" || type == L"patch.software.install" ||
-         type == L"patch.windows.install" || type == L"patch.cycle.run" || type == L"local.approval.execute" ||
-         type == L"local.approval.list" || type == L"local.breakglass.enable" ||
+  return type == L"quarantine.restore" || type == L"quarantine.delete" ||
+         type == L"local.approval.execute" || type == L"local.approval.list" || type == L"local.breakglass.enable" ||
          type == L"local.breakglass.disable" || type == L"local.admin.audit" ||
          type == L"local.admin.reduction.plan" || type == L"local.admin.reduction.apply" ||
          type == L"local.admin.reduction.rollback" || type == L"local.household.roles.audit" ||

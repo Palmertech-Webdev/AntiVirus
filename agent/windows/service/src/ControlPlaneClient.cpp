@@ -4,6 +4,7 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -48,6 +49,16 @@ bool EndsWithInsensitive(const std::wstring& value, const std::wstring& suffix) 
   }
 
   return true;
+}
+
+bool IsHexSha256(const std::wstring& value) {
+  if (value.size() != 64) {
+    return false;
+  }
+
+  return std::all_of(value.begin(), value.end(), [](const wchar_t ch) {
+    return (ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'f');
+  });
 }
 
 std::wstring NormalizeControlPlaneBaseUrl(std::wstring baseUrl) {
@@ -139,6 +150,21 @@ std::string UnescapeJsonString(const std::string& value) {
   }
 
   return result;
+}
+
+std::wstring TrimWide(std::wstring value) {
+  const auto first = value.find_first_not_of(L" \t\r\n");
+  if (first == std::wstring::npos) {
+    return {};
+  }
+  const auto last = value.find_last_not_of(L" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+std::wstring ToLowerCopy(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](const wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+  return value;
 }
 
 std::optional<std::string> ExtractJsonString(const std::string& json, const std::string& key) {
@@ -490,7 +516,7 @@ std::wstring ExtractDeviceApiKeyFromCommandChannelUrl(const std::wstring& comman
 }
 
 HttpResponse RequestJson(const wchar_t* method, const std::wstring& url, const std::string& body = {},
-                         const std::wstring& deviceApiKey = {}) {
+                         const std::wstring& deviceApiKey = {}, const std::wstring& sharedToken = {}) {
   URL_COMPONENTS components{};
   components.dwStructSize = sizeof(components);
   components.dwSchemeLength = static_cast<DWORD>(-1);
@@ -535,6 +561,9 @@ HttpResponse RequestJson(const wchar_t* method, const std::wstring& url, const s
   std::wstring headers = L"Content-Type: application/json\r\n";
   if (!deviceApiKey.empty()) {
     headers += L"X-Device-Api-Key: " + deviceApiKey + L"\r\n";
+  }
+  if (!sharedToken.empty()) {
+    headers += L"X-Fenrir-Token: " + sharedToken + L"\r\n";
   }
 
   if (WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1), body.empty() ? WINHTTP_NO_REQUEST_DATA
@@ -619,6 +648,294 @@ RemoteCommand ParseRemoteCommand(const std::string& json) {
       .targetPath = Utf8ToWide(ExtractJsonString(json, "targetPath").value_or("")),
       .recordId = Utf8ToWide(ExtractJsonString(json, "recordId").value_or("")),
       .payloadJson = Utf8ToWide(ExtractJsonString(json, "payloadJson").value_or(""))};
+}
+
+ControlPlaneUpdateOffer ParseControlPlaneUpdateOffer(const std::string& json) {
+  return ControlPlaneUpdateOffer{
+      .packageId = Utf8ToWide(ExtractJsonString(json, "packageId").value_or("")),
+      .packageType = RequireString(ExtractJsonString(json, "packageType"), "packageType"),
+      .targetVersion = RequireString(ExtractJsonString(json, "targetVersion"), "targetVersion"),
+      .manifestPath = RequireString(ExtractJsonString(json, "manifestPath"), "manifestPath"),
+      .mandatory = ExtractJsonBool(json, "mandatory").value_or(false)};
+}
+
+std::vector<std::wstring> SplitPatternText(const std::wstring& value) {
+  std::vector<std::wstring> patterns;
+  std::wstring current;
+  for (const auto ch : value) {
+    if (ch == L';' || ch == L',') {
+      const auto trimmed = TrimWide(current);
+      if (!trimmed.empty()) {
+        patterns.push_back(trimmed);
+      }
+      current.clear();
+      continue;
+    }
+
+    current.push_back(ch);
+  }
+
+  const auto trailing = TrimWide(current);
+  if (!trailing.empty()) {
+    patterns.push_back(trailing);
+  }
+
+  return patterns;
+}
+
+std::vector<std::wstring> LoadPatternList(const std::string& json) {
+  std::vector<std::wstring> patterns;
+  for (const auto& item : ExtractJsonStringArray(json, "patterns")) {
+    const auto wide = Utf8ToWide(item);
+    if (!wide.empty()) {
+      patterns.push_back(wide);
+    }
+  }
+  if (!patterns.empty()) {
+    return patterns;
+  }
+
+  if (const auto patternList = ExtractJsonString(json, "patternList"); patternList.has_value()) {
+    return SplitPatternText(Utf8ToWide(*patternList));
+  }
+  if (const auto pattern = ExtractJsonString(json, "pattern"); pattern.has_value()) {
+    return SplitPatternText(Utf8ToWide(*pattern));
+  }
+  if (const auto indicators = ExtractJsonString(json, "indicators"); indicators.has_value()) {
+    return SplitPatternText(Utf8ToWide(*indicators));
+  }
+
+  return patterns;
+}
+
+std::wstring RequireOrFallbackString(const std::string& json, const std::vector<std::string>& keys,
+                                     const std::wstring& fallback) {
+  for (const auto& key : keys) {
+    if (const auto value = ExtractJsonString(json, key); value.has_value()) {
+      const auto wide = TrimWide(Utf8ToWide(*value));
+      if (!wide.empty()) {
+        return wide;
+      }
+    }
+  }
+  return fallback;
+}
+
+SignatureRuleDelta ParseSignatureRuleDelta(const std::string& json) {
+  SignatureRuleDelta rule;
+  rule.scope = ToLowerCopy(RequireOrFallbackString(json, {"scope", "target", "matchScope"}, L"text"));
+  rule.code = RequireOrFallbackString(json, {"code", "id", "ruleId"}, L"");
+  rule.message = RequireOrFallbackString(json, {"message", "description", "summary"}, L"Cloud-fed detection rule");
+  rule.tacticId = RequireOrFallbackString(json, {"tacticId", "tactic", "attackTactic"}, L"TA0002");
+  rule.techniqueId = RequireOrFallbackString(json, {"techniqueId", "technique", "attackTechnique"}, L"T1204.002");
+  rule.score = std::clamp(ExtractJsonInt(json, "score").value_or(26), 1, 99);
+  rule.patterns = LoadPatternList(json);
+  return rule;
+}
+
+std::wstring BuildFeedRuleCode(const std::wstring& prefix, const std::wstring& value) {
+  auto normalized = ToLowerCopy(TrimWide(value));
+  for (auto& ch : normalized) {
+    if ((ch >= L'a' && ch <= L'z') || (ch >= L'0' && ch <= L'9') || ch == L'_') {
+      continue;
+    }
+    ch = L'_';
+  }
+  if (normalized.size() > 20) {
+    normalized.resize(20);
+  }
+  return prefix + normalized;
+}
+
+std::wstring BuildThreatIntelMetadataJson(const std::wstring& id, const std::wstring& family,
+                                          const std::wstring& threat, const std::wstring& status) {
+  std::wstring metadata = L"{";
+  bool needsComma = false;
+  const auto appendField = [&metadata, &needsComma](const wchar_t* key, const std::wstring& value) {
+    if (value.empty()) {
+      return;
+    }
+    if (needsComma) {
+      metadata += L",";
+    }
+    metadata += L"\"" + std::wstring(key) + L"\":\"" + Utf8ToWide(EscapeJsonString(value)) + L"\"";
+    needsComma = true;
+  };
+  appendField(L"id", id);
+  appendField(L"malwareFamily", family);
+  appendField(L"threat", threat);
+  appendField(L"status", status);
+  metadata += L"}";
+  return metadata;
+}
+
+ThreatIntelRecord BuildFeedThreatIntelRecord(const ThreatIndicatorType indicatorType, const std::wstring& indicatorKey,
+                                             const std::wstring& source, const std::wstring& summary,
+                                             const std::wstring& details, const std::wstring& metadataJson,
+                                             const std::wstring& firstSeenAt) {
+  const auto now = CurrentUtcTimestamp();
+  return ThreatIntelRecord{
+      .indicatorType = indicatorType,
+      .indicatorKey = ToLowerCopy(TrimWide(indicatorKey)),
+      .provider = L"fenrir-signature-feed",
+      .source = source.empty() ? L"signaturedb-fenrir" : source,
+      .verdict = L"malicious",
+      .trustScore = 10,
+      .providerWeight = 96,
+      .summary = summary,
+      .details = details,
+      .metadataJson = metadataJson,
+      .firstSeenAt = firstSeenAt.empty() ? now : firstSeenAt,
+      .lastSeenAt = now,
+      .expiresAt = L"",
+      .signedPack = false,
+      .localOnly = true};
+}
+
+std::vector<SignatureRuleDelta> ParseFeedHashRules(const std::string& json) {
+  std::vector<SignatureRuleDelta> rules;
+  for (const auto& itemJson : ExtractJsonObjectArray(json, "hashes")) {
+    const auto type = ToLowerCopy(TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "type").value_or("sha256"))));
+    const auto value = ToLowerCopy(TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "value").value_or(""))));
+    if (type != L"sha256" || !IsHexSha256(value)) {
+      continue;
+    }
+
+    const auto family = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "malwareFamily").value_or("")));
+    const auto source = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "source").value_or("signature-feed")));
+    rules.push_back(SignatureRuleDelta{
+        .scope = L"sha256",
+        .code = BuildFeedRuleCode(L"FEED_SHA256_", value),
+        .message = family.empty() ? L"Signature feed matched a malicious SHA-256 indicator."
+                                  : L"Signature feed matched malicious SHA-256 indicator for " + family + L".",
+        .tacticId = L"TA0002",
+        .techniqueId = L"T1204.002",
+        .score = 92,
+        .patterns = {value}});
+  }
+  return rules;
+}
+
+std::vector<ThreatIntelRecord> ParseFeedThreatIntelRecords(const std::string& json) {
+  std::vector<ThreatIntelRecord> records;
+
+  for (const auto& itemJson : ExtractJsonObjectArray(json, "hashes")) {
+    const auto type = ToLowerCopy(TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "type").value_or("sha256"))));
+    const auto value = ToLowerCopy(TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "value").value_or(""))));
+    if (type != L"sha256" || !IsHexSha256(value)) {
+      continue;
+    }
+
+    const auto source = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "source").value_or("signaturedb-fenrir")));
+    const auto family = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "malwareFamily").value_or("")));
+    const auto firstSeen = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "firstSeen").value_or("")));
+    const auto id = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "id").value_or("")));
+    const auto summary = family.empty() ? L"Malicious SHA-256 indicator from the Fenrir signature feed."
+                                        : L"Malicious SHA-256 indicator for " + family + L".";
+    records.push_back(BuildFeedThreatIntelRecord(
+        ThreatIndicatorType::Sha256, value, source, summary,
+        L"The endpoint appended this hash from the hosted Fenrir signature definitions feed.",
+        BuildThreatIntelMetadataJson(id, family, L"", L""), firstSeen));
+  }
+
+  for (const auto& itemJson : ExtractJsonObjectArray(json, "urls")) {
+    const auto url = ToLowerCopy(TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "url").value_or(""))));
+    const auto host = ToLowerCopy(TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "host").value_or(""))));
+    const auto source = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "source").value_or("signaturedb-fenrir")));
+    const auto threat = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "threat").value_or("")));
+    const auto status = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "status").value_or("")));
+    const auto firstSeen = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "firstSeen").value_or("")));
+    const auto id = TrimWide(Utf8ToWide(ExtractJsonString(itemJson, "id").value_or("")));
+    const auto summary = threat.empty() ? L"Malicious URL indicator from the Fenrir signature feed."
+                                        : L"Malicious URL indicator for " + threat + L".";
+    const auto metadata = BuildThreatIntelMetadataJson(id, L"", threat, status);
+
+    if (!url.empty()) {
+      records.push_back(BuildFeedThreatIntelRecord(
+          ThreatIndicatorType::Url, url, source, summary,
+          L"The endpoint appended this URL from the hosted Fenrir signature definitions feed.", metadata, firstSeen));
+    }
+    if (!host.empty()) {
+      records.push_back(BuildFeedThreatIntelRecord(
+          ThreatIndicatorType::Domain, host, source, L"Malicious domain indicator from the Fenrir signature feed.",
+          L"The endpoint appended this host from a URL indicator in the hosted Fenrir signature definitions feed.",
+          metadata, firstSeen));
+    }
+  }
+
+  return records;
+}
+
+std::vector<SignatureRuleDelta> ParseSignatureRuleDeltas(const std::string& json) {
+  std::vector<SignatureRuleDelta> rules;
+
+  auto items = ExtractJsonObjectArray(json, "signatures");
+  if (items.empty()) {
+    items = ExtractJsonObjectArray(json, "signatureRules");
+  }
+  if (items.empty()) {
+    items = ExtractJsonObjectArray(json, "rules");
+  }
+  if (items.empty()) {
+    items = ExtractJsonObjectArray(json, "items");
+  }
+
+  for (const auto& item : items) {
+    auto parsed = ParseSignatureRuleDelta(item);
+    if (parsed.patterns.empty()) {
+      continue;
+    }
+    if (parsed.code.empty()) {
+      parsed.code = L"CLOUD_SIGNATURE_" + std::to_wstring(rules.size() + 1);
+    }
+    rules.push_back(std::move(parsed));
+  }
+
+  return rules;
+}
+
+std::vector<std::wstring> ParseYaraRules(const std::string& json) {
+  std::vector<std::wstring> rules;
+
+  for (const auto& item : ExtractJsonStringArray(json, "yaraRules")) {
+    const auto wide = TrimWide(Utf8ToWide(item));
+    if (!wide.empty()) {
+      rules.push_back(wide);
+    }
+  }
+  for (const auto& item : ExtractJsonStringArray(json, "yara")) {
+    const auto wide = TrimWide(Utf8ToWide(item));
+    if (!wide.empty()) {
+      rules.push_back(wide);
+    }
+  }
+  for (const auto& objectJson : ExtractJsonObjectArray(json, "yaraRules")) {
+    const auto text = RequireOrFallbackString(objectJson, {"rule", "text", "source", "content"}, L"");
+    if (!text.empty()) {
+      rules.push_back(text);
+    }
+  }
+  for (const auto& objectJson : ExtractJsonObjectArray(json, "yara")) {
+    const auto text = RequireOrFallbackString(objectJson, {"rule", "text", "source", "content"}, L"");
+    if (!text.empty()) {
+      rules.push_back(text);
+    }
+  }
+  for (const auto& objectJson : ExtractJsonObjectArray(json, "rules")) {
+    const auto ruleType = ToLowerCopy(RequireOrFallbackString(objectJson, {"ruleType", "type"}, L""));
+    if (ruleType != L"yara") {
+      continue;
+    }
+
+    const auto text = RequireOrFallbackString(objectJson, {"rule", "text", "source", "content"}, L"");
+    if (!text.empty()) {
+      rules.push_back(text);
+    }
+  }
+
+  std::sort(rules.begin(), rules.end());
+  rules.erase(std::unique(rules.begin(), rules.end()), rules.end());
+  return rules;
 }
 
 }  // namespace
@@ -784,6 +1101,100 @@ void ControlPlaneClient::CompleteCommand(const AgentState& state, const std::wst
   static_cast<void>(RequestJson(
       L"POST", JoinUrl(baseUrl_, L"/api/v1/devices/" + state.deviceId + L"/commands/" + commandId + L"/complete"),
       body.str(), deviceApiKey));
+}
+
+UpdateCheckResult ControlPlaneClient::CheckForUpdates(const AgentState& state, const std::wstring& signaturesVersion,
+                                                      const std::wstring& channel) const {
+  std::ostringstream body;
+  body << "{"
+       << "\"agentVersion\":\"" << EscapeJsonString(state.agentVersion) << "\","
+       << "\"platformVersion\":\"" << EscapeJsonString(state.platformVersion) << "\"";
+  if (!signaturesVersion.empty()) {
+    body << ",\"signaturesVersion\":\"" << EscapeJsonString(signaturesVersion) << "\"";
+  }
+  if (!channel.empty()) {
+    body << ",\"channel\":\"" << EscapeJsonString(channel) << "\"";
+  }
+  body << "}";
+
+  const auto response = RequestJson(L"POST", JoinUrl(baseUrl_, L"/api/v1/update-check"), body.str());
+
+  UpdateCheckResult result{
+      .checkedAt = Utf8ToWide(ExtractJsonString(response.body, "checkedAt").value_or(WideToUtf8(CurrentUtcTimestamp()))),
+      .items = {}};
+
+  auto updateItems = ExtractJsonObjectArray(response.body, "updates");
+  if (updateItems.empty()) {
+    updateItems = ExtractJsonObjectArray(response.body, "items");
+  }
+
+  for (const auto& itemJson : updateItems) {
+    result.items.push_back(ParseControlPlaneUpdateOffer(itemJson));
+  }
+
+  return result;
+}
+
+SignatureDeltaResult ControlPlaneClient::FetchSignatureDelta(const std::wstring& currentSignatureVersion,
+                                                             const std::wstring& currentYaraVersion,
+                                                             const std::wstring& signatureFeedToken) const {
+  std::ostringstream body;
+  body << "{";
+  bool needsComma = false;
+  if (!currentSignatureVersion.empty()) {
+    body << "\"signatureVersion\":\"" << EscapeJsonString(currentSignatureVersion) << "\"";
+    needsComma = true;
+  }
+  if (!currentYaraVersion.empty()) {
+    if (needsComma) {
+      body << ",";
+    }
+    body << "\"yaraVersion\":\"" << EscapeJsonString(currentYaraVersion) << "\"";
+  }
+  body << "}";
+
+  const std::vector<std::wstring> endpointCandidates{
+      L"/api/v1/agent/bundle?hashesLimit=50000&urlsLimit=50000&rulesLimit=5000",
+      L"/api/v1/signatures/delta",
+      L"/api/v1/signature-db/delta",
+      L"/api/v1/signatures",
+      L"/api/v1/signature-db"};
+
+  std::optional<HttpResponse> response;
+  std::string lastError;
+  for (const auto& endpoint : endpointCandidates) {
+    try {
+      response = RequestJson(L"POST", JoinUrl(baseUrl_, endpoint), body.str(), L"", signatureFeedToken);
+      break;
+    } catch (const std::exception& postError) {
+      lastError = postError.what();
+      try {
+        response = RequestJson(L"GET", JoinUrl(baseUrl_, endpoint), {}, L"", signatureFeedToken);
+        break;
+      } catch (const std::exception& getError) {
+        lastError = getError.what();
+      }
+    }
+  }
+
+  if (!response.has_value()) {
+    throw std::runtime_error("Could not retrieve signature intelligence delta: " + lastError);
+  }
+
+  SignatureDeltaResult result{
+      .checkedAt =
+          Utf8ToWide(ExtractJsonString(response->body, "checkedAt").value_or(WideToUtf8(CurrentUtcTimestamp()))),
+      .signatureVersion = Utf8ToWide(ExtractJsonString(response->body, "signatureVersion")
+                                         .value_or(ExtractJsonString(response->body, "version").value_or(""))),
+      .yaraVersion = Utf8ToWide(ExtractJsonString(response->body, "yaraVersion").value_or("")),
+      .signatures = ParseSignatureRuleDeltas(response->body),
+      .yaraRules = ParseYaraRules(response->body),
+      .threatIntelRecords = ParseFeedThreatIntelRecords(response->body)};
+
+  auto feedHashRules = ParseFeedHashRules(response->body);
+  result.signatures.insert(result.signatures.end(), feedHashRules.begin(), feedHashRules.end());
+
+  return result;
 }
 
 }  // namespace antivirus::agent

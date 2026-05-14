@@ -1,7 +1,9 @@
 #include "ScanEngine.h"
 
 #include <Windows.h>
+#include <softpub.h>
 #include <wincrypt.h>
+#include <wintrust.h>
 
 #include <algorithm>
 #include <array>
@@ -36,6 +38,7 @@ struct Hit {
   std::wstring tacticId;
   std::wstring techniqueId;
   int score{0};
+  bool exactIndicator{false};
 };
 
 struct Rule {
@@ -64,6 +67,7 @@ struct FileData {
   bool readLimitHit{false};
   bool userPath{false};
   bool trustedPath{false};
+  bool signatureVerified{false};
   bool pe{false};
   bool zip{false};
   bool ole{false};
@@ -239,6 +243,32 @@ bool TrustedPath(const std::filesystem::path& path) {
          Contains(lower, L"\\program files (x86)\\");
 }
 
+bool IsWindowsSystemBinaryPath(const std::filesystem::path& path) {
+  const auto lower = ToLowerCopy(path.wstring());
+  return Contains(lower, L"\\windows\\system32\\") || Contains(lower, L"\\windows\\syswow64\\");
+}
+
+bool VerifyAuthenticodeSignature(const std::filesystem::path& path) {
+  WINTRUST_FILE_INFO fileInfo{};
+  fileInfo.cbStruct = sizeof(fileInfo);
+  fileInfo.pcwszFilePath = path.c_str();
+
+  WINTRUST_DATA trustData{};
+  trustData.cbStruct = sizeof(trustData);
+  trustData.dwUIChoice = WTD_UI_NONE;
+  trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+  trustData.dwUnionChoice = WTD_CHOICE_FILE;
+  trustData.pFile = &fileInfo;
+  trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+  trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+  GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+  const auto status = WinVerifyTrust(nullptr, &policyGuid, &trustData);
+  trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+  WinVerifyTrust(nullptr, &policyGuid, &trustData);
+  return status == ERROR_SUCCESS;
+}
+
 std::wstring NormalizePathForComparison(const std::filesystem::path& path) {
   if (path.empty()) {
     return {};
@@ -369,6 +399,30 @@ std::vector<std::filesystem::path> ResolveSignatureBundlePaths() {
   const auto baseDirectory = primary.parent_path();
   addIfExists(baseDirectory / L"default-signatures-malicious.tsv");
   addIfExists(baseDirectory / L"default-signatures-observe.tsv");
+  addIfExists(baseDirectory / L"daily-signatures.tsv");
+
+  const auto runtimeDeltaFromEnv = ReadEnvironmentVariable(L"ANTIVIRUS_RUNTIME_SIGNATURE_DELTA_PATH");
+  if (!runtimeDeltaFromEnv.empty()) {
+    addIfExists(std::filesystem::path(runtimeDeltaFromEnv));
+  }
+
+  auto moduleDirectory = std::filesystem::path(GetModuleDirectory());
+  for (int depth = 0; depth < 4 && !moduleDirectory.empty(); ++depth) {
+    addIfExists(moduleDirectory / L"runtime" / L"updates" / L"signatures" / L"daily-signatures.tsv");
+    moduleDirectory = moduleDirectory.parent_path();
+  }
+
+  const auto programData = ReadEnvironmentVariable(L"PROGRAMDATA");
+  if (!programData.empty()) {
+    addIfExists(std::filesystem::path(programData) / L"FenrirAgent" / L"runtime" / L"updates" / L"signatures" /
+                L"daily-signatures.tsv");
+  }
+
+  const auto localAppData = ReadEnvironmentVariable(L"LOCALAPPDATA");
+  if (!localAppData.empty()) {
+    addIfExists(std::filesystem::path(localAppData) / L"FenrirAgent" / L"runtime" / L"updates" / L"signatures" /
+                L"daily-signatures.tsv");
+  }
 
   std::sort(paths.begin(), paths.end());
   paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
@@ -712,6 +766,9 @@ bool RuleApplies(const Rule& rule, const FileData& file) {
   if (rule.scope == L"ascii") {
     return true;
   }
+  if (rule.scope == L"sha256" || rule.scope == L"hash") {
+    return !file.sha256.empty();
+  }
   if (rule.scope == L"pe") {
     return file.pe || ExecutableExt(file.extension);
   }
@@ -741,12 +798,30 @@ std::wstring_view RuleHaystack(const Rule& rule, const FileData& file) {
   if (rule.scope == L"ascii" || rule.scope == L"pe" || rule.scope == L"zip" || rule.scope == L"lnk") {
     return file.asciiLower;
   }
+  if (rule.scope == L"sha256" || rule.scope == L"hash") {
+    return file.sha256;
+  }
   return file.textLower;
 }
 
+bool IsExactIndicatorRule(const Rule& rule) {
+  return rule.scope == L"sha256" || rule.scope == L"hash";
+}
+
+bool ShouldApplyRuleToFile(const Rule& rule, const bool trustedSystemBinary) {
+  if (!trustedSystemBinary) {
+    return true;
+  }
+
+  return IsExactIndicatorRule(rule);
+}
+
 void AddRuleHits(const std::vector<Rule>& rules, const FileData& file, const PolicySnapshot& policy,
-                 std::vector<Hit>& hits) {
+                 std::vector<Hit>& hits, const bool trustedSystemBinary) {
   for (const auto& rule : rules) {
+    if (!ShouldApplyRuleToFile(rule, trustedSystemBinary)) {
+      continue;
+    }
     if (!RuleApplies(rule, file)) {
       continue;
     }
@@ -754,7 +829,7 @@ void AddRuleHits(const std::vector<Rule>& rules, const FileData& file, const Pol
     for (const auto& pattern : rule.patterns) {
       if (Contains(haystack, pattern)) {
         AddHit(hits, Hit{rule.code, rule.message, rule.tacticId, rule.techniqueId,
-                         ScaleRuleScoreForPolicy(rule, policy)});
+                         ScaleRuleScoreForPolicy(rule, policy), IsExactIndicatorRule(rule)});
         break;
       }
     }
@@ -762,46 +837,67 @@ void AddRuleHits(const std::vector<Rule>& rules, const FileData& file, const Pol
 }
 
 std::vector<Rule> LoadExternalRules() {
-  static std::once_flag once;
+  static std::mutex cacheMutex;
   static std::vector<Rule> cachedRules;
+  static std::wstring cacheFingerprint;
 
-  std::call_once(once, [] {
-    for (const auto& path : ResolveSignatureBundlePaths()) {
-      std::ifstream input(WideToUtf8(path.wstring()), std::ios::binary);
-      if (!input.is_open()) {
+  const auto bundlePaths = ResolveSignatureBundlePaths();
+  std::wstring currentFingerprint;
+  for (const auto& path : bundlePaths) {
+    currentFingerprint += NormalizePathForComparison(path);
+    currentFingerprint += L"|";
+    std::error_code error;
+    const auto writeTime = std::filesystem::last_write_time(path, error);
+    if (!error) {
+      currentFingerprint += std::to_wstring(writeTime.time_since_epoch().count());
+    }
+    currentFingerprint += L";";
+  }
+
+  std::scoped_lock lock(cacheMutex);
+  if (currentFingerprint == cacheFingerprint) {
+    return cachedRules;
+  }
+
+  std::vector<Rule> refreshedRules;
+  for (const auto& path : bundlePaths) {
+    std::ifstream input(WideToUtf8(path.wstring()), std::ios::binary);
+    if (!input.is_open()) {
+      continue;
+    }
+
+    std::string lineUtf8;
+    while (std::getline(input, lineUtf8)) {
+      const auto trimmed = TrimWide(Utf8ToWide(lineUtf8));
+      if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
         continue;
       }
 
-      std::string lineUtf8;
-      while (std::getline(input, lineUtf8)) {
-        const auto trimmed = TrimWide(Utf8ToWide(lineUtf8));
-        if (trimmed.empty() || trimmed.starts_with(L"#") || trimmed.starts_with(L";")) {
-          continue;
-        }
+      const auto columns = SplitColumns(trimmed, L'|');
+      if (columns.size() < 7) {
+        continue;
+      }
 
-        const auto columns = SplitColumns(trimmed, L'|');
-        if (columns.size() < 7) {
-          continue;
-        }
-
-        Rule rule;
-        rule.scope = ToLowerCopy(columns[0]);
-        rule.code = columns[1];
-        rule.message = columns[2];
-        rule.tacticId = columns[3];
-        rule.techniqueId = columns[4];
-        try {
-          rule.score = std::stoi(columns[5]);
-        } catch (...) {
-          continue;
-        }
-        rule.patterns = SplitPatterns(columns[6], L';');
-        if (!rule.code.empty() && !rule.patterns.empty()) {
-          cachedRules.push_back(std::move(rule));
-        }
+      Rule rule;
+      rule.scope = ToLowerCopy(columns[0]);
+      rule.code = columns[1];
+      rule.message = columns[2];
+      rule.tacticId = columns[3];
+      rule.techniqueId = columns[4];
+      try {
+        rule.score = std::stoi(columns[5]);
+      } catch (...) {
+        continue;
+      }
+      rule.patterns = SplitPatterns(columns[6], L';');
+      if (!rule.code.empty() && !rule.patterns.empty()) {
+        refreshedRules.push_back(std::move(rule));
       }
     }
-  });
+  }
+
+  cachedRules = std::move(refreshedRules);
+  cacheFingerprint = std::move(currentFingerprint);
 
   return cachedRules;
 }
@@ -835,14 +931,17 @@ std::optional<FileData> LoadFileData(const std::filesystem::path& path) {
                               : file.lnk ? L"windows-shortcut" : ScriptExt(file.extension) ? L"script" : L"binary";
   if (file.pe || ExecutableExt(file.extension)) {
     file.signer = QuerySigner(path.wstring());
+    file.signatureVerified = VerifyAuthenticodeSignature(path);
   }
-  file.reputation = !file.signer.empty() && TrustedSigner(file.signer) && file.trustedPath ? L"trusted-signed-system"
-                    : !file.signer.empty() && TrustedSigner(file.signer)                    ? L"trusted-signed"
+  file.reputation = file.signatureVerified && !file.signer.empty() && TrustedSigner(file.signer) && file.trustedPath
+                        ? L"trusted-signed-system"
+                    : file.signatureVerified && !file.signer.empty() && TrustedSigner(file.signer)
+                        ? L"trusted-signed"
                     : file.trustedPath                                                     ? L"trusted-path"
                     : file.userPath && file.signer.empty()                                 ? L"user-writable-unsigned"
                                                                                            : L"unknown";
   try {
-    file.sha256 = ComputeFileSha256(path);
+    file.sha256 = ToLowerCopy(ComputeFileSha256(path));
   } catch (...) {
   }
   return file;
@@ -1005,6 +1104,8 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
 
   const auto& file = *loaded;
   ContentOriginContext effectiveOrigin = originContext;
+  const auto trustedSystemBinary =
+      IsWindowsSystemBinaryPath(file.path) && file.signatureVerified && !file.signer.empty() && TrustedSigner(file.signer);
 
   if (ShouldSuppressNoisyCacheFile(file)) {
     return std::nullopt;
@@ -1078,59 +1179,61 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                      L"TA0005", L"T1027", 24});
   }
 
-  if (Contains(file.textLower, L"amsiutils")) {
-    AddHit(hits, Hit{L"DEFENSE_EVASION_AMSI", L"Content contains AMSI bypass or defense-evasion patterns.",
-                     L"TA0005", L"T1562.001", 55});
-  }
+  if (!trustedSystemBinary) {
+    if (Contains(file.textLower, L"amsiutils")) {
+      AddHit(hits, Hit{L"DEFENSE_EVASION_AMSI", L"Content contains AMSI bypass or defense-evasion patterns.",
+                       L"TA0005", L"T1562.001", 55});
+    }
 
-  if (Contains(file.textLower, L"frombase64string") || Contains(file.textLower, L"encodedcommand") ||
-      Contains(file.textLower, L"-enc ")) {
-    AddHit(hits, Hit{L"ENCODED_PAYLOAD", L"Content contains encoded payload or decode routines.", L"TA0005",
-                     L"T1027", 35});
-  }
-  if (Contains(file.textLower, L"downloadstring") || Contains(file.textLower, L"downloadfile") ||
-      Contains(file.textLower, L"invoke-webrequest") || Contains(file.textLower, L"start-bitstransfer") ||
-      Contains(file.textLower, L"net.webclient")) {
-    AddHit(hits, Hit{L"DOWNLOAD_CRADLE", L"Content contains network download cradle behavior.", L"TA0011", L"T1105",
-                     35});
-  }
-  if (Contains(file.textLower, L"invoke-expression") || Contains(file.textLower, L"iex ") ||
-      Contains(file.textLower, L"iex(")) {
-    AddHit(hits, Hit{L"DYNAMIC_EXECUTION", L"Content uses dynamic execution primitives.", L"TA0002", L"T1059.001",
-                     30});
-  }
-  if (Contains(file.textLower, L"autoopen") || Contains(file.textLower, L"document_open") ||
-      Contains(file.textLower, L"workbook_open") || Contains(file.textLower, L"createobject(\"wscript.shell\")")) {
-    AddHit(hits, Hit{L"OFFICE_MACRO_LAUNCH", L"Macro auto-run or shell execution patterns were found.", L"TA0002",
-                     L"T1059.005", 40});
-  }
-  if (Contains(file.textLower, L"schtasks /create") || Contains(file.textLower, L"register-scheduledtask") ||
-      Contains(file.textLower, L"new-scheduledtaskaction")) {
-    AddHit(hits, Hit{L"SCHEDULED_TASK_PERSISTENCE",
-                     L"Content contains scheduled-task persistence commands or helper APIs.", L"TA0003",
-                     L"T1053.005", 24});
-  }
-  if (Contains(file.textLower, L"currentversion\\run") || Contains(file.textLower, L"\\runonce") ||
-      Contains(file.textLower, L"reg add hkcu\\software\\microsoft\\windows\\currentversion\\run") ||
-      Contains(file.textLower, L"reg add hklm\\software\\microsoft\\windows\\currentversion\\run")) {
-    AddHit(hits, Hit{L"RUN_KEY_PERSISTENCE",
-                     L"Content contains run-key persistence commands or registry paths.", L"TA0003",
-                     L"T1547.001", 24});
-  }
-  if (Contains(file.textLower, L"sc create") || Contains(file.textLower, L"new-service") ||
-      Contains(file.textLower, L"createservice")) {
-    AddHit(hits, Hit{L"SERVICE_PERSISTENCE", L"Content contains service-install persistence patterns.", L"TA0003",
-                     L"T1543.003", 28});
-  }
-  if (Contains(file.textLower, L"virtualalloc") || Contains(file.textLower, L"writeprocessmemory") ||
-      Contains(file.textLower, L"createremotethread") || Contains(file.textLower, L"queueuserapc")) {
-    AddHit(hits, Hit{L"PROCESS_INJECTION_API", L"Content references in-memory injection APIs.", L"TA0005",
-                     L"T1055", 45});
-  }
-  if (Contains(file.textLower, L"wscript.shell") || Contains(file.textLower, L"shell.application") ||
-      Contains(file.textLower, L"regsvr32") || Contains(file.textLower, L"mshta") ||
-      Contains(file.textLower, L"rundll32")) {
-    AddHit(hits, Hit{L"SCRIPT_HOST_ABUSE", L"Script host abuse patterns were detected.", L"TA0002", L"T1059", 30});
+    if (Contains(file.textLower, L"frombase64string") || Contains(file.textLower, L"encodedcommand") ||
+        Contains(file.textLower, L"-enc ")) {
+      AddHit(hits, Hit{L"ENCODED_PAYLOAD", L"Content contains encoded payload or decode routines.", L"TA0005",
+                       L"T1027", 35});
+    }
+    if (Contains(file.textLower, L"downloadstring") || Contains(file.textLower, L"downloadfile") ||
+        Contains(file.textLower, L"invoke-webrequest") || Contains(file.textLower, L"start-bitstransfer") ||
+        Contains(file.textLower, L"net.webclient")) {
+      AddHit(hits, Hit{L"DOWNLOAD_CRADLE", L"Content contains network download cradle behavior.", L"TA0011",
+                       L"T1105", 35});
+    }
+    if (Contains(file.textLower, L"invoke-expression") || Contains(file.textLower, L"iex ") ||
+        Contains(file.textLower, L"iex(")) {
+      AddHit(hits, Hit{L"DYNAMIC_EXECUTION", L"Content uses dynamic execution primitives.", L"TA0002",
+                       L"T1059.001", 30});
+    }
+    if (Contains(file.textLower, L"autoopen") || Contains(file.textLower, L"document_open") ||
+        Contains(file.textLower, L"workbook_open") || Contains(file.textLower, L"createobject(\"wscript.shell\")")) {
+      AddHit(hits, Hit{L"OFFICE_MACRO_LAUNCH", L"Macro auto-run or shell execution patterns were found.", L"TA0002",
+                       L"T1059.005", 40});
+    }
+    if (Contains(file.textLower, L"schtasks /create") || Contains(file.textLower, L"register-scheduledtask") ||
+        Contains(file.textLower, L"new-scheduledtaskaction")) {
+      AddHit(hits, Hit{L"SCHEDULED_TASK_PERSISTENCE",
+                       L"Content contains scheduled-task persistence commands or helper APIs.", L"TA0003",
+                       L"T1053.005", 24});
+    }
+    if (Contains(file.textLower, L"currentversion\\run") || Contains(file.textLower, L"\\runonce") ||
+        Contains(file.textLower, L"reg add hkcu\\software\\microsoft\\windows\\currentversion\\run") ||
+        Contains(file.textLower, L"reg add hklm\\software\\microsoft\\windows\\currentversion\\run")) {
+      AddHit(hits, Hit{L"RUN_KEY_PERSISTENCE",
+                       L"Content contains run-key persistence commands or registry paths.", L"TA0003",
+                       L"T1547.001", 24});
+    }
+    if (Contains(file.textLower, L"sc create") || Contains(file.textLower, L"new-service") ||
+        Contains(file.textLower, L"createservice")) {
+      AddHit(hits, Hit{L"SERVICE_PERSISTENCE", L"Content contains service-install persistence patterns.", L"TA0003",
+                       L"T1543.003", 28});
+    }
+    if (Contains(file.textLower, L"virtualalloc") || Contains(file.textLower, L"writeprocessmemory") ||
+        Contains(file.textLower, L"createremotethread") || Contains(file.textLower, L"queueuserapc")) {
+      AddHit(hits, Hit{L"PROCESS_INJECTION_API", L"Content references in-memory injection APIs.", L"TA0005",
+                       L"T1055", 45});
+    }
+    if (Contains(file.textLower, L"wscript.shell") || Contains(file.textLower, L"shell.application") ||
+        Contains(file.textLower, L"regsvr32") || Contains(file.textLower, L"mshta") ||
+        Contains(file.textLower, L"rundll32")) {
+      AddHit(hits, Hit{L"SCRIPT_HOST_ABUSE", L"Script host abuse patterns were detected.", L"TA0002", L"T1059", 30});
+    }
   }
   if ((ScriptExt(file.extension) || file.extension == L".hta" || file.extension == L".txt" || file.extension == L".html") &&
       ContainsRecoveryInhibitionCommands(file.textLower)) {
@@ -1148,31 +1251,34 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                      L"Content resembles a ransom note with file-recovery and payment instructions.", L"TA0040",
                      L"T1486", 68});
   }
-  if (LongBase64(file.textLower)) {
-    AddHit(hits, Hit{L"LONG_BASE64_BLOB", L"Content contains a long encoded payload blob.", L"TA0005", L"T1027", 30});
-  }
-  if (std::count(file.textLower.begin(), file.textLower.end(), L'^') >= 12 ||
-      std::count(file.textLower.begin(), file.textLower.end(), L'`') >= 12) {
-    AddHit(hits, Hit{L"SCRIPT_OBFUSCATION", L"Content uses common obfuscation markers.", L"TA0005", L"T1027", 28});
-  }
+  if (!trustedSystemBinary) {
+    if (LongBase64(file.textLower)) {
+      AddHit(hits,
+             Hit{L"LONG_BASE64_BLOB", L"Content contains a long encoded payload blob.", L"TA0005", L"T1027", 30});
+    }
+    if (std::count(file.textLower.begin(), file.textLower.end(), L'^') >= 12 ||
+        std::count(file.textLower.begin(), file.textLower.end(), L'`') >= 12) {
+      AddHit(hits, Hit{L"SCRIPT_OBFUSCATION", L"Content uses common obfuscation markers.", L"TA0005", L"T1027", 28});
+    }
 
-  if (Contains(file.asciiLower, L"http://") || Contains(file.asciiLower, L"https://") ||
-      Contains(file.asciiLower, L"urldownloadtofile") || Contains(file.asciiLower, L"winhttp") ||
-      Contains(file.asciiLower, L"internetopenurl")) {
-    AddHit(hits, Hit{L"PE_DOWNLOAD_AND_EXECUTE", L"Portable executable contains download-and-execute strings.",
-                     L"TA0011", L"T1105", 35});
-  }
-  if (Contains(file.asciiLower, L"virtualalloc") || Contains(file.asciiLower, L"writeprocessmemory") ||
-      Contains(file.asciiLower, L"createremotethread") || Contains(file.asciiLower, L"queueuserapc")) {
-    AddHit(hits, Hit{L"PE_PROCESS_INJECTION", L"Portable executable contains process injection strings.", L"TA0005",
-                     L"T1055", 45});
-  }
-  if (Contains(file.asciiLower, L"powershell") || Contains(file.asciiLower, L"rundll32") ||
-      Contains(file.asciiLower, L"regsvr32") || Contains(file.asciiLower, L"mshta") ||
-      Contains(file.asciiLower, L"cmd.exe") || Contains(file.asciiLower, L"wscript") ||
-      Contains(file.asciiLower, L"cscript")) {
-    AddHit(hits, Hit{L"PE_LOLBIN_PROXY", L"Portable executable references LOLBins often used for proxy execution.",
-                     L"TA0005", L"T1218", 32});
+    if (Contains(file.asciiLower, L"http://") || Contains(file.asciiLower, L"https://") ||
+        Contains(file.asciiLower, L"urldownloadtofile") || Contains(file.asciiLower, L"winhttp") ||
+        Contains(file.asciiLower, L"internetopenurl")) {
+      AddHit(hits, Hit{L"PE_DOWNLOAD_AND_EXECUTE", L"Portable executable contains download-and-execute strings.",
+                       L"TA0011", L"T1105", 35});
+    }
+    if (Contains(file.asciiLower, L"virtualalloc") || Contains(file.asciiLower, L"writeprocessmemory") ||
+        Contains(file.asciiLower, L"createremotethread") || Contains(file.asciiLower, L"queueuserapc")) {
+      AddHit(hits, Hit{L"PE_PROCESS_INJECTION", L"Portable executable contains process injection strings.", L"TA0005",
+                       L"T1055", 45});
+    }
+    if (Contains(file.asciiLower, L"powershell") || Contains(file.asciiLower, L"rundll32") ||
+        Contains(file.asciiLower, L"regsvr32") || Contains(file.asciiLower, L"mshta") ||
+        Contains(file.asciiLower, L"cmd.exe") || Contains(file.asciiLower, L"wscript") ||
+        Contains(file.asciiLower, L"cscript")) {
+      AddHit(hits, Hit{L"PE_LOLBIN_PROXY", L"Portable executable references LOLBins often used for proxy execution.",
+                       L"TA0005", L"T1218", 32});
+    }
   }
   if (file.pe && file.entropy >= 7.2 && file.signer.empty()) {
     AddHit(hits, Hit{L"PE_HIGH_ENTROPY_PACKED",
@@ -1240,7 +1346,7 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
                      L"TA0005", L"T1564.004", 26});
   }
 
-  AddRuleHits(LoadExternalRules(), file, policy, hits);
+  AddRuleHits(LoadExternalRules(), file, policy, hits, trustedSystemBinary);
 
   int maliciousPressure = 0;
   int benignPressure = 0;
@@ -1281,11 +1387,25 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   const auto reputationLookup = policy.cloudLookupEnabled && !file.sha256.empty()
                                     ? LookupPublicFileReputation(file.sha256)
                                     : ReputationLookupResult{};
+  const auto maliciousCloudSignal =
+      reputationLookup.lookupSucceeded && reputationLookup.malicious && !policy.cloudLookupObserveOnly;
+  const auto exactIndicatorMatch =
+      std::any_of(hits.begin(), hits.end(), [](const auto& hit) { return hit.exactIndicator; });
+
+  if (trustedSystemBinary && !maliciousCloudSignal && !exactIndicatorMatch) {
+    return std::nullopt;
+  }
 
   if ((file.reputation == L"trusted-signed-system" || file.reputation == L"trusted-signed") && !highSeverity) {
     benignPressure += static_cast<int>(policy.scanBenignDampeningScore);
   } else if (file.reputation == L"trusted-path" && !highSeverity) {
     benignPressure += static_cast<int>(policy.scanBenignDampeningScore / 2);
+  }
+
+  if (trustedSystemBinary && !highSeverity && !maliciousCloudSignal) {
+    benignPressure += static_cast<int>(policy.scanBenignDampeningScore) + 24;
+    detectThreshold = std::min(95, detectThreshold + 10);
+    quarantineThreshold = std::min(99, quarantineThreshold + 12);
   }
 
   if (policy.enableCleanwareSignerDampening && signerLookup.lookupSucceeded &&
@@ -1297,7 +1417,7 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
     benignPressure += static_cast<int>(policy.scanBenignDampeningScore) + 18;
   }
 
-  if (reputationLookup.lookupSucceeded && reputationLookup.malicious && !policy.cloudLookupObserveOnly) {
+  if (maliciousCloudSignal) {
     maliciousPressure += 18;
   }
 
@@ -1345,6 +1465,10 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
 
   if (policy.cloudLookupObserveOnly && reputationLookup.lookupSucceeded && reputationLookup.malicious &&
       disposition == VerdictDisposition::Block && !highSeverity) {
+    disposition = VerdictDisposition::Allow;
+  }
+  if (trustedSystemBinary && !highSeverity && !maliciousCloudSignal && disposition == VerdictDisposition::Block &&
+      netPressure < (quarantineThreshold + 8)) {
     disposition = VerdictDisposition::Allow;
   }
 
@@ -1400,6 +1524,11 @@ std::optional<ScanFinding> ScanFile(const std::filesystem::path& path, const Pol
   if (finding.verdict.disposition == VerdictDisposition::Allow && trustedCleanware) {
     finding.verdict.reasons.push_back(
         {L"CLEANWARE_DAMPENING", L"Fenrir reduced confidence because trusted signer/hash cleanware intelligence matched."});
+  }
+  if (finding.verdict.disposition == VerdictDisposition::Allow && trustedSystemBinary) {
+    finding.verdict.reasons.push_back(
+        {L"SYSTEM32_TRUST_DAMPENING",
+         L"Fenrir reduced confidence for a trusted signed Windows system binary in System32/SysWOW64."});
   }
   if (finding.verdict.disposition == VerdictDisposition::Allow && policy.archiveObserveOnly && archiveSurface) {
     finding.verdict.reasons.push_back(

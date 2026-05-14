@@ -19,6 +19,8 @@ constexpr wchar_t kRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kLegacyRegistryRoot[] = L"SOFTWARE\\AntiVirusAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
 constexpr wchar_t kScanExcludePathsValueName[] = L"ScanExcludePaths";
+constexpr wchar_t kQuickScanIntervalMinutesValueName[] = L"QuickScanIntervalMinutes";
+constexpr wchar_t kFullScanIntervalMinutesValueName[] = L"FullScanIntervalMinutes";
 constexpr wchar_t kRuntimeRootValueName[] = L"RuntimeRoot";
 constexpr wchar_t kRuntimeDatabasePathValueName[] = L"RuntimeDatabasePath";
 constexpr wchar_t kInstallRootValueName[] = L"InstallRoot";
@@ -36,6 +38,14 @@ int ParsePositiveInt(const std::wstring& rawValue, const int fallback) {
   } catch (...) {
     return fallback;
   }
+}
+
+int ClampQuickScanIntervalMinutes(const int value) {
+  return std::clamp(value, 15, 10080);
+}
+
+int ClampFullScanIntervalMinutes(const int value) {
+  return std::clamp(value, 60, 43200);
 }
 
 bool ParseBooleanValue(const std::wstring& rawValue, const bool fallback) {
@@ -627,6 +637,40 @@ bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& excl
   return saved;
 }
 
+ScanScheduleSettings LoadConfiguredScanScheduleSettings() {
+  ScanScheduleSettings settings;
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    const auto quickScanIntervalRaw = ReadRegistryString(hive, kQuickScanIntervalMinutesValueName);
+    if (!quickScanIntervalRaw.empty()) {
+      settings.quickScanIntervalMinutes =
+          ClampQuickScanIntervalMinutes(ParsePositiveInt(quickScanIntervalRaw, settings.quickScanIntervalMinutes));
+    }
+
+    const auto fullScanIntervalRaw = ReadRegistryString(hive, kFullScanIntervalMinutesValueName);
+    if (!fullScanIntervalRaw.empty()) {
+      settings.fullScanIntervalMinutes =
+          ClampFullScanIntervalMinutes(ParsePositiveInt(fullScanIntervalRaw, settings.fullScanIntervalMinutes));
+    }
+  }
+
+  return settings;
+}
+
+bool SaveConfiguredScanScheduleSettings(const ScanScheduleSettings& scheduleSettings) {
+  const auto quickScanInterval = std::to_wstring(ClampQuickScanIntervalMinutes(scheduleSettings.quickScanIntervalMinutes));
+  const auto fullScanInterval = std::to_wstring(ClampFullScanIntervalMinutes(scheduleSettings.fullScanIntervalMinutes));
+  bool saved = false;
+  for (const auto hive : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
+    const auto quickSaved =
+        WriteRegistryStringToRoot(hive, kRegistryRoot, kQuickScanIntervalMinutesValueName, quickScanInterval);
+    const auto fullSaved =
+        WriteRegistryStringToRoot(hive, kRegistryRoot, kFullScanIntervalMinutesValueName, fullScanInterval);
+    saved = saved || (quickSaved && fullSaved);
+  }
+
+  return saved;
+}
+
 std::vector<ScanExclusionEntry> LoadConfiguredScanExclusionEntries() {
   return LoadConfiguredScanExclusionEntriesFromFile();
 }
@@ -749,6 +793,15 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
   if (!controlPlaneBaseUrl.empty() && config.controlPlaneBaseUrl == AgentConfig{}.controlPlaneBaseUrl) {
     config.controlPlaneBaseUrl = controlPlaneBaseUrl;
   }
+  auto signatureFeedToken = ReadEnvironmentVariable(L"ANTIVIRUS_SIGNATURE_FEED_TOKEN");
+  if (signatureFeedToken.empty()) {
+    signatureFeedToken = ReadEnvironmentVariable(L"FENRIR_ENDPOINT_TOKEN");
+  }
+  config.signatureFeedToken = signatureFeedToken;
+
+  const auto configuredScheduleSettings = LoadConfiguredScanScheduleSettings();
+  config.scheduledQuickScanIntervalMinutes = configuredScheduleSettings.quickScanIntervalMinutes;
+  config.scheduledFullDriveScanIntervalMinutes = configuredScheduleSettings.fullScanIntervalMinutes;
 
   const auto runtimeDatabasePath = ReadEnvironmentVariable(L"ANTIVIRUS_RUNTIME_DB_PATH");
   const auto runtimeDatabasePathOverridden = !runtimeDatabasePath.empty();
@@ -855,6 +908,23 @@ AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle) {
       ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_SYNC_INTERVAL_SECONDS"), config.syncIntervalSeconds);
   config.syncIterations =
       ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_SYNC_ITERATIONS"), config.syncIterations);
+  config.scheduledQuickScanIntervalMinutes = ClampQuickScanIntervalMinutes(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_SCHEDULED_QUICK_SCAN_INTERVAL_MINUTES"),
+                       config.scheduledQuickScanIntervalMinutes));
+  auto fullScanIntervalMinutesRaw = ReadEnvironmentVariable(L"ANTIVIRUS_SCHEDULED_FULL_SCAN_INTERVAL_MINUTES");
+  if (fullScanIntervalMinutesRaw.empty()) {
+    fullScanIntervalMinutesRaw = ReadEnvironmentVariable(L"ANTIVIRUS_SCHEDULED_FULL_DRIVE_SCAN_INTERVAL_MINUTES");
+  }
+  config.scheduledFullDriveScanIntervalMinutes = ClampFullScanIntervalMinutes(
+      ParsePositiveInt(fullScanIntervalMinutesRaw, config.scheduledFullDriveScanIntervalMinutes));
+  config.liveThreatSweepIntervalMinutes = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_LIVE_THREAT_SWEEP_INTERVAL_MINUTES"),
+                       config.liveThreatSweepIntervalMinutes),
+      5, 1440);
+  config.vulnerabilityAssessmentIntervalMinutes = std::clamp(
+      ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_VULNERABILITY_ASSESSMENT_INTERVAL_MINUTES"),
+                       config.vulnerabilityAssessmentIntervalMinutes),
+      15, 10080);
   config.telemetryBatchSize =
       ParsePositiveInt(ReadEnvironmentVariable(L"ANTIVIRUS_TELEMETRY_BATCH_SIZE"), config.telemetryBatchSize);
   config.realtimeBrokerRetrySeconds =

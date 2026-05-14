@@ -21,6 +21,7 @@ using StatementHandle = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize
 
 constexpr int kSingletonKey = 1;
 constexpr int kRuntimeDatabaseSchemaVersion = 8;
+constexpr int kRuntimeDatabaseBusyTimeoutMs = 30000;
 
 std::string WidePathToUtf8(const std::filesystem::path& path) { return WideToUtf8(path.wstring()); }
 
@@ -504,10 +505,11 @@ ConnectionHandle OpenConnection(const std::filesystem::path& databasePath) {
     }
 
     ConnectionHandle connection(raw, sqlite3_close);
+    sqlite3_busy_timeout(connection.get(), kRuntimeDatabaseBusyTimeoutMs);
+    Exec(connection.get(), "PRAGMA busy_timeout=30000;");
     Exec(connection.get(), "PRAGMA journal_mode=WAL;");
     Exec(connection.get(), "PRAGMA synchronous=FULL;");
     Exec(connection.get(), "PRAGMA foreign_keys=ON;");
-    Exec(connection.get(), "PRAGMA busy_timeout=5000;");
     EnsureBaseSchema(connection.get());
     RunSchemaMigrations(connection.get());
     return connection;

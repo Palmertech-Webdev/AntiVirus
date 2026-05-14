@@ -151,14 +151,20 @@ struct PatchActionCompletePayload {
   bool informational{true};
   bool success{true};
   bool searchOnly{false};
+  bool suppressDialog{false};
 };
 
 struct LaunchOptions {
   bool backgroundMode{false};
   bool manageExclusionsMode{false};
   bool applyExclusionsMode{false};
+  bool applySoftwareUpdateMode{false};
+  std::wstring applySoftwareUpdateId;
   std::vector<std::filesystem::path> applyExclusionsPaths;
 };
+
+std::wstring BuildPatchExecutionSummary(const antivirus::agent::PatchExecutionResult& result, bool searchOnly);
+bool IsPatchResultInformational(const antivirus::agent::PatchExecutionResult& result);
 
 HANDLE g_instanceMutex = nullptr;
 
@@ -484,6 +490,19 @@ int ApplyExclusionsFromLaunchOptions(const LaunchOptions& options) {
   return antivirus::agent::RestartAgentService() ? 0 : 2;
 }
 
+int ApplySoftwareUpdateFromLaunchOptions(const LaunchOptions& options) {
+  if (options.applySoftwareUpdateId.empty()) {
+    return 1;
+  }
+
+  const auto config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+  const auto result = antivirus::agent::ExecuteSoftwarePatchThroughService(config, options.applySoftwareUpdateId);
+  const auto summary = BuildPatchExecutionSummary(result, false);
+  MessageBoxW(nullptr, summary.c_str(), kWindowTitle,
+              MB_OK | (result.success || IsPatchResultInformational(result) ? MB_ICONINFORMATION : MB_ICONWARNING));
+  return result.success || IsPatchResultInformational(result) ? 0 : 2;
+}
+
 LaunchOptions ParseLaunchOptions() {
   LaunchOptions options;
   int argumentCount = 0;
@@ -509,16 +528,34 @@ LaunchOptions ParseLaunchOptions() {
     options.backgroundMode = true;
   }
 
+  options.applySoftwareUpdateMode =
+      HasSwitch(arguments, L"--apply-software-update") || HasSwitch(arguments, L"/apply-software-update");
+  if (options.applySoftwareUpdateMode) {
+    options.backgroundMode = true;
+  }
+
   bool capturePaths = false;
+  bool captureSoftwareUpdateId = false;
   for (const auto& argument : arguments) {
     if (_wcsicmp(argument.c_str(), L"--apply-exclusions") == 0 ||
         _wcsicmp(argument.c_str(), L"/apply-exclusions") == 0) {
       capturePaths = true;
+      captureSoftwareUpdateId = false;
+      continue;
+    }
+
+    if (_wcsicmp(argument.c_str(), L"--apply-software-update") == 0 ||
+        _wcsicmp(argument.c_str(), L"/apply-software-update") == 0) {
+      captureSoftwareUpdateId = true;
+      capturePaths = false;
       continue;
     }
 
     if (capturePaths && !StartsWithSwitchPrefix(argument)) {
       options.applyExclusionsPaths.emplace_back(argument);
+    } else if (captureSoftwareUpdateId && !StartsWithSwitchPrefix(argument)) {
+      options.applySoftwareUpdateId = argument;
+      captureSoftwareUpdateId = false;
     }
   }
 
@@ -702,6 +739,18 @@ bool LaunchExclusionsEditor(HWND owner) {
 
   const auto result = reinterpret_cast<INT_PTR>(
       ShellExecuteW(owner, L"runas", executablePath.c_str(), L"--manage-exclusions", nullptr, SW_SHOWNORMAL));
+  return result > 32;
+}
+
+bool LaunchElevatedSoftwareUpdate(HWND owner, const std::wstring& softwareId) {
+  const auto executablePath = GetCurrentExecutablePath();
+  if (executablePath.empty() || softwareId.empty()) {
+    return false;
+  }
+
+  const auto parameters = std::wstring(L"--apply-software-update ") + QuoteCommandLineArgument(softwareId);
+  const auto result = reinterpret_cast<INT_PTR>(
+      ShellExecuteW(owner, L"runas", executablePath.c_str(), parameters.c_str(), nullptr, SW_SHOWNORMAL));
   return result > 32;
 }
 
@@ -1034,7 +1083,7 @@ int CommitExclusions(HWND hwnd, const std::vector<std::filesystem::path>& exclus
 
 std::wstring ProtectionHeadline(const EndpointClientSnapshot& snapshot) {
   if (snapshot.openThreatCount != 0) {
-    return L"Threats need attention";
+    return L"Findings need attention";
   }
 
   if (snapshot.serviceState == LocalServiceState::Running &&
@@ -1063,14 +1112,14 @@ std::wstring ProtectionGuidance(const EndpointClientSnapshot& snapshot) {
   }
 
   if (snapshot.openThreatCount != 0) {
-    return L"Recent malicious activity was detected locally. Review the Threats and Quarantine tabs, then decide whether anything should be restored or removed.";
+    return L"Recent malicious activity was detected locally. Review the Findings and Quarantine tabs, then decide whether anything should be restored or removed.";
   }
 
   if (_wcsicmp(snapshot.agentState.healthState.c_str(), L"healthy") != 0) {
     return L"The endpoint is still reporting a degraded runtime state. Review the service state and recent local findings to confirm what needs attention.";
   }
 
-  return L"Background protection is running and no unresolved local threats are currently recorded.";
+  return L"Background protection is running and no unresolved local findings are currently recorded.";
 }
 
 bool IsScanSessionRecord(const antivirus::agent::ScanHistoryRecord& record);
@@ -1080,16 +1129,16 @@ std::wstring BuildSummaryCardText(const EndpointClientSnapshot& snapshot) {
   stream << L"Protection status\r\n"
          << ProtectionHeadline(snapshot) << L"\r\n\r\n"
          << (snapshot.openThreatCount == 0
-                 ? (snapshot.activeQuarantineCount == 0 ? L"No unresolved threats are recorded."
+                 ? (snapshot.activeQuarantineCount == 0 ? L"No unresolved findings are recorded."
                                                        : std::to_wstring(snapshot.activeQuarantineCount) + L" quarantined item(s) are contained.")
-                 : std::to_wstring(snapshot.openThreatCount) + L" unresolved threat(s) need review.")
+                 : std::to_wstring(snapshot.openThreatCount) + L" unresolved finding(s) need review.")
          << L"\r\nNext action: ";
   if (snapshot.serviceState == LocalServiceState::NotInstalled) {
     stream << L"Install the protection service";
   } else if (snapshot.serviceState == LocalServiceState::Stopped) {
     stream << L"Start the protection service";
   } else if (snapshot.openThreatCount != 0) {
-    stream << L"Review threats and quarantine";
+    stream << L"Review findings and quarantine";
   } else if (_wcsicmp(snapshot.agentState.healthState.c_str(), L"healthy") != 0) {
     stream << L"Review runtime health";
   } else {
@@ -1149,6 +1198,52 @@ std::wstring BuildMetricCardText(const std::wstring& label, const std::wstring& 
   return stream.str();
 }
 
+std::wstring ExtractSimpleJsonStringValue(const std::wstring& json, const std::wstring& key) {
+  const auto marker = L"\"" + key + L"\":\"";
+  const auto start = json.find(marker);
+  if (start == std::wstring::npos) {
+    return {};
+  }
+
+  std::wstring value;
+  bool escaping = false;
+  for (std::size_t index = start + marker.size(); index < json.size(); ++index) {
+    const auto ch = json[index];
+    if (escaping) {
+      switch (ch) {
+        case L'"':
+        case L'\\':
+        case L'/':
+          value.push_back(ch);
+          break;
+        case L'n':
+          value.push_back(L'\n');
+          break;
+        case L'r':
+          value.push_back(L'\r');
+          break;
+        case L't':
+          value.push_back(L'\t');
+          break;
+        default:
+          value.push_back(ch);
+          break;
+      }
+      escaping = false;
+      continue;
+    }
+    if (ch == L'\\') {
+      escaping = true;
+      continue;
+    }
+    if (ch == L'"') {
+      break;
+    }
+    value.push_back(ch);
+  }
+  return value;
+}
+
 std::wstring BuildPatchExecutionSummary(const antivirus::agent::PatchExecutionResult& result, const bool searchOnly) {
   std::wstringstream stream;
   stream << (searchOnly ? L"Software update check finished." : L"Software update action finished.")
@@ -1159,6 +1254,18 @@ std::wstring BuildPatchExecutionSummary(const antivirus::agent::PatchExecutionRe
 
   if (!result.errorCode.empty()) {
     stream << L"\r\nError: " << result.errorCode;
+  }
+  const auto providerSummary = ExtractSimpleJsonStringValue(result.detailJson, L"summary");
+  if (!providerSummary.empty()) {
+    stream << L"\r\nDetail: " << providerSummary;
+  } else {
+    const auto errorDetail = ExtractSimpleJsonStringValue(result.detailJson, L"error");
+    const auto messageDetail = ExtractSimpleJsonStringValue(result.detailJson, L"message");
+    if (!errorDetail.empty()) {
+      stream << L"\r\nDetail: " << errorDetail;
+    } else if (!messageDetail.empty()) {
+      stream << L"\r\nDetail: " << messageDetail;
+    }
   }
 
   if (result.rebootRequired) {
@@ -1209,7 +1316,7 @@ std::wstring BuildBrandCardText(const EndpointClientSnapshot& snapshot) {
 std::wstring PageTitle(const ClientPage page) {
   switch (page) {
     case ClientPage::Threats:
-      return L"Threats";
+      return L"Findings";
     case ClientPage::Quarantine:
       return L"Quarantine";
     case ClientPage::Scans:
@@ -1278,7 +1385,7 @@ std::wstring PageSubtitle(const ClientPage page, const EndpointClientSnapshot& s
 std::wstring PrimarySectionTitle(const ClientPage page) {
   switch (page) {
     case ClientPage::Threats:
-      return L"Threat queue";
+      return L"Finding queue";
     case ClientPage::Quarantine:
       return L"Quarantine inventory";
     case ClientPage::Scans:
@@ -1302,7 +1409,7 @@ std::wstring SecondarySectionTitle(const ClientPage page) {
     case ClientPage::Quarantine:
       return L"Item detail";
     case ClientPage::Threats:
-      return L"Threat detail";
+      return L"Finding detail";
     case ClientPage::Updates:
       return L"Update detail";
     case ClientPage::Service:
@@ -1388,12 +1495,26 @@ std::wstring CompactPathForStatus(const std::filesystem::path& path) {
     return {};
   }
 
-  const auto fileName = path.filename().wstring();
-  if (!fileName.empty()) {
-    return fileName;
+  const auto fullPath = path.wstring();
+  constexpr std::size_t kMaxStatusPathLength = 96;
+  if (fullPath.size() <= kMaxStatusPathLength) {
+    return fullPath;
   }
 
-  return path.wstring();
+  const auto fileName = path.filename().wstring();
+  if (fileName.empty()) {
+    return fullPath.substr(0, kMaxStatusPathLength - 3) + L"...";
+  }
+
+  auto root = path.root_name().wstring();
+  if (root.empty()) {
+    root = path.root_path().wstring();
+  }
+  if (root.empty()) {
+    root = L"...";
+  }
+
+  return root + L"\\...\\" + fileName;
 }
 
 void SetWindowTextSafe(HWND control, const std::wstring& text) {
@@ -1755,7 +1876,7 @@ std::wstring HistoryDispositionLabel(const antivirus::agent::ScanHistoryRecord& 
 
 std::wstring BuildThreatDetailText(const antivirus::agent::ScanHistoryRecord& record) {
   std::wstringstream stream;
-  stream << L"Threat detail\r\n\r\n"
+  stream << L"Finding detail\r\n\r\n"
          << L"Detected: " << NullableText(record.recordedAt) << L"\r\n"
          << L"Alert: " << NullableText(record.alertTitle, L"(none)") << L"\r\n"
          << L"Item: " << ThreatDisplayPath(record) << L"\r\n"
@@ -1978,6 +2099,8 @@ std::wstring BuildSettingsOverviewText(const UiContext& context) {
          << L"Quarantine root: " << context.config.quarantineRootPath.wstring() << L"\r\n"
          << L"Evidence root: " << context.config.evidenceRootPath.wstring() << L"\r\n"
          << L"Custom exclusions: " << exclusions.size() << L" path(s)\r\n"
+         << L"Quick scan schedule: every " << context.config.scheduledQuickScanIntervalMinutes << L" minute(s)\r\n"
+         << L"Full scan schedule: every " << context.config.scheduledFullDriveScanIntervalMinutes << L" minute(s)\r\n"
          << L"Realtime port: " << NullableText(context.config.realtimeProtectionPortName) << L"\r\n"
          << L"Sync interval: " << context.config.syncIntervalSeconds << L" seconds\r\n"
          << L"Telemetry batch size: " << context.config.telemetryBatchSize << L"\r\n"
@@ -1990,9 +2113,9 @@ std::wstring DefaultDetailText(const UiContext& context) {
   switch (context.currentPage) {
     case ClientPage::Threats:
       if (context.snapshot.recentThreats.empty()) {
-        return L"Threat detail\r\n\r\nNo unresolved local threats are currently recorded on this device.";
+        return L"Finding detail\r\n\r\nNo unresolved local findings are currently recorded on this device.";
       }
-      return L"Threat detail\r\n\r\nSelect a threat to see its path, ATT&CK mapping, confidence, and remediation state.";
+      return L"Finding detail\r\n\r\nSelect a finding to see its path, ATT&CK mapping, confidence, and remediation state.";
     case ClientPage::Quarantine:
       if (context.snapshot.quarantineItems.empty()) {
         return L"Quarantine detail\r\n\r\nNo items are currently being held in local quarantine.";
@@ -2158,6 +2281,26 @@ std::wstring GetQueryValue(const std::vector<std::pair<std::wstring, std::wstrin
   return {};
 }
 
+std::optional<int> ParseBoundedInteger(const std::wstring& value, const int minimum, const int maximum) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+
+  std::size_t consumed = 0;
+  int parsed = 0;
+  try {
+    parsed = std::stoi(value, &consumed, 10);
+  } catch (...) {
+    return std::nullopt;
+  }
+
+  if (consumed != value.size() || parsed < minimum || parsed > maximum) {
+    return std::nullopt;
+  }
+
+  return parsed;
+}
+
 std::wstring LoadFenrirLogoDataUri() {
   const auto module = GetModuleHandleW(nullptr);
   const auto resource = FindResourceW(module, MAKEINTRESOURCEW(kFenrirPngResourceId), RT_RCDATA);
@@ -2218,7 +2361,7 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
   } else if (context.snapshot.serviceState == LocalServiceState::Stopped) {
     nextAction = L"Start the protection service";
   } else if (context.snapshot.openThreatCount != 0) {
-    nextAction = L"Review threats and quarantine";
+    nextAction = L"Review findings and quarantine";
   } else if (_wcsicmp(context.snapshot.agentState.healthState.c_str(), L"healthy") != 0) {
     nextAction = L"Review runtime health";
   } else {
@@ -2275,6 +2418,8 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
       {L"Telemetry queue", context.config.telemetryQueuePath.wstring()},
       {L"Quarantine root", context.config.quarantineRootPath.wstring()},
       {L"Evidence root", context.config.evidenceRootPath.wstring()},
+      {L"Quick scan schedule", std::to_wstring(context.config.scheduledQuickScanIntervalMinutes) + L" minute(s)"},
+      {L"Full scan schedule", std::to_wstring(context.config.scheduledFullDriveScanIntervalMinutes) + L" minute(s)"},
       {L"Realtime port", NullableText(context.config.realtimeProtectionPortName)},
       {L"Sync interval", std::to_wstring(context.config.syncIntervalSeconds) + L" seconds"},
          {L"Telemetry batch size", std::to_wstring(context.config.telemetryBatchSize)},
@@ -2317,7 +2462,9 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
        << JsonEscape(NullableText(context.config.controlPlaneBaseUrl)) << L"\",\"lastHeartbeat\":\""
        << JsonEscape(NullableText(context.snapshot.agentState.lastHeartbeatAt, L"(never)")) << L"\",\"lastPolicySync\":\""
        << JsonEscape(NullableText(context.snapshot.agentState.lastPolicySyncAt, L"(never)")) << L"\",\"queuedTelemetry\":\""
-       << context.snapshot.queuedTelemetryCount << L"\",\"lastScan\":\"" << JsonEscape(lastScan) << L"\"},";
+       << context.snapshot.queuedTelemetryCount << L"\",\"lastScan\":\"" << JsonEscape(lastScan)
+       << L"\",\"quickScanIntervalMinutes\":" << context.config.scheduledQuickScanIntervalMinutes
+       << L",\"fullScanIntervalMinutes\":" << context.config.scheduledFullDriveScanIntervalMinutes << L"},";
     json << L"\"updates\":{\"windowsCount\":" << context.snapshot.windowsUpdates.size()
       << L",\"softwareCount\":" << context.snapshot.softwarePatches.size()
       << L",\"availableSoftwareCount\":" << availableSoftwareUpdateCount
@@ -2336,7 +2483,7 @@ std::wstring BuildWebViewStateJson(const UiContext& context) {
   };
 
   json << L"\"cards\":[";
-  appendCard(L"Open threats", std::to_wstring(context.snapshot.openThreatCount),
+  appendCard(L"Open findings", std::to_wstring(context.snapshot.openThreatCount),
              context.snapshot.openThreatCount == 1 ? L"1 unresolved detection" :
                                                      std::to_wstring(context.snapshot.openThreatCount) + L" unresolved detections",
              context.snapshot.openThreatCount == 0 ? L"good" : L"danger");
@@ -2767,7 +2914,7 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
     const updatesPageSize = 8;
     const pages = [
       { key: 'dashboard', label: 'Home' },
-      { key: 'threats', label: 'Threats' },
+      { key: 'threats', label: 'Findings' },
       { key: 'quarantine', label: 'Quarantine' },
       { key: 'scans', label: 'Scans' },
       { key: 'updates', label: 'Updates' },
@@ -2856,6 +3003,8 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
           actions.push(`<button data-exclusion-mode="application">Application</button>`);
           actions.push(`<button data-action="refresh">Refresh</button>`);
         } else {
+          actions.push(`<button data-action="setQuickScanInterval">Quick scan schedule</button>`);
+          actions.push(`<button data-action="setFullScanInterval">Full scan schedule</button>`);
           actions.push(`<button class="warning" data-action="openExclusions">Manage exclusions</button>`);
           actions.push(`<button data-action="refresh">Refresh</button>`);
         }
@@ -2879,7 +3028,7 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         return [
           `<button class="primary" data-nav="updates">Open updates workspace</button>`,
           `<button data-action="softwareUpdatesRefresh"${patchDisabled}>Refresh software inventory</button>`,
-          `<button class="primary" data-action="navigate" data-page="threats">Review threats</button>`,
+          `<button class="primary" data-action="navigate" data-page="threats">Review findings</button>`,
           `<button data-action="navigate" data-page="quarantine">Open quarantine</button>`,
           `<button data-action="scan" data-preset="quick">Run quick scan</button>`
         ].join('');
@@ -3524,7 +3673,7 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
           <section class="section">
             <div class="section-head">
               <div>
-                <div class="eyebrow">Threats</div>
+                <div class="eyebrow">Findings</div>
                 <div class="section-title">Active detections</div>
                 <div class="section-text">Keep this page focused on items that still need a decision.</div>
               </div>
@@ -3535,7 +3684,7 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
           <section class="section">
             <div class="section-head">
               <div>
-                <div class="eyebrow">Selected threat</div>
+                <div class="eyebrow">Selected finding</div>
                 <div class="section-title">Why Fenrir flagged it</div>
                 <div class="section-text">Selected item details, ATT&CK mapping, and recommended next steps.</div>
               </div>
@@ -3815,6 +3964,27 @@ std::wstring BuildWebViewHtml(const UiContext& context) {
         return;
       }
       if (target.dataset.action) {
+        if (target.dataset.action === 'setQuickScanInterval' || target.dataset.action === 'setFullScanInterval') {
+          const isQuick = target.dataset.action === 'setQuickScanInterval';
+          const currentValue = Number(isQuick ? appState.runtime?.quickScanIntervalMinutes : appState.runtime?.fullScanIntervalMinutes);
+          const fallbackValue = isQuick ? 1440 : 10080;
+          const minValue = isQuick ? 15 : 60;
+          const maxValue = isQuick ? 10080 : 43200;
+          const promptTitle = isQuick
+            ? 'Set quick scan interval (minutes). 1440 = once every 24 hours.'
+            : 'Set full scan interval (minutes). 10080 = once every 7 days.';
+          const input = window.prompt(promptTitle, String(Number.isFinite(currentValue) ? currentValue : fallbackValue));
+          if (input === null) return;
+          const minutes = Number.parseInt(input, 10);
+          if (!Number.isFinite(minutes) || minutes < minValue || minutes > maxValue) {
+            window.alert(`Enter a whole number between ${minValue} and ${maxValue} minutes.`);
+            return;
+          }
+          const payload = { action: target.dataset.action, minutes: String(minutes) };
+          send(new URLSearchParams(payload).toString());
+          return;
+        }
+
         const payload = { action: target.dataset.action };
         if (target.dataset.preset) payload.preset = target.dataset.preset;
         if (target.dataset.page) payload.page = target.dataset.page;
@@ -4235,7 +4405,7 @@ void EvaluateNotifications(UiContext& context, const EndpointClientSnapshot& sna
 
   if (notifyThreats) {
     ShowTrayNotification(context,
-                         snapshot.openThreatCount == 1 ? L"Threat found on this device" : L"Multiple threats detected",
+                         snapshot.openThreatCount == 1 ? L"Finding detected on this device" : L"Multiple findings detected",
                          BuildThreatNotificationBody(snapshot), NIIF_WARNING);
   } else if (notifyService) {
     ShowTrayNotification(context, L"Protection service needs attention", BuildServiceNotificationBody(snapshot),
@@ -4675,7 +4845,7 @@ void RefreshSnapshot(UiContext& context) {
     }
     SetWindowTextSafe(context.detailsCard, detailsText);
     SetWindowTextSafe(context.metricThreats,
-                      BuildMetricCardText(L"Open threats", std::to_wstring(context.snapshot.openThreatCount),
+                      BuildMetricCardText(L"Open findings", std::to_wstring(context.snapshot.openThreatCount),
                                           context.snapshot.openThreatCount == 1 ? L"1 unresolved detection"
                                                                                : std::to_wstring(context.snapshot.openThreatCount) + L" unresolved detections"));
     SetWindowTextSafe(context.metricQuarantine,
@@ -4713,7 +4883,7 @@ void RefreshSnapshot(UiContext& context) {
     UpdatePageChrome(context);
     SetWindowTextSafe(context.summaryCard, L"Unable to load local protection state.");
     SetWindowTextSafe(context.detailsCard, antivirus::agent::Utf8ToWide(error.what()));
-    SetWindowTextSafe(context.metricThreats, BuildMetricCardText(L"Open threats", L"unavailable"));
+    SetWindowTextSafe(context.metricThreats, BuildMetricCardText(L"Open findings", L"unavailable"));
     SetWindowTextSafe(context.metricQuarantine, BuildMetricCardText(L"Quarantine", L"unavailable"));
     SetWindowTextSafe(context.metricService, BuildMetricCardText(L"Protection service", L"unknown"));
     SetWindowTextSafe(context.metricSync, BuildMetricCardText(L"Last check-in", L"unknown"));
@@ -4819,7 +4989,7 @@ void RunScanAsync(HWND hwnd, UiContext& context, const ScanPreset preset, const 
           source = L"endpoint-ui.quick-scan";
           break;
         case ScanPreset::Full:
-          targets = antivirus::agent::BuildFullScanTargets();
+          targets = {std::filesystem::path(LR"(C:\)")};
           source = L"endpoint-ui.full-scan";
           break;
         case ScanPreset::Folder:
@@ -4862,9 +5032,9 @@ void RunScanAsync(HWND hwnd, UiContext& context, const ScanPreset preset, const 
 
       std::wstringstream summary;
       if (result.findings.empty()) {
-        summary << scanLabel << L" complete. No threats were found.";
+        summary << scanLabel << L" complete. No findings were found.";
       } else {
-        summary << scanLabel << L" complete. " << result.findings.size() << L" threat(s) blocked during "
+        summary << scanLabel << L" complete. " << result.findings.size() << L" finding(s) blocked during "
                 << result.targetCount << L" target(s) checked.";
         if (result.remediationFailed) {
           summary << L" Some remediation actions failed and need review.";
@@ -5222,6 +5392,54 @@ void HandleWebViewMessage(UiContext& context, const std::wstring& message) {
   if (_wcsicmp(action.c_str(), L"refresh") == 0) {
     RefreshSnapshot(context);
     PublishWebViewState(context);
+    return;
+  }
+
+  if (_wcsicmp(action.c_str(), L"setQuickScanInterval") == 0 ||
+      _wcsicmp(action.c_str(), L"setFullScanInterval") == 0) {
+    if (!RequireAuthorizedLocalAction(context.hwnd, antivirus::agent::LocalAction::EditExclusions, kWindowTitle)) {
+      return;
+    }
+
+    const auto minutesText = GetQueryValue(pairs, L"minutes");
+    const auto quickAction = _wcsicmp(action.c_str(), L"setQuickScanInterval") == 0;
+    const auto parsedMinutes = quickAction ? ParseBoundedInteger(minutesText, 15, 10080)
+                                           : ParseBoundedInteger(minutesText, 60, 43200);
+    if (!parsedMinutes.has_value()) {
+      MessageBoxW(context.hwnd,
+                  quickAction ? L"Quick scan interval must be a whole number between 15 and 10080 minutes."
+                              : L"Full scan interval must be a whole number between 60 and 43200 minutes.",
+                  kWindowTitle, MB_OK | MB_ICONWARNING);
+      return;
+    }
+
+    auto scheduleSettings = antivirus::agent::LoadConfiguredScanScheduleSettings();
+    if (quickAction) {
+      scheduleSettings.quickScanIntervalMinutes = *parsedMinutes;
+    } else {
+      scheduleSettings.fullScanIntervalMinutes = *parsedMinutes;
+    }
+
+    if (!antivirus::agent::SaveConfiguredScanScheduleSettings(scheduleSettings)) {
+      MessageBoxW(context.hwnd, L"Fenrir could not save the updated scan schedule settings.", kWindowTitle,
+                  MB_OK | MB_ICONERROR);
+      return;
+    }
+
+    const auto restarted = antivirus::agent::RestartAgentService();
+    context.config = antivirus::agent::LoadAgentConfigForModule(nullptr);
+    RefreshSnapshot(context);
+    PublishWebViewState(context);
+
+    std::wstringstream summary;
+    summary << (quickAction ? L"Quick scan schedule updated: every " : L"Full scan schedule updated: every ")
+            << *parsedMinutes << L" minute(s).";
+    if (restarted) {
+      summary << L"\r\nProtection service restarted to apply the new schedule immediately.";
+    } else {
+      summary << L"\r\nSchedule was saved, but Fenrir could not restart the protection service automatically.";
+    }
+    MessageBoxW(context.hwnd, summary.str().c_str(), kWindowTitle, MB_OK | (restarted ? MB_ICONINFORMATION : MB_ICONWARNING));
     return;
   }
 
@@ -5749,7 +5967,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       context->metricSync = CreateCard(hwnd, IDC_METRIC_SYNC);
       context->navDashboardButton = CreateWindowW(L"BUTTON", L"Home", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                   0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_DASHBOARD), nullptr, nullptr);
-      context->navThreatsButton = CreateWindowW(L"BUTTON", L"Threats", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+      context->navThreatsButton = CreateWindowW(L"BUTTON", L"Findings", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_THREATS), nullptr, nullptr);
       context->navQuarantineButton = CreateWindowW(L"BUTTON", L"Quarantine", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_NAV_QUARANTINE), nullptr, nullptr);
@@ -6071,7 +6289,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       if (context != nullptr && payload != nullptr) {
         SetPatchActionRunning(*context, false, payload->summary, payload->targetId, payload->searchOnly);
         RefreshSnapshot(*context);
-        if (IsWindowInteractive(*context)) {
+        if (IsWindowInteractive(*context) && !payload->suppressDialog) {
           MessageBoxW(hwnd, payload->summary.c_str(), kWindowTitle,
                       MB_OK | (payload->informational ? MB_ICONINFORMATION : MB_ICONWARNING));
         } else {
@@ -6155,6 +6373,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
   if (launchOptions.applyExclusionsMode) {
     const auto exitCode = ApplyExclusionsFromLaunchOptions(launchOptions);
+    OleUninitialize();
+    return exitCode;
+  }
+
+  if (launchOptions.applySoftwareUpdateMode) {
+    const auto exitCode = ApplySoftwareUpdateFromLaunchOptions(launchOptions);
     OleUninitialize();
     return exitCode;
   }

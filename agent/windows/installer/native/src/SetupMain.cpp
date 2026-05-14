@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
@@ -40,6 +41,7 @@ constexpr wchar_t kMinifilterDefaultInstanceName[] = L"AntivirusMinifilter Insta
 constexpr wchar_t kMinifilterDefaultInstanceAltitude[] = L"370030";
 constexpr wchar_t kAgentRegistryRoot[] = L"SOFTWARE\\FenrirAgent";
 constexpr wchar_t kControlPlaneBaseUrlValueName[] = L"ControlPlaneBaseUrl";
+constexpr wchar_t kDefaultControlPlaneBaseUrl[] = L"https://api.fenrir-security.co.uk";
 constexpr wchar_t kArpRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\FenrirEndpoint";
 constexpr wchar_t kRunRegistryRoot[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValueName[] = L"FenrirEndpointClient";
@@ -78,19 +80,20 @@ constexpr UINT kInstallerStatusMessage = WM_APP + 2;
 constexpr UINT kInstallerCompleteMessage = WM_APP + 3;
 
 enum : int {
-  IDC_TITLE = 1001,
-  IDC_SUBTITLE = 1002,
-  IDC_PATH_LABEL = 1003,
-  IDC_PATH_VALUE = 1004,
-  IDC_CONTROL_PLANE_LABEL = 1005,
-  IDC_CONTROL_PLANE_EDIT = 1006,
+  IDC_EYEBROW = 1001,
+  IDC_TITLE = 1002,
+  IDC_SUBTITLE = 1003,
+  IDC_PATH_LABEL = 1004,
+  IDC_PATH_VALUE = 1005,
   IDC_STATUS = 1007,
   IDC_PROGRESS = 1008,
   IDC_LOG = 1009,
   IDC_PRIMARY_BUTTON = 1010,
   IDC_UNINSTALL_BUTTON = 1011,
   IDC_OPEN_FOLDER_BUTTON = 1012,
-  IDC_CLOSE_BUTTON = 1013
+  IDC_CLOSE_BUTTON = 1013,
+  IDC_BADGE = 1014,
+  IDC_LOG_TITLE = 1015
 };
 
 struct LogMessagePayload {
@@ -112,12 +115,11 @@ struct CompletionPayload {
 struct UiContext {
   HINSTANCE instance{};
   HWND hwnd{};
+  HWND eyebrowLabel{};
   HWND titleLabel{};
   HWND subtitleLabel{};
   HWND pathLabel{};
   HWND pathValue{};
-  HWND controlPlaneLabel{};
-  HWND controlPlaneEdit{};
   HWND statusLabel{};
   HWND progressBar{};
   HWND logEdit{};
@@ -125,8 +127,16 @@ struct UiContext {
   HWND uninstallButton{};
   HWND openFolderButton{};
   HWND closeButton{};
+  HWND badgeLabel{};
+  HWND logTitleLabel{};
   HFONT titleFont{};
+  HFONT headingFont{};
   HFONT bodyFont{};
+  HFONT smallFont{};
+  HBRUSH windowBrush{};
+  HBRUSH surfaceBrush{};
+  HBRUSH detailBrush{};
+  HICON heroIcon{};
   std::filesystem::path installRoot;
   std::filesystem::path setupPath;
   std::wstring controlPlaneBaseUrl;
@@ -153,6 +163,75 @@ std::wstring QuotePath(const std::filesystem::path& path) {
   return L"\"" + path.wstring() + L"\"";
 }
 
+COLORREF DarkTextColor() { return RGB(235, 241, 252); }
+COLORREF MutedTextColor() { return RGB(145, 159, 185); }
+COLORREF AccentBlue() { return RGB(49, 123, 242); }
+COLORREF AccentBlueDark() { return RGB(153, 206, 255); }
+COLORREF AccentGreen() { return RGB(31, 182, 123); }
+COLORREF AccentGreenDark() { return RGB(173, 247, 213); }
+COLORREF AccentAmber() { return RGB(224, 151, 39); }
+COLORREF AccentAmberDark() { return RGB(255, 218, 158); }
+COLORREF AccentRed() { return RGB(214, 72, 112); }
+COLORREF WindowBackgroundColor() { return RGB(8, 12, 18); }
+COLORREF SurfaceColor() { return RGB(14, 18, 26); }
+COLORREF DetailColor() { return RGB(12, 16, 23); }
+COLORREF BorderColor() { return RGB(34, 45, 62); }
+
+COLORREF AdjustColor(const COLORREF color, const int delta) {
+  const auto adjustChannel = [delta](const BYTE channel) -> BYTE {
+    return static_cast<BYTE>(std::clamp(static_cast<int>(channel) + delta, 0, 255));
+  };
+
+  return RGB(adjustChannel(GetRValue(color)), adjustChannel(GetGValue(color)), adjustChannel(GetBValue(color)));
+}
+
+RECT ControlRectInClient(HWND parent, HWND control) {
+  RECT rect{};
+  if (parent == nullptr || control == nullptr) {
+    return rect;
+  }
+
+  GetWindowRect(control, &rect);
+  MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<LPPOINT>(&rect), 2);
+  return rect;
+}
+
+COLORREF ResolveBadgeFill(const UiContext& context) {
+  if (context.busy) {
+    return RGB(52, 74, 116);
+  }
+  if (context.installed) {
+    return RGB(27, 68, 55);
+  }
+  return RGB(30, 52, 86);
+}
+
+void DrawRoundedPanel(HDC hdc, const RECT& rect, const COLORREF fillColor, const COLORREF borderColor,
+                      const int radius = 12) {
+  HBRUSH brush = CreateSolidBrush(fillColor);
+  HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
+  const auto oldPen = SelectObject(hdc, pen);
+  const auto oldBrush = SelectObject(hdc, brush);
+  RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+  SelectObject(hdc, oldBrush);
+  SelectObject(hdc, oldPen);
+  DeleteObject(brush);
+  DeleteObject(pen);
+}
+
+void ApplyDarkWindowFrame(HWND hwnd) {
+  if (hwnd == nullptr) {
+    return;
+  }
+
+  const BOOL darkMode = TRUE;
+  DwmSetWindowAttribute(hwnd, 20, &darkMode, sizeof(darkMode));
+  const auto captionColor = WindowBackgroundColor();
+  DwmSetWindowAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
+  const auto textColor = DarkTextColor();
+  DwmSetWindowAttribute(hwnd, 36, &textColor, sizeof(textColor));
+}
+
 void AppendLog(HWND edit, const std::wstring& line) {
   if (edit == nullptr) {
     return;
@@ -163,15 +242,139 @@ void AppendLog(HWND edit, const std::wstring& line) {
   SendMessageW(edit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(message.c_str()));
 }
 
-std::wstring ReadEditText(HWND edit) {
-  if (edit == nullptr) {
-    return {};
+COLORREF ResolveStaticTextColor(const UiContext& context, HWND control) {
+  if (control == context.eyebrowLabel) {
+    return AccentBlueDark();
+  }
+  if (control == context.subtitleLabel || control == context.pathLabel || control == context.logTitleLabel) {
+    return MutedTextColor();
+  }
+  if (control == context.pathValue) {
+    return AccentBlueDark();
+  }
+  if (control == context.badgeLabel) {
+    return DarkTextColor();
+  }
+  if (control == context.statusLabel) {
+    return context.busy ? AccentBlueDark() : DarkTextColor();
+  }
+  return DarkTextColor();
+}
+
+HBRUSH ResolveStaticBrush(UiContext& context, HWND control) {
+  if (control == context.logTitleLabel || control == context.statusLabel || control == context.progressBar) {
+    return context.surfaceBrush;
+  }
+  if (control == context.logEdit) {
+    return context.detailBrush;
+  }
+  return context.surfaceBrush;
+}
+
+COLORREF ResolveButtonFill(const UiContext& context, const int controlId, const UINT itemState) {
+  const auto disabled = (itemState & ODS_DISABLED) != 0;
+  const auto pressed = (itemState & ODS_SELECTED) != 0;
+
+  COLORREF base = RGB(43, 52, 68);
+  switch (controlId) {
+    case IDC_PRIMARY_BUTTON:
+      base = context.installed ? RGB(34, 119, 94) : RGB(47, 102, 184);
+      break;
+    case IDC_UNINSTALL_BUTTON:
+      base = RGB(168, 63, 92);
+      break;
+    case IDC_OPEN_FOLDER_BUTTON:
+      base = RGB(54, 123, 162);
+      break;
+    case IDC_CLOSE_BUTTON:
+      base = RGB(43, 52, 68);
+      break;
+    default:
+      break;
   }
 
-  const auto length = GetWindowTextLengthW(edit);
-  std::wstring value(static_cast<std::size_t>(length), L'\0');
-  GetWindowTextW(edit, value.data(), length + 1);
-  return value;
+  if (disabled) {
+    return RGB(31, 37, 48);
+  }
+  if (pressed) {
+    return AdjustColor(base, -24);
+  }
+  return base;
+}
+
+COLORREF ResolveButtonTextColor(const UINT itemState) {
+  return (itemState & ODS_DISABLED) != 0 ? RGB(112, 124, 144) : RGB(244, 247, 255);
+}
+
+void DrawOwnerButton(const DRAWITEMSTRUCT* draw, UiContext& context) {
+  RECT rect = draw->rcItem;
+  const auto fillColor = ResolveButtonFill(context, static_cast<int>(draw->CtlID), draw->itemState);
+  const auto borderColor = AdjustColor(fillColor, 16);
+
+  DrawRoundedPanel(draw->hDC, rect, fillColor, borderColor, 10);
+
+  RECT accentRect{rect.left + 10, rect.top + 9, rect.left + 16, rect.bottom - 9};
+  HBRUSH accentBrush = CreateSolidBrush(AdjustColor(fillColor, 22));
+  FillRect(draw->hDC, &accentRect, accentBrush);
+  DeleteObject(accentBrush);
+
+  wchar_t text[128]{};
+  GetWindowTextW(draw->hwndItem, text, static_cast<int>(std::size(text)));
+  SetBkMode(draw->hDC, TRANSPARENT);
+  SetTextColor(draw->hDC, ResolveButtonTextColor(draw->itemState));
+  SelectObject(draw->hDC, context.bodyFont);
+  RECT textRect = rect;
+  textRect.left += 24;
+  DrawTextW(draw->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  if ((draw->itemState & ODS_FOCUS) != 0) {
+    RECT focusRect = rect;
+    InflateRect(&focusRect, -4, -4);
+    DrawFocusRect(draw->hDC, &focusRect);
+  }
+}
+
+void PaintInstallerChrome(HWND hwnd, UiContext& context) {
+  PAINTSTRUCT paint{};
+  const auto hdc = BeginPaint(hwnd, &paint);
+
+  RECT client{};
+  GetClientRect(hwnd, &client);
+  FillRect(hdc, &client, context.windowBrush);
+
+  const int padding = 20;
+  const int width = client.right - client.left;
+  const int heroHeight = 152;
+  const int statusHeight = 84;
+  const int buttonTop = client.bottom - 62;
+
+  const RECT heroRect{padding, padding, width - padding, padding + heroHeight};
+  const RECT statusRect{padding, heroRect.bottom + 16, width - padding, heroRect.bottom + 16 + statusHeight};
+  const RECT logRect{padding, statusRect.bottom + 16, width - padding, buttonTop - 14};
+
+  DrawRoundedPanel(hdc, heroRect, SurfaceColor(), BorderColor(), 14);
+  DrawRoundedPanel(hdc, statusRect, SurfaceColor(), BorderColor(), 14);
+  DrawRoundedPanel(hdc, logRect, DetailColor(), BorderColor(), 14);
+
+  if (context.heroIcon != nullptr) {
+    DrawIconEx(hdc, heroRect.left + 22, heroRect.top + 24, context.heroIcon, 48, 48, 0, nullptr, DI_NORMAL);
+  }
+
+  const RECT badgeRect = ControlRectInClient(hwnd, context.badgeLabel);
+  if (badgeRect.right > badgeRect.left) {
+    DrawRoundedPanel(hdc, badgeRect, ResolveBadgeFill(context), AdjustColor(ResolveBadgeFill(context), 18), 16);
+  }
+
+  const RECT progressRect = ControlRectInClient(hwnd, context.progressBar);
+  if (progressRect.right > progressRect.left) {
+    RECT glowRect = progressRect;
+    InflateRect(&glowRect, 0, 4);
+    HBRUSH glowBrush = CreateSolidBrush(RGB(18, 24, 34));
+    FillRect(hdc, &glowRect, glowBrush);
+    DeleteObject(glowBrush);
+  }
+
+  EndPaint(hwnd, &paint);
 }
 
 std::wstring TrimCopy(const std::wstring& value) {
@@ -542,8 +745,6 @@ bool RegisterEndpointAutoStart(const std::filesystem::path& installRoot);
 bool RemoveEndpointAutoStart();
 DWORD EstimateInstallSizeKb(const std::filesystem::path& installRoot);
 bool WriteArpEntry(const std::filesystem::path& installRoot);
-std::wstring QueryConfiguredControlPlaneUrl();
-bool ValidateControlPlaneUrl(const std::wstring& value, std::wstring* errorMessage);
 bool PersistControlPlaneUrl(const std::wstring& value, std::wstring* errorMessage);
 void PostLog(HWND hwnd, const std::wstring& text);
 void PostStatus(HWND hwnd, const std::wstring& text, int progress);
@@ -623,45 +824,13 @@ bool DeleteRegistryTree(HKEY root, const wchar_t* subKey) {
   return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND;
 }
 
-std::wstring QueryConfiguredControlPlaneUrl() {
-  const auto persistedValue = ReadRegistryString(HKEY_LOCAL_MACHINE, kAgentRegistryRoot, kControlPlaneBaseUrlValueName);
-  if (!persistedValue.empty()) {
-    return persistedValue;
-  }
-
-  const auto environmentValue = _wgetenv(L"ANTIVIRUS_CONTROL_PLANE_URL");
-  if (environmentValue != nullptr && *environmentValue != L'\0') {
-    return environmentValue;
-  }
-
-  return L"http://127.0.0.1:4000";
-}
-
-bool ValidateControlPlaneUrl(const std::wstring& value, std::wstring* errorMessage) {
-  if (value.empty()) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"Enter the control plane URL for this endpoint.";
-    }
-    return false;
-  }
-
-  if (value.rfind(L"http://", 0) != 0 && value.rfind(L"https://", 0) != 0) {
-    if (errorMessage != nullptr) {
-      *errorMessage = L"The control plane URL must start with http:// or https://";
-    }
-    return false;
-  }
-
-  return true;
-}
-
 bool PersistControlPlaneUrl(const std::wstring& value, std::wstring* errorMessage) {
   if (WriteRegistryString(HKEY_LOCAL_MACHINE, kAgentRegistryRoot, kControlPlaneBaseUrlValueName, value)) {
     return true;
   }
 
   if (errorMessage != nullptr) {
-    *errorMessage = L"Could not save the configured control plane URL.";
+    *errorMessage = L"Could not save the managed update endpoint configuration.";
   }
   return false;
 }
@@ -2141,7 +2310,8 @@ void RunInstallOrRepair(HWND hwnd, UiContext* context, const bool repair) {
     }
   }
 
-  PostLog(hwnd, L"Saving control plane URL: " + context->controlPlaneBaseUrl);
+  context->controlPlaneBaseUrl = kDefaultControlPlaneBaseUrl;
+  PostLog(hwnd, L"Applying managed update endpoint configuration.");
   if (!PersistControlPlaneUrl(context->controlPlaneBaseUrl, &errorMessage)) {
     PostComplete(hwnd, false, false, false, errorMessage);
     return;
@@ -2376,49 +2546,76 @@ int RunCleanupMode(int argc, wchar_t* argv[]) {
 void RefreshUi(UiContext& context) {
   context.installed = IsInstalledAt(context.installRoot);
   SetWindowTextW(context.pathValue, context.installRoot.c_str());
+  SetWindowTextW(context.eyebrowLabel, L"FENRIR  PROTECTION PLATFORM");
   SetWindowTextW(context.statusLabel,
-                 context.installed ? L"Existing installation detected. You can repair it from this window."
-                                  : L"Ready to install Fenrir Endpoint on this device.");
-  SetWindowTextW(context.primaryButton, context.installed ? L"Repair" : L"Install");
-  ShowWindow(context.uninstallButton, SW_HIDE);
+                 context.busy
+                     ? L"Deployment is running. Fenrir is staging service, client, runtime, and protection assets."
+                     : (context.installed ? L"Existing installation detected. You can repair or remove it from here."
+                                          : L"Ready to deploy Fenrir Endpoint on this device."));
+  SetWindowTextW(context.primaryButton, context.installed ? L"Repair deployment" : L"Install protection");
+  SetWindowTextW(context.badgeLabel, context.busy ? L"Working" : (context.installed ? L"Installed" : L"Ready"));
+  ShowWindow(context.uninstallButton, context.installed ? SW_SHOW : SW_HIDE);
   EnableWindow(context.primaryButton, !context.busy);
+  EnableWindow(context.uninstallButton, context.installed && !context.busy);
   EnableWindow(context.closeButton, !context.busy);
   EnableWindow(context.openFolderButton, !context.busy);
+  InvalidateRect(context.hwnd, nullptr, TRUE);
 }
 
 void LayoutControls(UiContext& context) {
   RECT client{};
   GetClientRect(context.hwnd, &client);
 
-  const int padding = 18;
+  const int padding = 20;
   const int width = client.right - client.left;
   const int contentWidth = width - (padding * 2);
+  const int heroHeight = 152;
+  const int statusHeight = 84;
+  const int buttonHeight = 38;
+  const int buttonTop = client.bottom - 62;
+  const RECT heroRect{padding, padding, width - padding, padding + heroHeight};
+  const RECT statusRect{padding, heroRect.bottom + 16, width - padding, heroRect.bottom + 16 + statusHeight};
+  const RECT logRect{padding, statusRect.bottom + 16, width - padding, buttonTop - 14};
 
-  MoveWindow(context.titleLabel, padding, padding, contentWidth, 34, TRUE);
-  MoveWindow(context.subtitleLabel, padding, padding + 38, contentWidth, 42, TRUE);
-  MoveWindow(context.pathLabel, padding, padding + 88, 120, 22, TRUE);
-  MoveWindow(context.pathValue, padding + 126, padding + 84, contentWidth - 126, 28, TRUE);
-  MoveWindow(context.controlPlaneLabel, padding, padding + 122, 120, 22, TRUE);
-  MoveWindow(context.controlPlaneEdit, padding + 126, padding + 118, contentWidth - 126, 28, TRUE);
-  MoveWindow(context.statusLabel, padding, padding + 156, contentWidth, 24, TRUE);
-  MoveWindow(context.progressBar, padding, padding + 188, contentWidth, 18, TRUE);
-  MoveWindow(context.logEdit, padding, padding + 216, contentWidth, 206, TRUE);
+  MoveWindow(context.eyebrowLabel, heroRect.left + 84, heroRect.top + 22, contentWidth - 220, 20, TRUE);
+  MoveWindow(context.titleLabel, heroRect.left + 84, heroRect.top + 42, contentWidth - 240, 38, TRUE);
+  MoveWindow(context.subtitleLabel, heroRect.left + 84, heroRect.top + 82, contentWidth - 240, 40, TRUE);
+  MoveWindow(context.badgeLabel, heroRect.right - 118, heroRect.top + 26, 90, 28, TRUE);
+  MoveWindow(context.pathLabel, heroRect.left + 24, heroRect.bottom - 44, 120, 18, TRUE);
+  MoveWindow(context.pathValue, heroRect.left + 24, heroRect.bottom - 24, contentWidth - 48, 18, TRUE);
 
-  const int buttonTop = padding + 434;
-  MoveWindow(context.primaryButton, padding, buttonTop, 140, 36, TRUE);
-  MoveWindow(context.uninstallButton, padding + 152, buttonTop, 140, 36, FALSE);
-  MoveWindow(context.openFolderButton, padding + 304, buttonTop, 160, 36, TRUE);
-  MoveWindow(context.closeButton, width - padding - 120, buttonTop, 120, 36, TRUE);
+  MoveWindow(context.statusLabel, statusRect.left + 24, statusRect.top + 18, contentWidth - 48, 22, TRUE);
+  MoveWindow(context.progressBar, statusRect.left + 24, statusRect.top + 48, contentWidth - 48, 12, TRUE);
+
+  MoveWindow(context.logTitleLabel, logRect.left + 24, logRect.top + 16, contentWidth - 48, 18, TRUE);
+  MoveWindow(context.logEdit, logRect.left + 20, logRect.top + 42, contentWidth - 40, logRect.bottom - logRect.top - 62,
+             TRUE);
+
+  MoveWindow(context.primaryButton, padding, buttonTop, 168, buttonHeight, TRUE);
+  MoveWindow(context.uninstallButton, padding + 180, buttonTop, 132, buttonHeight, TRUE);
+  MoveWindow(context.openFolderButton, padding + 324, buttonTop, 160, buttonHeight, TRUE);
+  MoveWindow(context.closeButton, width - padding - 120, buttonTop, 120, buttonHeight, TRUE);
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
+    case WM_ERASEBKGND:
+      return 1;
+
+    case WM_PAINT: {
+      if (auto* context = GetContext(hwnd)) {
+        PaintInstallerChrome(hwnd, *context);
+        return 0;
+      }
+      break;
+    }
+
     case WM_CREATE: {
       auto* context = new UiContext{};
       context->instance = reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance;
       context->hwnd = hwnd;
       context->installRoot = QueryInstallRoot();
-      context->controlPlaneBaseUrl = QueryConfiguredControlPlaneUrl();
+      context->controlPlaneBaseUrl = kDefaultControlPlaneBaseUrl;
 
       std::wstring setupPath(MAX_PATH, L'\0');
       const auto written = GetModuleFileNameW(nullptr, setupPath.data(), static_cast<DWORD>(setupPath.size()));
@@ -2432,67 +2629,126 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       wcscpy_s(metrics.lfMessageFont.lfFaceName, L"Segoe UI");
       context->bodyFont = CreateFontIndirectW(&metrics.lfMessageFont);
       auto titleFont = metrics.lfMessageFont;
-      titleFont.lfHeight = 28;
+      titleFont.lfHeight = 30;
       titleFont.lfWeight = FW_BOLD;
       wcscpy_s(titleFont.lfFaceName, L"Segoe UI Variable Display Semibold");
       context->titleFont = CreateFontIndirectW(&titleFont);
+      auto headingFont = metrics.lfMessageFont;
+      headingFont.lfHeight = 18;
+      headingFont.lfWeight = FW_SEMIBOLD;
+      wcscpy_s(headingFont.lfFaceName, L"Segoe UI Semibold");
+      context->headingFont = CreateFontIndirectW(&headingFont);
+      auto smallFont = metrics.lfMessageFont;
+      smallFont.lfHeight = 14;
+      smallFont.lfWeight = FW_SEMIBOLD;
+      wcscpy_s(smallFont.lfFaceName, L"Segoe UI Semibold");
+      context->smallFont = CreateFontIndirectW(&smallFont);
+      context->windowBrush = CreateSolidBrush(WindowBackgroundColor());
+      context->surfaceBrush = CreateSolidBrush(SurfaceColor());
+      context->detailBrush = CreateSolidBrush(DetailColor());
+      context->heroIcon = static_cast<HICON>(LoadImageW(context->instance, MAKEINTRESOURCEW(IDI_SETUP_ICON), IMAGE_ICON,
+                                                        48, 48, LR_DEFAULTCOLOR));
 
+      context->eyebrowLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_EYEBROW), nullptr, nullptr);
       context->titleLabel = CreateWindowW(L"STATIC", L"Fenrir Endpoint Setup", WS_CHILD | WS_VISIBLE,
                                           0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_TITLE), nullptr, nullptr);
       context->subtitleLabel = CreateWindowW(
           L"STATIC",
-          L"Install, repair, or remove the Fenrir Endpoint service, local protection client, and signature bundle.",
+          L"Install, repair, or remove the Fenrir Endpoint service, protection client, signature bundle, and runtime dependencies.",
           WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_SUBTITLE), nullptr, nullptr);
       context->pathLabel = CreateWindowW(L"STATIC", L"Install path", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
                                          reinterpret_cast<HMENU>(IDC_PATH_LABEL), nullptr, nullptr);
-      context->pathValue = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+      context->pathValue = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_PATHELLIPSIS, 0, 0, 0, 0, hwnd,
                                          reinterpret_cast<HMENU>(IDC_PATH_VALUE), nullptr, nullptr);
-      context->controlPlaneLabel = CreateWindowW(L"STATIC", L"Control plane", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
-                                                 reinterpret_cast<HMENU>(IDC_CONTROL_PLANE_LABEL), nullptr, nullptr);
-      context->controlPlaneEdit =
-          CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", context->controlPlaneBaseUrl.c_str(),
-                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_CONTROL_PLANE_EDIT), nullptr, nullptr);
       context->statusLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
                                            reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
       context->progressBar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
                                              0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_PROGRESS), nullptr, nullptr);
-      context->logEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE |
+      context->badgeLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_BADGE), nullptr, nullptr);
+      context->logTitleLabel = CreateWindowW(L"STATIC", L"Deployment log", WS_CHILD | WS_VISIBLE,
+                                             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOG_TITLE), nullptr, nullptr);
+      context->logEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE |
                                                                   ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
                                          0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_LOG), nullptr, nullptr);
-      context->primaryButton = CreateWindowW(L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+      context->primaryButton = CreateWindowW(L"BUTTON", L"Install", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                              reinterpret_cast<HMENU>(IDC_PRIMARY_BUTTON), nullptr, nullptr);
-      context->uninstallButton = CreateWindowW(L"BUTTON", L"Uninstall", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+      context->uninstallButton = CreateWindowW(L"BUTTON", L"Uninstall", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                                reinterpret_cast<HMENU>(IDC_UNINSTALL_BUTTON), nullptr, nullptr);
-      context->openFolderButton = CreateWindowW(L"BUTTON", L"Open install folder", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+      context->openFolderButton = CreateWindowW(L"BUTTON", L"Open install folder", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0,
                                                 hwnd, reinterpret_cast<HMENU>(IDC_OPEN_FOLDER_BUTTON), nullptr, nullptr);
-      context->closeButton = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+      context->closeButton = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                            reinterpret_cast<HMENU>(IDC_CLOSE_BUTTON), nullptr, nullptr);
 
-      const std::array<HWND, 11> controls{context->titleLabel,        context->subtitleLabel, context->pathLabel,
-                                          context->pathValue,         context->controlPlaneLabel,
-                                          context->controlPlaneEdit,  context->statusLabel,   context->logEdit,
-                                          context->primaryButton,     context->uninstallButton,
-                                          context->openFolderButton};
+      const std::array<HWND, 12> controls{context->eyebrowLabel,     context->titleLabel,      context->subtitleLabel,
+                                          context->pathLabel,        context->pathValue,       context->statusLabel,
+                                          context->logEdit,          context->primaryButton,   context->uninstallButton,
+                                          context->openFolderButton, context->closeButton,     context->logTitleLabel};
       for (const auto control : controls) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(context->bodyFont), TRUE);
       }
       SendMessageW(context->titleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->titleFont), TRUE);
+      SendMessageW(context->badgeLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->smallFont), TRUE);
+      SendMessageW(context->eyebrowLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->smallFont), TRUE);
+      SendMessageW(context->logTitleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(context->headingFont), TRUE);
       SendMessageW(context->progressBar, PBM_SETRANGE32, 0, 100);
       SendMessageW(context->progressBar, PBM_SETPOS, 0, 0);
-      ShowWindow(context->uninstallButton, SW_HIDE);
+      SendMessageW(context->progressBar, PBM_SETBKCOLOR, 0, static_cast<LPARAM>(DetailColor()));
+      SendMessageW(context->progressBar, PBM_SETBARCOLOR, 0, static_cast<LPARAM>(AccentBlue()));
+      SendMessageW(context->logEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(12, 12));
 
       LayoutControls(*context);
       RefreshUi(*context);
       AppendLog(context->logEdit, L"Setup initialized.");
+      ApplyDarkWindowFrame(hwnd);
       return 0;
     }
 
     case WM_SIZE: {
       if (auto* context = GetContext(hwnd)) {
         LayoutControls(*context);
+        InvalidateRect(hwnd, nullptr, TRUE);
       }
       return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+      auto* context = GetContext(hwnd);
+      auto* control = reinterpret_cast<HWND>(lParam);
+      auto hdc = reinterpret_cast<HDC>(wParam);
+      if (context == nullptr || control == nullptr) {
+        break;
+      }
+
+      SetBkMode(hdc, TRANSPARENT);
+      SetTextColor(hdc, ResolveStaticTextColor(*context, control));
+      return reinterpret_cast<INT_PTR>(ResolveStaticBrush(*context, control));
+    }
+
+    case WM_CTLCOLOREDIT: {
+      auto* context = GetContext(hwnd);
+      auto* control = reinterpret_cast<HWND>(lParam);
+      auto hdc = reinterpret_cast<HDC>(wParam);
+      if (context == nullptr || control != context->logEdit) {
+        break;
+      }
+
+      SetBkMode(hdc, OPAQUE);
+      SetBkColor(hdc, DetailColor());
+      SetTextColor(hdc, DarkTextColor());
+      return reinterpret_cast<INT_PTR>(context->detailBrush);
+    }
+
+    case WM_DRAWITEM: {
+      auto* context = GetContext(hwnd);
+      auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+      if (context == nullptr || draw == nullptr || draw->CtlType != ODT_BUTTON) {
+        break;
+      }
+
+      DrawOwnerButton(draw, *context);
+      return TRUE;
     }
 
     case WM_COMMAND: {
@@ -2504,14 +2760,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       switch (LOWORD(wParam)) {
         case IDC_PRIMARY_BUTTON:
           if (!context->busy) {
-            const auto configuredControlPlaneUrl = TrimCopy(ReadEditText(context->controlPlaneEdit));
-            std::wstring validationMessage;
-            if (!ValidateControlPlaneUrl(configuredControlPlaneUrl, &validationMessage)) {
-              MessageBoxW(hwnd, validationMessage.c_str(), kWindowTitle, MB_OK | MB_ICONWARNING);
-              return 0;
-            }
-
-            context->controlPlaneBaseUrl = configuredControlPlaneUrl;
+            context->controlPlaneBaseUrl = kDefaultControlPlaneBaseUrl;
             context->busy = true;
             RefreshUi(*context);
             const auto repair = context->installed;
@@ -2593,11 +2842,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
     case WM_DESTROY: {
       if (auto* context = GetContext(hwnd)) {
+        if (context->heroIcon != nullptr) {
+          DestroyIcon(context->heroIcon);
+        }
         if (context->titleFont != nullptr) {
           DeleteObject(context->titleFont);
         }
+        if (context->headingFont != nullptr) {
+          DeleteObject(context->headingFont);
+        }
         if (context->bodyFont != nullptr) {
           DeleteObject(context->bodyFont);
+        }
+        if (context->smallFont != nullptr) {
+          DeleteObject(context->smallFont);
+        }
+        if (context->windowBrush != nullptr) {
+          DeleteObject(context->windowBrush);
+        }
+        if (context->surfaceBrush != nullptr) {
+          DeleteObject(context->surfaceBrush);
+        }
+        if (context->detailBrush != nullptr) {
+          DeleteObject(context->detailBrush);
         }
         delete context;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -2649,7 +2916,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
   HWND hwnd = CreateWindowExW(0, kWindowClassName, kWindowTitle,
                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 760, 560,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 820, 620,
                               nullptr, nullptr, instance, nullptr);
   if (hwnd == nullptr) {
     if (argv != nullptr) {

@@ -10,7 +10,8 @@
 namespace antivirus::agent {
 
 struct AgentConfig {
-  std::wstring controlPlaneBaseUrl{L"http://127.0.0.1:4000"};
+  std::wstring controlPlaneBaseUrl{L"https://api.fenrir-security.co.uk"};
+  std::wstring signatureFeedToken{};
   std::filesystem::path installRootPath{};
   std::filesystem::path runtimeDatabasePath{std::filesystem::path(L"runtime") / L"agent-runtime.db"};
   std::filesystem::path stateFilePath{std::filesystem::path(L"runtime") / L"agent-state.ini"};
@@ -36,6 +37,10 @@ struct AgentConfig {
   std::wstring platformVersion{L"platform-0.1.0"};
   int syncIntervalSeconds{60};
   int syncIterations{1};
+  int scheduledQuickScanIntervalMinutes{1440};
+  int scheduledFullDriveScanIntervalMinutes{10080};
+  int liveThreatSweepIntervalMinutes{30};
+  int vulnerabilityAssessmentIntervalMinutes{240};
   int telemetryBatchSize{25};
   int realtimeBrokerRetrySeconds{5};
   int realtimeCoverageStartupTimeoutSeconds{30};
@@ -81,11 +86,18 @@ struct ScanExclusionEntry {
   bool dangerous{false};
 };
 
+struct ScanScheduleSettings {
+  int quickScanIntervalMinutes{1440};
+  int fullScanIntervalMinutes{10080};
+};
+
 AgentConfig LoadAgentConfig();
 AgentConfig LoadAgentConfigForModule(HMODULE moduleHandle);
 RuntimePathValidation ValidateRuntimePaths(const AgentConfig& config);
 std::vector<std::filesystem::path> LoadConfiguredScanExclusions();
 bool SaveConfiguredScanExclusions(const std::vector<std::filesystem::path>& exclusions);
+ScanScheduleSettings LoadConfiguredScanScheduleSettings();
+bool SaveConfiguredScanScheduleSettings(const ScanScheduleSettings& scheduleSettings);
 std::vector<ScanExclusionEntry> LoadConfiguredScanExclusionEntries();
 bool SaveConfiguredScanExclusionEntries(const std::vector<ScanExclusionEntry>& exclusions);
 std::wstring DescribeExclusionRisk(const std::filesystem::path& path);
