@@ -19,7 +19,9 @@ let package = Package(
             dependencies: [],
             linkerSettings: [
                 .linkedFramework("EndpointSecurity"),
-                .linkedFramework("Foundation")
+                .linkedFramework("Foundation"),
+                .linkedFramework("CoreServices"),
+                .linkedFramework("CryptoKit")
             ]
         ),
     ]
